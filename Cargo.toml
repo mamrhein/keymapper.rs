@@ -1,0 +1,33 @@
+[package]
+name = "keymapperd"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+active-win-pos-rs = "0.11" # active window tracking
+notify = "8" # cross-platform file watching
+parking_lot = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+toml = "1"
+
+
+# Linux-specific kernel input bindings
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"
+uinput = "0.1"
+
+# Modern macOS framework bindings (Corrected)
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
+objc2-core-graphics = "0.3"
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
+
+# Windows-specific system bindings
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader"
+] }
