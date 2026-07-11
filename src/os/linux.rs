@@ -8,12 +8,15 @@
 // $Revision$
 
 use std::sync::Arc;
-use parking_lot::RwLock;
-use crate::{mapping_cache::NativeAction, state::Lookup};
-use evdev::{Device, Key};
-use uinput::event::keyboard;
 
-pub(crate) fn start_mapping(lookup: Arc<RwLock<dyn Lookup>>) -> Result<(), Box<dyn std::error::Error>> {
+use evdev::{Device, Key};
+use parking_lot::RwLock;
+
+use crate::{mapping_cache::NativeAction, state::Lookup};
+
+pub(crate) fn start_mapping(
+    lookup: Arc<RwLock<dyn Lookup>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Dynamic path discovery should ideally replace this static file node
     let device_path = "/dev/input/event3";
     let mut raw_device = Device::open(device_path)?;
@@ -30,7 +33,8 @@ pub(crate) fn start_mapping(lookup: Arc<RwLock<dyn Lookup>>) -> Result<(), Box<d
     loop {
         for event in raw_device.fetch_events()? {
             if event.event_type() == evdev::EventType::KEY {
-                let code = event.code() as u32;
+                // event.code() returns u16 — matches NativeKey directly.
+                let code = event.code();
                 let value = event.value(); // 1 = Down, 0 = Up, 2 = Repeat
 
                 let guard = lookup.read();
@@ -42,20 +46,23 @@ pub(crate) fn start_mapping(lookup: Arc<RwLock<dyn Lookup>>) -> Result<(), Box<d
                 if let Some(action) = active_action {
                     match action {
                         NativeAction::RemapTo(target) => {
-                            let key: uinput::event::keyboard::Key = unsafe { std::mem::transmute(**target as i32) };
-                            if value == 1 { virtual_device.press(&key)?; }
-                            else if value == 0 { virtual_device.release(&key)?; }
+                            let key = Key::new(*target);
+                            if value == 1 {
+                                virtual_device.press(&key)?;
+                            } else if value == 0 {
+                                virtual_device.release(&key)?;
+                            }
                             virtual_device.synchronize()?;
                         }
                         NativeAction::Shortcut(targets) => {
                             if value == 1 {
-                                for t in *targets {
-                                    let key: uinput::event::keyboard::Key = unsafe { std::mem::transmute(*t as i32) };
+                                for t in targets.iter() {
+                                    let key = Key::new(*t);
                                     virtual_device.press(&key)?;
                                 }
                             } else if value == 0 {
                                 for t in targets.iter().rev() {
-                                    let key: uinput::event::keyboard::Key = unsafe { std::mem::transmute(*t as i32) };
+                                    let key = Key::new(*t);
                                     virtual_device.release(&key)?;
                                 }
                             }
@@ -64,9 +71,12 @@ pub(crate) fn start_mapping(lookup: Arc<RwLock<dyn Lookup>>) -> Result<(), Box<d
                     }
                 } else {
                     // Passthrough
-                    let key: uinput::event::keyboard::Key = unsafe { std::mem::transmute(code as i32) };
-                    if value == 1 { virtual_device.press(&key)?; }
-                    else if value == 0 { virtual_device.release(&key)?; }
+                    let key = Key::new(code);
+                    if value == 1 {
+                        virtual_device.press(&key)?;
+                    } else if value == 0 {
+                        virtual_device.release(&key)?;
+                    }
                     virtual_device.synchronize()?;
                 }
             }

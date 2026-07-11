@@ -174,12 +174,13 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     let context = unsafe { &*(user_info as *const TapContext) };
 
+    // CGKeyCode is u16 — matches NativeKey directly, no cast needed.
     let native_key = unsafe {
         CGEvent::integer_value_field(
             Some(event.as_ref()),
             CGEventField::KeyboardEventKeycode,
         )
-    } as u32;
+    } as CGKeyCode;
 
     let is_down = _type == CGEventType::KeyDown;
 
@@ -194,12 +195,11 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
         match action {
             NativeAction::RemapTo(target_code) => {
                 // Modify the existing event's keycode in place.
-                let target = *target_code as u32;
                 unsafe {
                     CGEvent::set_integer_value_field(
                         Some(event.as_ref()),
                         CGEventField::KeyboardEventKeycode,
-                        target as i64,
+                        *target_code as i64,
                     );
                 }
                 return event.as_ptr();
@@ -208,10 +208,9 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
                 let source = &context.source;
                 if is_down {
                     for code in target_codes.iter() {
-                        let c = *code;
                         if let Some(e) = CGEvent::new_keyboard_event(
                             Some(source),
-                            c as CGKeyCode,
+                            *code as CGKeyCode,
                             true,
                         ) {
                             CGEvent::post(
@@ -222,10 +221,9 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
                     }
                 } else {
                     for code in target_codes.iter().rev() {
-                        let c = *code as u32;
                         if let Some(e) = CGEvent::new_keyboard_event(
                             Some(source),
-                            c as CGKeyCode,
+                            *code as CGKeyCode,
                             false,
                         ) {
                             CGEvent::post(

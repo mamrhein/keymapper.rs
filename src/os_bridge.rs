@@ -7,11 +7,11 @@
 // $Source$
 // $Revision$
 
-use crate::config::AbstractKey;
+use crate::{config::AbstractKey, mapping_cache::NativeKey};
 
 /// Cross-platform abstraction function translating the universal enum keys
-/// to platform-specific system primitive codes at runtime compile-time check.
-pub fn abstract_to_native_code(key: &AbstractKey) -> u32 {
+/// to platform-specific system primitive codes at compile time.
+pub fn abstract_to_native_code(key: &AbstractKey) -> NativeKey {
     #[cfg(target_os = "windows")]
     {
         match key {

@@ -7,17 +7,17 @@
 // $Source$
 // $Revision$
 
-use crate::mapping_cache::{NativeAction, RuntimeLookupCache};
+use crate::mapping_cache::{NativeAction, NativeKey, RuntimeLookupCache};
 
 /// Minimal interface for OS event-loop callbacks and state managers.
 /// Deliberately small so that platform modules never learn about the
 /// internal structure of [`RuntimeState`].
 pub trait Lookup: Send + Sync {
     /// Best-effort lookup scoped to the given application name (lower-cased).
-    fn for_app(&self, app: &str, key: u32) -> Option<&NativeAction>;
+    fn for_app(&self, app: &str, key: NativeKey) -> Option<&NativeAction>;
 
     /// Global (application-agnostic) lookup.
-    fn global(&self, key: u32) -> Option<&NativeAction>;
+    fn global(&self, key: NativeKey) -> Option<&NativeAction>;
 
     /// Name of the currently foreground application.
     fn active_app(&self) -> &str;
@@ -47,14 +47,14 @@ impl RuntimeState {
 }
 
 impl Lookup for RuntimeState {
-    fn for_app(&self, app: &str, key: u32) -> Option<&NativeAction> {
+    fn for_app(&self, app: &str, key: NativeKey) -> Option<&NativeAction> {
         self.lookup_cache
             .process_map()
             .get(app)
             .and_then(|m| m.get(&key))
     }
 
-    fn global(&self, key: u32) -> Option<&NativeAction> {
+    fn global(&self, key: NativeKey) -> Option<&NativeAction> {
         self.lookup_cache.global_map().get(&key)
     }
 

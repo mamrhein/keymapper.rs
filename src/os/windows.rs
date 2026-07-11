@@ -10,19 +10,26 @@
 use std::{ptr::null_mut, sync::Arc};
 
 use parking_lot::RwLock;
-use windows_sys::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
+use windows_sys::Windows::Win32::{
     System::LibraryLoader::GetModuleHandleW,
-    UI::WindowsAndMessaging::{
-        CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
-        UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-        WM_SYSKEYDOWN, WM_SYSKEYUP,
+    UI::{
+        Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+            SendInput, VIRTUAL_KEY,
+        },
+        WindowsAndMessaging::{
+            CallNextHookEx, GetMessageW, HINSTANCE, KBDLLHOOKSTRUCT, LPARAM,
+            LRESULT, MSG, SetWindowsHookExW, UnhookWindowsHookEx,
+            WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WPARAM,
+        },
     },
 };
 
 use crate::{mapping_cache::NativeAction, state::Lookup};
 
-static mut HOOK_HANDLE: windows_sys::Win32::UI::WindowsAndFiltering::HHOOK = 0;
+static mut HOOK_HANDLE:
+    windows_sys::Windows::Win32::UI::WindowsAndFiltering::HHOOK = 0;
 // TODO(#8): Replace static mut with a safe alternative (e.g., thread-local
 // or hook-proc redesign). Windows LL keyboard hook API does not support
 // passing user data, so a global is currently unavoidable.
@@ -63,7 +70,10 @@ unsafe extern "system" fn low_level_keyboard_proc(
     if code >= 0 {
         if let Some(ref lookup) = SHARED_LOOKUP {
             let kbd_struct = *(l_param as *const KBDLLHOOKSTRUCT);
-            let vk_code = kbd_struct.vkCode;
+            // vkCode is u32 in the hook struct, but VK codes fit in u16
+            // (VIRTUAL_KEY).  Narrowing is safe for all defined VK_*
+            // constants.
+            let vk_code = kbd_struct.vkCode as VIRTUAL_KEY;
 
             let is_key_down = w_param as u32 == WM_KEYDOWN
                 || w_param as u32 == WM_SYSKEYDOWN;
@@ -79,16 +89,16 @@ unsafe extern "system" fn low_level_keyboard_proc(
             if let Some(action) = active_action {
                 match action {
                     NativeAction::RemapTo(target_vk) => {
-                        simulate_key_event(**target_vk as u8, is_key_up);
+                        simulate_key_event(*target_vk, is_key_up);
                     }
                     NativeAction::Shortcut(target_vks) => {
                         if is_key_down {
-                            for vk in *target_vks {
-                                simulate_key_event(*vk as u8, false);
+                            for vk in target_vks.iter() {
+                                simulate_key_event(*vk, false);
                             }
                         } else if is_key_up {
                             for vk in target_vks.iter().rev() {
-                                simulate_key_event(*vk as u8, true);
+                                simulate_key_event(*vk, true);
                             }
                         }
                     }
@@ -100,10 +110,27 @@ unsafe extern "system" fn low_level_keyboard_proc(
     CallNextHookEx(HOOK_HANDLE, code, w_param, l_param)
 }
 
-unsafe fn simulate_key_event(vk_byte: u8, is_key_up: bool) {
-    use windows_sys::Win32::UI::WindowsAndFiltering::{
-        KEYEVENTF_KEYUP, keybd_event,
+/// Inject a synthetic key event via `SendInput` (modern replacement for
+/// deprecated `keybd_event`).  `Vk` is `u16` — matching both `NativeKey`
+/// and `VIRTUAL_KEY`.
+fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
+    let mut input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if is_key_up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     };
-    let flags = if is_key_up { KEYEVENTF_KEYUP } else { 0 };
-    keybd_event(vk_byte, 0, flags, 0);
+    unsafe {
+        SendInput(
+            1,
+            std::ptr::addr_of!(input),
+            std::mem::size_of::<INPUT>() as i32,
+        );
+    }
 }
