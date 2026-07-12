@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 active-win-pos-rs = "0.11" # active window tracking
+dirs = "6" # platform config directory resolution
 notify = "8" # cross-platform file watching
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }

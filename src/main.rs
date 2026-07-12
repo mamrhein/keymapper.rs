@@ -8,6 +8,7 @@
 // $Revision$
 
 mod config;
+mod config_path;
 mod key_names;
 mod mapping_cache;
 mod os;
@@ -19,20 +20,18 @@ use std::{sync::Arc, thread, time::Duration};
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = "config.toml";
+    let Some(config_path) = config_path::find_config_path() else {
+        config_path::print_search_locations();
+        std::process::exit(1);
+    };
 
-    // Create a fallback config file if it does not exist
-    if !std::path::Path::new(config_path).exists() {
-        std::fs::write(
-            config_path,
-            "[[rules]]\ntrigger = \"CapsLock\"\naction = { RemapTo = \
-             \"LeftControl\" }\napplications = []",
-        )?;
-    }
+    // Resolve to an absolute path so the watcher and cache compiler have
+    // a stable reference regardless of later CWD changes.
+    let config_path = config_path.canonicalize().unwrap_or(config_path);
 
     let initial_cache =
         crate::mapping_cache::RuntimeLookupCache::compile_from_path(
-            config_path,
+            &config_path,
         )?;
 
     // Coerce to dyn Lookup at creation time.  All Arc::clone calls
@@ -46,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start hot-reloader thread
     let _watcher =
-        watcher::start_config_watcher(config_path, Arc::clone(&state))?;
+        watcher::start_config_watcher(&config_path, Arc::clone(&state))?;
 
     // Start tracking foreground windows natively
     let tracker_state = Arc::clone(&state);
