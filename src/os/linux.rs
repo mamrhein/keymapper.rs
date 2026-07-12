@@ -428,6 +428,11 @@ pub(crate) fn start_mapping(
                                         virtual_device.press(&key)?;
                                     } else if value == 0 {
                                         virtual_device.release(&key)?;
+                                    } else {
+                                        // value == 2 (repeat): fire a press+release
+                                        // to preserve autorepeat for the remapped key.
+                                        virtual_device.press(&key)?;
+                                        virtual_device.release(&key)?;
                                     }
                                     virtual_device.synchronize()?;
                                 }
@@ -443,15 +448,23 @@ pub(crate) fn start_mapping(
                                             virtual_device.release(&key)?;
                                         }
                                     }
+                                    // value == 2 (repeat): suppress silently.
+                                    // Holding the trigger key should not re-fire
+                                    // the macro on every autorepeat tick.
                                     virtual_device.synchronize()?;
                                 }
                             }
                         } else {
-                            // Passthrough
+                            // Passthrough: forward the event through uinput.
                             let key = EvdevKey::new(code);
                             if value == 1 {
                                 virtual_device.press(&key)?;
                             } else if value == 0 {
+                                virtual_device.release(&key)?;
+                            } else {
+                                // value == 2 (repeat): fire press+release to
+                                // preserve autorepeat through the virtual device.
+                                virtual_device.press(&key)?;
                                 virtual_device.release(&key)?;
                             }
                             virtual_device.synchronize()?;
