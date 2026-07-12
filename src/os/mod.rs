@@ -15,8 +15,14 @@ mod macos;
 mod windows;
 
 #[cfg(target_os = "linux")]
+pub(crate) use linux::Key;
+#[cfg(target_os = "linux")]
 pub(crate) use linux::*;
 #[cfg(target_os = "macos")]
+pub(crate) use macos::Key;
+#[cfg(target_os = "macos")]
 pub(crate) use macos::*;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::Key;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::*;

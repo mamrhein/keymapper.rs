@@ -9,10 +9,7 @@
 
 use std::{collections::HashMap, fs, path::Path};
 
-use crate::{
-    config::{AppConfig, KeyAction},
-    os_bridge::abstract_to_native_code,
-};
+use crate::config::{AppConfig, KeyAction};
 
 /// Platform-native keycode width.  Chosen so that the cache, the Lookup
 /// trait, and the OS-level APIs all agree — eliminating runtime casts.
@@ -20,7 +17,7 @@ use crate::{
 pub type NativeKey = u16; // CGKeyCode
 
 #[cfg(target_os = "windows")]
-pub type NativeKey = u16; // KEYBDINPUT.wVk (SendInput)
+pub type NativeKey = u16; // VIRTUAL_KEY (SendInput)
 
 #[cfg(target_os = "linux")]
 pub type NativeKey = u16; // evdev::Key::code()
@@ -74,17 +71,16 @@ impl RuntimeLookupCache {
         let mut global_map: HashMap<NativeKey, NativeAction> = HashMap::new();
 
         for rule in &app_config.rules {
-            let native_trigger = abstract_to_native_code(&rule.trigger);
+            // Zero-cost cast: the Key discriminant IS the native code.
+            let native_trigger = rule.trigger.as_native();
 
             let native_action = match &rule.action {
                 KeyAction::RemapTo(target_key) => {
-                    NativeAction::RemapTo(abstract_to_native_code(target_key))
+                    NativeAction::RemapTo(target_key.as_native())
                 }
                 KeyAction::Shortcut(target_keys) => {
-                    let compiled_keys = target_keys
-                        .iter()
-                        .map(abstract_to_native_code)
-                        .collect();
+                    let compiled_keys =
+                        target_keys.iter().map(|k| k.as_native()).collect();
                     NativeAction::Shortcut(compiled_keys)
                 }
             };

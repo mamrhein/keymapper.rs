@@ -9,9 +9,9 @@
 
 mod config;
 mod hot_reload;
+mod key_names;
 mod mapping_cache;
 mod os;
-mod os_bridge;
 mod state;
 
 use std::{sync::Arc, thread, time::Duration};
