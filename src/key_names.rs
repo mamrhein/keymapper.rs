@@ -7,20 +7,12 @@
 // $Source$
 // $Revision$
 
-// ---------------------------------------------------------------------------
-// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
-// License:     This program is part of a larger application. For license
-//              details please read the file LICENSE.TXT provided together
-//              with the application.
-// ---------------------------------------------------------------------------
-// $Source$
-// $Revision$
-
 /// Parses the common aliases that all platforms share.
 ///
 /// Returns the canonical lower-case key name (e.g. `"leftcontrol"`),
-/// which the platform-specific [`from_canonical`](crate::os::Key::from_canonical)
-/// function then maps to an enum variant.
+/// which the platform-specific
+/// [`from_canonical`](crate::os::Key::from_canonical) function then maps to an
+/// enum variant.
 ///
 /// Returns `None` when the string is not a recognised alias, signalling
 /// the caller to try a canonical-name lookup instead.
@@ -56,8 +48,8 @@ pub fn resolve_alias(s: &str) -> Option<&'static str> {
 /// Returns a user-friendly error message for an unrecognised key name.
 pub fn unknown_key_error(s: &str) -> String {
     format!(
-        "unknown key name '{}'. Use names like capslock, \
-         leftcontrol, a, f1, 1, etc.",
+        "unknown key name '{}'. Use names like capslock, leftcontrol, a, f1, \
+         1, etc.",
         s
     )
 }
