@@ -2,6 +2,7 @@
 name = "keymapperd"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
 [dependencies]
 active-win-pos-rs = "0.11" # active window tracking
