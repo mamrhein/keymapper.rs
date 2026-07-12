@@ -3,6 +3,14 @@ name = "keymapperd"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+authors = ["Michael Amrhein <michael@adrhinum.de>"]
+description = "Cross-platform key-remapping daemon for macOS, Linux, and Windows"
+readme = "README.md"
+homepage = "https://github.com/mamrhein/keymapperd"
+repository = "https://github.com/mamrhein/keymapperd"
+license-file = "LICENSE.TXT"
+keywords = ["Cross-platform", "keymapper", "macOS", "Linux", "Windows"]
+categories = ["utilities"]
 
 [dependencies]
 active-win-pos-rs = "0.11" # active window tracking
