@@ -115,6 +115,21 @@ impl Key {
         self as u16
     }
 
+    /// Return the modifier-bitmask contribution of this key.
+    pub const fn as_modifier_bits(self) -> u8 {
+        match self {
+            Self::LeftControl => 1 << 0,
+            Self::RightControl => 1 << 1,
+            Self::LeftShift => 1 << 2,
+            Self::RightShift => 1 << 3,
+            Self::LeftAlt => 1 << 4,
+            Self::RightAlt => 1 << 5,
+            Self::LeftCommand => 1 << 6,
+            Self::RightCommand => 1 << 7,
+            _ => 0,
+        }
+    }
+
     /// Return the canonical config-name for this key.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -383,6 +398,23 @@ fn find_keyboard_device() -> Result<Device, Box<dyn std::error::Error>> {
     }
 }
 
+/// Map a raw evdev keycode to its modifier group bitmask.
+///
+/// Returns `0` if the code does not correspond to a recognised modifier key.
+fn modifier_bits_from_code(code: u16) -> u8 {
+    match code {
+        // Control group: bits 0 | 1
+        29 | 97 => (1 << 0) | (1 << 1),
+        // Shift group: bits 2 | 3
+        42 | 54 => (1 << 2) | (1 << 3),
+        // Alt group: bits 4 | 5
+        56 | 100 => (1 << 4) | (1 << 5),
+        // Meta/Command group: bits 6 | 7
+        125 | 126 => (1 << 6) | (1 << 7),
+        _ => 0,
+    }
+}
+
 pub(crate) fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -405,22 +437,41 @@ pub(crate) fn start_mapping(
     }
 
     // Poll loop with shutdown check.
+    // Track modifier state so chord rules can match against active modifiers.
+    let mut active_modifiers: u8 = 0;
+
     while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         match raw_device.fetch_events() {
             Ok(events) => {
                 for event in events {
                     if event.event_type() == EventType::KEY {
-                        // event.code() returns u16 — matches NativeKey directly.
                         let code = event.code();
                         let value = event.value(); // 1 = Down, 0 = Up, 2 = Repeat
+
+                        let key_mod_bits = modifier_bits_from_code(code);
+
+                        // Update modifier tracking.
+                        if value == 1 {
+                            // Key down: add modifier bits before lookup so that
+                            // a chord rule can match the keypress itself.
+                            active_modifiers |= key_mod_bits;
+                        } else if value == 0 {
+                            // Key up: lookup with current state, then remove
+                            // modifier bits after.
+                        }
 
                         let guard = lookup.read();
                         let current_app = guard.active_app().to_lowercase();
                         let active_action = guard
-                            .for_app(&current_app, code)
-                            .or_else(|| guard.global(code))
+                            .for_app(&current_app, code, active_modifiers)
+                            .or_else(|| guard.global(code, active_modifiers))
                             .cloned();
                         drop(guard);
+
+                        if value == 0 {
+                            // Remove modifier bits after lookup.
+                            active_modifiers &= !key_mod_bits;
+                        }
 
                         if let Some(action) = active_action {
                             match action {

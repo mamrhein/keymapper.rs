@@ -18,8 +18,8 @@ use windows_sys::Windows::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-            KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+            GetKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, HHOOK, HINSTANCE, KBDLLHOOKSTRUCT,
@@ -127,6 +127,21 @@ impl Key {
     /// code.
     pub const fn as_native(self) -> VIRTUAL_KEY {
         self as VIRTUAL_KEY
+    }
+
+    /// Return the modifier-bitmask contribution of this key.
+    pub const fn as_modifier_bits(self) -> u8 {
+        match self {
+            Self::LeftControl => 1 << 0,
+            Self::RightControl => 1 << 1,
+            Self::LeftShift => 1 << 2,
+            Self::RightShift => 1 << 3,
+            Self::LeftAlt => 1 << 4,
+            Self::RightAlt => 1 << 5,
+            Self::LeftCommand => 1 << 6,
+            Self::RightCommand => 1 << 7,
+            _ => 0,
+        }
     }
 
     /// Return the canonical config-name for this key.
@@ -375,6 +390,32 @@ pub(crate) fn start_mapping(
     Ok(())
 }
 
+/// Probe `GetKeyState` for each left-side modifier VK and build a group
+/// bitmask.  Using the left-side constants is sufficient because both left
+/// and right keys set the same group bits, matching either side.
+fn extract_modifier_bits() -> u8 {
+    let mut bits: u8 = 0;
+
+    // VK_LCONTROL (0xA2)
+    if unsafe { GetKeyState(0xA2) < 0 } {
+        bits |= (1 << 0) | (1 << 1);
+    }
+    // VK_LSHIFT (0xA0)
+    if unsafe { GetKeyState(0xA0) < 0 } {
+        bits |= (1 << 2) | (1 << 3);
+    }
+    // VK_LMENU (0xA4)
+    if unsafe { GetKeyState(0xA4) < 0 } {
+        bits |= (1 << 4) | (1 << 5);
+    }
+    // VK_LWIN (0x5B)
+    if unsafe { GetKeyState(0x5B) < 0 } {
+        bits |= (1 << 6) | (1 << 7);
+    }
+
+    bits
+}
+
 extern "system" fn low_level_keyboard_proc(
     code: i32,
     w_param: WPARAM,
@@ -402,11 +443,14 @@ extern "system" fn low_level_keyboard_proc(
     let is_key_up =
         w_param as u32 == WM_KEYUP || w_param as u32 == WM_SYSKEYUP;
 
+    // Extract currently pressed modifier groups.
+    let pressed_modifiers = extract_modifier_bits();
+
     let guard = lookup.read();
     let current_app = guard.active_app().to_lowercase();
     let active_action = guard
-        .for_app(&current_app, vk_code)
-        .or_else(|| guard.global(vk_code))
+        .for_app(&current_app, vk_code, pressed_modifiers)
+        .or_else(|| guard.global(vk_code, pressed_modifiers))
         .cloned();
     drop(guard);
 

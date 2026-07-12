@@ -1,10 +1,10 @@
 # keymapperd
 
-Cross-platform key-remapping daemon for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a TOML configuration file, with per-application scoping and hot-reload.
+Cross-platform key-remapping daemon for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a TOML configuration file, with per-application scoping, chord (modifier + key) triggers, and hot-reload.
 
 ## Installation
 
-Requires a recent Rust toolchain.
+Requires Rust 1.85+ (edition 2024).
 
 ```bash
 cargo install --path .
@@ -38,6 +38,18 @@ description = "Map F1 to Cmd+T in Chrome"
 trigger = "F1"
 action = { Shortcut = ["leftcommand", "t"] }
 applications = ["Google Chrome"]
+
+[[rules]]
+description = "Map Ctrl+H to LeftArrow globally"
+trigger = "ctrl+h"
+action = { RemapTo = "leftarrow" }
+applications = []
+
+[[rules]]
+description = "Map Cmd+Shift+T to F5 in VS Code"
+trigger = "cmd+shift+t"
+action = { RemapTo = "f5" }
+applications = ["Code"]
 ```
 
 ### Rule fields
@@ -45,9 +57,23 @@ applications = ["Google Chrome"]
 | Field | Required | Description |
 |-------|----------|-------------|
 | `description` | No | Human-readable comment (ignored at runtime) |
-| `trigger` | Yes | The key to intercept |
+| `trigger` | Yes | The key or chord to intercept |
 | `action` | Yes | What to do when the trigger fires |
 | `applications` | Yes | List of application names to scope the rule. Empty list (`[]`) means global |
+
+### Triggers
+
+Triggers use compact `+`-separated strings. The last token is the base key; all preceding tokens are modifiers.
+
+| Syntax | Example | Meaning |
+|--------|---------|---------|
+| Bare key | `"CapsLock"` | Single key with no modifier requirement |
+| Modifier + key | `"ctrl+h"` | Ctrl held while pressing H |
+| Multiple modifiers | `"cmd+shift+t"` | Cmd + Shift held while pressing T |
+
+**Modifier matching:** when you write `"ctrl"`, the rule matches either left or right Control. The same applies to `"shift"`, `"alt"`, and `"cmd"` (which also accepts `"super"` and `"win"` as aliases). To be specific about a side, use `"leftctrl"`, `"rightshift"`, etc.
+
+**Extra modifiers don't prevent matches.** A rule for `"ctrl+h"` will also match when `ctrl+shift+h` is pressed. Use more specific triggers if you need to distinguish.
 
 ### Actions
 

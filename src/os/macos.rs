@@ -19,7 +19,7 @@ use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
 };
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventSource, CGEventSourceStateID,
+    CGEvent, CGEventField, CGEventFlags, CGEventSource, CGEventSourceStateID,
     CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
     CGKeyCode,
 };
@@ -123,6 +123,35 @@ impl Key {
     /// code.
     pub const fn as_native(self) -> u16 {
         self as u16
+    }
+
+    /// Return the modifier-bitmask contribution of this key.
+    ///
+    /// Modifier keys return a bitmask with the corresponding bit set.
+    /// Non-modifier keys return `0`.  When a rule specifies a group
+    /// modifier (e.g. "ctrl" meaning either side), the bit is set for
+    /// whichever physical key matches — handled by the alias layer so
+    /// that "leftctrl" and "rightctrl" each resolve to their own bit.
+    pub const fn as_modifier_bits(self) -> u8 {
+        match self {
+            // bit 0: left control
+            Self::LeftControl => 1 << 0,
+            // bit 1: right control
+            Self::RightControl => 1 << 1,
+            // bit 2: left shift
+            Self::LeftShift => 1 << 2,
+            // bit 3: right shift
+            Self::RightShift => 1 << 3,
+            // bit 4: left alt (option)
+            Self::LeftAlt => 1 << 4,
+            // bit 5: right alt (option)
+            Self::RightAlt => 1 << 5,
+            // bit 6: left command
+            Self::LeftCommand => 1 << 6,
+            // bit 7: right command
+            Self::RightCommand => 1 << 7,
+            _ => 0, // non-modifier keys contribute nothing
+        }
     }
 
     /// Return the canonical config-name for this key.
@@ -308,6 +337,28 @@ impl<'de> Deserialize<'de> for Key {
 }
 
 // ---------------------------------------------------------------------------
+// Modifier extraction
+// ---------------------------------------------------------------------------
+
+/// Map CGEventFlags to our 8-bit modifier layout.
+fn extract_modifier_bits(flags: CGEventFlags) -> u8 {
+    let mut bits: u8 = 0;
+    if flags.contains(CGEventFlags::MaskControl) {
+        bits |= (1 << 0) | (1 << 1); // control group
+    }
+    if flags.contains(CGEventFlags::MaskShift) {
+        bits |= (1 << 2) | (1 << 3); // shift group
+    }
+    if flags.contains(CGEventFlags::MaskAlternate) {
+        bits |= (1 << 4) | (1 << 5); // alt/option group
+    }
+    if flags.contains(CGEventFlags::MaskCommand) {
+        bits |= (1 << 6) | (1 << 7); // command group
+    }
+    bits
+}
+
+// ---------------------------------------------------------------------------
 // Event tap implementation
 // ---------------------------------------------------------------------------
 
@@ -458,7 +509,7 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     let context = unsafe { &*(user_info as *const TapContext) };
 
-    // CGKeyCode is u16 — matches NativeKey directly, no cast needed.
+    // CGKeyCode is u16 — matches the native key code directly.
     let native_key: CGKeyCode = unsafe {
         CGEvent::integer_value_field(
             Some(event.as_ref()),
@@ -468,13 +519,18 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     let is_down = _type == CGEventType::KeyDown;
 
+    // Extract currently pressed modifier groups.
+    let pressed_modifiers = extract_modifier_bits(unsafe {
+        CGEvent::flags(Some(event.as_ref()))
+    });
+
     // Resolve the remapping through the trait interface.  Clone the action
     // out so we can drop the read lock before expensive CGEvent operations.
     let guard = context.lookup.read();
     let current_app = guard.active_app().to_lowercase();
     let active_action = guard
-        .for_app(&current_app, native_key)
-        .or_else(|| guard.global(native_key))
+        .for_app(&current_app, native_key, pressed_modifiers)
+        .or_else(|| guard.global(native_key, pressed_modifiers))
         .cloned();
     drop(guard);
 
