@@ -18,8 +18,8 @@ use windows_sys::Windows::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-            SendInput, VIRTUAL_KEY,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+            KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, HHOOK, HINSTANCE, KBDLLHOOKSTRUCT,
@@ -431,17 +431,38 @@ extern "system" fn low_level_keyboard_proc(
     unsafe { CallNextHookEx(hook_handle(), code, w_param, l_param) }
 }
 
+/// Return true when the given virtual-key code corresponds to an extended
+/// hardware key (scan-code prefixed with 0xE0).  These include the right-side
+/// modifiers, navigation cluster (arrows / Home / End / Ins / Del / PgUp /
+/// PgDown), and the numpad Enter.
+fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
+    matches!(
+        vk,
+        // Right-side modifiers
+        0xA3 | 0xA5 // VK_RCONTROL, VK_RMENU
+            // Navigation cluster
+            | 0x21 | 0x22 | 0x23 | 0x25
+            ..=0x28 // PgUp, PgDn, Home/End, arrows
+            | 0x2D | 0x2E // VK_INSERT, VK_DELETE
+    )
+}
+
 /// Inject a synthetic key event via `SendInput` (modern replacement for
 /// the deprecated `keybd_event`).  `vk` is `VIRTUAL_KEY` (u16) — matching
 /// both `NativeKey` and the API natively.
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
+    let mut flags = if is_key_up { KEYEVENTF_KEYUP } else { 0 };
+    if is_extended_key(vk) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+
     let mut input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: vk,
                 wScan: 0,
-                dwFlags: if is_key_up { KEYEVENTF_KEYUP } else { 0 },
+                dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
             },
