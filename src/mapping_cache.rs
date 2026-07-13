@@ -97,11 +97,7 @@ impl RuntimeLookupCache {
                 continue;
             }
 
-            let apps: Vec<String> = if group.apps.is_empty() {
-                Vec::new()
-            } else {
-                group.apps.iter().map(|a| a.to_lowercase()).collect()
-            };
+            let apps: Vec<String> = group.apps.clone();
 
             for (trigger, outputs) in group.mappings.iter() {
                 let native_outputs = compile_outputs(outputs);
@@ -122,9 +118,8 @@ impl RuntimeLookupCache {
                         global_rules.push(rule);
                     } else {
                         for app in &apps {
-                            let rules = process_rules
-                                .entry(app.clone())
-                                .or_default();
+                            let rules =
+                                process_rules.entry(app.clone()).or_default();
                             rules.push(rule.clone());
                         }
                     }

@@ -18,9 +18,9 @@ pub(crate) use crate::os::Key;
 ///
 /// Accepts compact `+`-separated strings in YAML:
 /// - `"CapsLock"` -- bare key press (no modifiers held)
-/// - `"ctrl+a"` -- ctrl held while pressing a
-/// - `"cmd+shift+t"` -- cmd + shift held while pressing t
-/// - `"optionright+l"` -- right option held while pressing l
+/// - `"Ctrl+A"` -- Ctrl held while pressing A
+/// - `"Cmd+Shift+T"` -- Cmd + Shift held while pressing T
+/// - `"RightAlt+L"` -- right option held while pressing L
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyEvent {
     /// Modifier keys held during the event (empty for bare key presses).
@@ -59,7 +59,7 @@ impl KeyEvent {
     /// Parse a `+`-separated string into a key event.
     ///
     /// The last token is the base key; all preceding tokens are modifiers.
-    /// A single token (e.g. `"capslock"`) is a bare key press with no
+    /// A single token (e.g. `"CapsLock"`) is a bare key press with no
     /// modifiers held, even if the token itself names a modifier key.
     fn parse(s: &str) -> Result<Self, String> {
         let parts: Vec<&str> = s.split('+').collect();
@@ -70,14 +70,14 @@ impl KeyEvent {
         }
 
         if parts.len() == 1 {
-            // Bare key: "CapsLock", "a", "f1" — no modifiers held.
+            // Bare key: "CapsLock", "A", "F1" — no modifiers held.
             let base = parse_key(parts[0])?;
             Ok(Self {
                 modifiers: Vec::new(),
                 base,
             })
         } else {
-            // Chord: "ctrl+a", "cmd+shift+t"
+            // Chord: "Ctrl+A", "Cmd+Shift+T"
             // Last token is the base key; preceding tokens are modifiers.
             let base = parse_key(parts[parts.len() - 1])?;
             let modifiers: Result<Vec<Key>, _> = parts[..parts.len() - 1]
@@ -93,17 +93,15 @@ impl KeyEvent {
 }
 
 /// Parse a single token from the config string into a `Key`.
+///
+/// Key names are matched case-sensitively.
 fn parse_key(token: &str) -> Result<Key, String> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
         return Err("empty key token in event string".to_string());
     }
 
-    // Strip underscores so that "left_control" and "leftcontrol" match.
-    let lower = trimmed.replace('_', "").to_lowercase();
-    let canonical = crate::key_names::resolve_alias(&lower).unwrap_or(&lower);
-
-    Key::from_canonical(canonical)
+    Key::from_str(trimmed)
         .ok_or_else(|| crate::key_names::unknown_key_error(trimmed))
 }
 
@@ -360,13 +358,13 @@ mod tests {
     fn parse_global_group() {
         let yaml = r#"
 - mappings:
-    capslock: left_control
+    CapsLock: LeftControl
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         assert_eq!(config.groups.len(), 1);
 
         let group = &config.groups[0];
-        assert!(group.apps.is_empty()); // global
+        assert!(group.apps.is_empty());
 
         let mut mappings = group.mappings.iter();
         let (trigger, outputs) = mappings.next().unwrap();
@@ -384,8 +382,8 @@ mod tests {
 - name: "iterm nav"
   apps: [iTerm2]
   mappings:
-    ctrl+h: left
-    ctrl+l: right
+    Ctrl+H: LeftArrow
+    Ctrl+L: RightArrow
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         assert_eq!(config.groups.len(), 1);
@@ -396,7 +394,7 @@ mod tests {
 
         let mut mappings = group.mappings.iter();
 
-        // ctrl+h -> left
+        // Ctrl+H -> LeftArrow
         let (trigger, outputs) = mappings.next().unwrap();
         assert_eq!(trigger.modifiers.len(), 1);
         assert!(matches!(trigger.modifiers[0], Key::LeftControl));
@@ -405,7 +403,7 @@ mod tests {
         assert!(outputs[0].modifiers.is_empty());
         assert!(matches!(outputs[0].base, Key::LeftArrow));
 
-        // ctrl+l -> right
+        // Ctrl+L -> RightArrow
         let (trigger, outputs) = mappings.next().unwrap();
         assert_eq!(trigger.modifiers.len(), 1);
         assert!(matches!(trigger.base, Key::L));
@@ -416,7 +414,7 @@ mod tests {
     fn parse_multi_output() {
         let yaml = r#"
 - mappings:
-    capslock: [left_control, capslock]
+    CapsLock: [LeftControl, CapsLock]
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         let group = &config.groups[0];
@@ -428,10 +426,10 @@ mod tests {
 
     #[test]
     fn parse_chord_output() {
-        // A chord output: cmd+l is a single event (hold cmd, press l).
+        // A chord output: Cmd+L is a single event (hold Cmd, press L).
         let yaml = r#"
 - mappings:
-    optionright: optionleft+l
+    RightAlt: LeftAlt+L
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         let group = &config.groups[0];
@@ -439,7 +437,7 @@ mod tests {
         let mut mappings = group.mappings.iter();
         let (trigger, outputs) = mappings.next().unwrap();
 
-        // Trigger: bare OptionRight
+        // Trigger: bare RightAlt
         assert!(trigger.modifiers.is_empty());
         assert!(matches!(trigger.base, Key::RightAlt));
 
@@ -454,12 +452,12 @@ mod tests {
     fn parse_multiple_groups() {
         let yaml = r#"
 - mappings:
-    capslock: left_control
+    CapsLock: LeftControl
 
 - name: "iterm nav"
   apps: [iTerm2]
   mappings:
-    ctrl+h: left
+    Ctrl+H: LeftArrow
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         assert_eq!(config.groups.len(), 2);
@@ -481,21 +479,21 @@ mod tests {
     fn parse_complex_config() {
         let yaml = r#"
 - mappings:
-    capslock: left_control
-    left_control: [left_control, capslock]
+    CapsLock: LeftControl
+    LeftControl: [LeftControl, CapsLock]
 
 - name: "iterm nav"
   apps: [iTerm2]
   mappings:
-    ctrl+h: left
-    ctrl+j: down
-    ctrl+k: up
-    ctrl+l: right
+    Ctrl+H: LeftArrow
+    Ctrl+J: DownArrow
+    Ctrl+K: UpArrow
+    Ctrl+L: RightArrow
 
 - name: "global shortcuts"
   mappings:
-    ctrl+shift+left: cmd+left
-    ctrl+shift+right: cmd+right
+    Ctrl+Shift+LeftArrow: Cmd+LeftArrow
+    Ctrl+Shift+RightArrow: Cmd+RightArrow
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         assert_eq!(config.groups.len(), 3);
@@ -519,11 +517,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_underscored_keys() {
-        // Underscores are stripped, so "left_control" == "leftcontrol".
+    fn parse_case_sensitive() {
+        // Key names are case-sensitive. "LeftControl" works, "leftcontrol"
+        // does not.
         let yaml = r#"
 - mappings:
-    left_control: caps_lock
+    LeftControl: CapsLock
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         let group = &config.groups[0];

@@ -28,7 +28,7 @@ use objc2_core_graphics::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{key_names, mapping_cache::NativeKey, state::Lookup};
+use crate::{mapping_cache::NativeKey, state::Lookup};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the CGKeyCode values
@@ -128,9 +128,6 @@ impl Key {
     }
 
     /// Return the modifier bit **position** (0–7) for this key.
-    ///
-    /// Modifier keys return `Some(position)` where position is the index in
-    /// the 8-bit modifier mask.  Non-modifier keys return `None`.
     pub const fn as_modifier_bit(self) -> Option<u8> {
         match self {
             Self::LeftControl => Some(0),
@@ -147,7 +144,7 @@ impl Key {
 
     /// Return the possible modifier bit positions for this key.
     ///
-    /// All modifier keys return both left and right positions, enabling
+    /// Modifier keys return both left and right positions, enabling
     /// "either side" matching.  Non-modifier keys return `None`.
     pub fn as_modifier_positions(self) -> Option<Vec<u8>> {
         match self {
@@ -162,67 +159,67 @@ impl Key {
     /// Return the canonical config-name for this key.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::LeftControl => "leftcontrol",
-            Self::RightControl => "rightcontrol",
-            Self::LeftShift => "leftshift",
-            Self::RightShift => "rightshift",
-            Self::LeftAlt => "leftalt",
-            Self::RightAlt => "rightalt",
-            Self::LeftCommand => "leftcommand",
-            Self::RightCommand => "rightcommand",
-            Self::CapsLock => "capslock",
-            Self::Tab => "tab",
-            Self::Space => "space",
-            Self::Return => "return",
-            Self::Backspace => "backspace",
-            Self::Delete => "delete",
-            Self::Escape => "escape",
-            Self::UpArrow => "uparrow",
-            Self::DownArrow => "downarrow",
-            Self::LeftArrow => "leftarrow",
-            Self::RightArrow => "rightarrow",
-            Self::PageUp => "pageup",
-            Self::PageDown => "pagedown",
-            Self::Home => "home",
-            Self::End => "end",
-            Self::F1 => "f1",
-            Self::F2 => "f2",
-            Self::F3 => "f3",
-            Self::F4 => "f4",
-            Self::F5 => "f5",
-            Self::F6 => "f6",
-            Self::F7 => "f7",
-            Self::F8 => "f8",
-            Self::F9 => "f9",
-            Self::F10 => "f10",
-            Self::F11 => "f11",
-            Self::F12 => "f12",
-            Self::A => "a",
-            Self::B => "b",
-            Self::C => "c",
-            Self::D => "d",
-            Self::E => "e",
-            Self::F => "f",
-            Self::G => "g",
-            Self::H => "h",
-            Self::I => "i",
-            Self::J => "j",
-            Self::K => "k",
-            Self::L => "l",
-            Self::M => "m",
-            Self::N => "n",
-            Self::O => "o",
-            Self::P => "p",
-            Self::Q => "q",
-            Self::R => "r",
-            Self::S => "s",
-            Self::T => "t",
-            Self::U => "u",
-            Self::V => "v",
-            Self::W => "w",
-            Self::X => "x",
-            Self::Y => "y",
-            Self::Z => "z",
+            Self::LeftControl => "LeftControl",
+            Self::RightControl => "RightControl",
+            Self::LeftShift => "LeftShift",
+            Self::RightShift => "RightShift",
+            Self::LeftAlt => "LeftAlt",
+            Self::RightAlt => "RightAlt",
+            Self::LeftCommand => "LeftCommand",
+            Self::RightCommand => "RightCommand",
+            Self::CapsLock => "CapsLock",
+            Self::Tab => "Tab",
+            Self::Space => "Space",
+            Self::Return => "Return",
+            Self::Backspace => "Backspace",
+            Self::Delete => "Delete",
+            Self::Escape => "Escape",
+            Self::UpArrow => "UpArrow",
+            Self::DownArrow => "DownArrow",
+            Self::LeftArrow => "LeftArrow",
+            Self::RightArrow => "RightArrow",
+            Self::PageUp => "PageUp",
+            Self::PageDown => "PageDown",
+            Self::Home => "Home",
+            Self::End => "End",
+            Self::F1 => "F1",
+            Self::F2 => "F2",
+            Self::F3 => "F3",
+            Self::F4 => "F4",
+            Self::F5 => "F5",
+            Self::F6 => "F6",
+            Self::F7 => "F7",
+            Self::F8 => "F8",
+            Self::F9 => "F9",
+            Self::F10 => "F10",
+            Self::F11 => "F11",
+            Self::F12 => "F12",
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+            Self::E => "E",
+            Self::F => "F",
+            Self::G => "G",
+            Self::H => "H",
+            Self::I => "I",
+            Self::J => "J",
+            Self::K => "K",
+            Self::L => "L",
+            Self::M => "M",
+            Self::N => "N",
+            Self::O => "O",
+            Self::P => "P",
+            Self::Q => "Q",
+            Self::R => "R",
+            Self::S => "S",
+            Self::T => "T",
+            Self::U => "U",
+            Self::V => "V",
+            Self::W => "W",
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
             Self::Number1 => "1",
             Self::Number2 => "2",
             Self::Number3 => "3",
@@ -236,82 +233,91 @@ impl Key {
         }
     }
 
-    /// Parse a canonical name into a Key variant.
+    /// Parse a PascalCase key name into a Key variant.
     ///
-    /// Returns `None` for unrecognised names (caller should error).
-    pub fn from_canonical(name: &str) -> Option<Self> {
+    /// Case-sensitive matching.  Generic modifier names (`Ctrl`, `Shift`,
+    /// `Alt`, `Command`) resolve to left-side defaults.  Explicit names
+    /// (`LeftControl`, `RightAlt`) are preserved.
+    pub fn from_str(name: &str) -> Option<Self> {
         match name {
-            "leftcontrol" => Some(Self::LeftControl),
-            "rightcontrol" => Some(Self::RightControl),
-            "leftshift" => Some(Self::LeftShift),
-            "rightshift" => Some(Self::RightShift),
-            "leftalt" => Some(Self::LeftAlt),
-            "rightalt" => Some(Self::RightAlt),
-            "leftcommand" => Some(Self::LeftCommand),
-            "rightcommand" => Some(Self::RightCommand),
-            "capslock" => Some(Self::CapsLock),
-            "tab" => Some(Self::Tab),
-            "space" => Some(Self::Space),
-            "return" => Some(Self::Return),
-            "backspace" => Some(Self::Backspace),
-            "delete" => Some(Self::Delete),
-            "escape" => Some(Self::Escape),
-            "uparrow" => Some(Self::UpArrow),
-            "downarrow" => Some(Self::DownArrow),
-            "leftarrow" => Some(Self::LeftArrow),
-            "rightarrow" => Some(Self::RightArrow),
-            "pageup" => Some(Self::PageUp),
-            "pagedown" => Some(Self::PageDown),
-            "home" => Some(Self::Home),
-            "end" => Some(Self::End),
-            "f1" => Some(Self::F1),
-            "f2" => Some(Self::F2),
-            "f3" => Some(Self::F3),
-            "f4" => Some(Self::F4),
-            "f5" => Some(Self::F5),
-            "f6" => Some(Self::F6),
-            "f7" => Some(Self::F7),
-            "f8" => Some(Self::F8),
-            "f9" => Some(Self::F9),
-            "f10" => Some(Self::F10),
-            "f11" => Some(Self::F11),
-            "f12" => Some(Self::F12),
-            "a" => Some(Self::A),
-            "b" => Some(Self::B),
-            "c" => Some(Self::C),
-            "d" => Some(Self::D),
-            "e" => Some(Self::E),
-            "f" => Some(Self::F),
-            "g" => Some(Self::G),
-            "h" => Some(Self::H),
-            "i" => Some(Self::I),
-            "j" => Some(Self::J),
-            "k" => Some(Self::K),
-            "l" => Some(Self::L),
-            "m" => Some(Self::M),
-            "n" => Some(Self::N),
-            "o" => Some(Self::O),
-            "p" => Some(Self::P),
-            "q" => Some(Self::Q),
-            "r" => Some(Self::R),
-            "s" => Some(Self::S),
-            "t" => Some(Self::T),
-            "u" => Some(Self::U),
-            "v" => Some(Self::V),
-            "w" => Some(Self::W),
-            "x" => Some(Self::X),
-            "y" => Some(Self::Y),
-            "z" => Some(Self::Z),
-            "1" | "number1" => Some(Self::Number1),
-            "2" | "number2" => Some(Self::Number2),
-            "3" | "number3" => Some(Self::Number3),
-            "4" | "number4" => Some(Self::Number4),
-            "5" | "number5" => Some(Self::Number5),
-            "6" | "number6" => Some(Self::Number6),
-            "7" | "number7" => Some(Self::Number7),
-            "8" | "number8" => Some(Self::Number8),
-            "9" | "number9" => Some(Self::Number9),
-            "0" | "number0" => Some(Self::Number0),
+            // Generic modifiers — resolve to left-side defaults
+            "Ctrl" => Some(Self::LeftControl),
+            "Shift" => Some(Self::LeftShift),
+            "Alt" | "Option" => Some(Self::LeftAlt),
+            "Command" | "Cmd" | "Super" => Some(Self::LeftCommand),
+            // Specific modifiers
+            "LeftControl" | "LeftCtrl" => Some(Self::LeftControl),
+            "RightControl" | "RightCtrl" => Some(Self::RightControl),
+            "LeftShift" => Some(Self::LeftShift),
+            "RightShift" => Some(Self::RightShift),
+            "LeftAlt" | "LeftOption" => Some(Self::LeftAlt),
+            "RightAlt" | "RightOption" => Some(Self::RightAlt),
+            "LeftCommand" | "LeftCmd" => Some(Self::LeftCommand),
+            "RightCommand" | "RightCmd" => Some(Self::RightCommand),
+            // Non-modifier keys
+            "CapsLock" | "Caps" => Some(Self::CapsLock),
+            "Tab" => Some(Self::Tab),
+            "Space" => Some(Self::Space),
+            "Return" | "Enter" => Some(Self::Return),
+            "Backspace" => Some(Self::Backspace),
+            "Delete" => Some(Self::Delete),
+            "Escape" | "Esc" => Some(Self::Escape),
+            "UpArrow" | "Up" => Some(Self::UpArrow),
+            "DownArrow" | "Down" => Some(Self::DownArrow),
+            "LeftArrow" | "Left" => Some(Self::LeftArrow),
+            "RightArrow" | "Right" => Some(Self::RightArrow),
+            "PageUp" | "PgUp" => Some(Self::PageUp),
+            "PageDown" | "PgDn" => Some(Self::PageDown),
+            "Home" => Some(Self::Home),
+            "End" => Some(Self::End),
+            "F1" => Some(Self::F1),
+            "F2" => Some(Self::F2),
+            "F3" => Some(Self::F3),
+            "F4" => Some(Self::F4),
+            "F5" => Some(Self::F5),
+            "F6" => Some(Self::F6),
+            "F7" => Some(Self::F7),
+            "F8" => Some(Self::F8),
+            "F9" => Some(Self::F9),
+            "F10" => Some(Self::F10),
+            "F11" => Some(Self::F11),
+            "F12" => Some(Self::F12),
+            "A" => Some(Self::A),
+            "B" => Some(Self::B),
+            "C" => Some(Self::C),
+            "D" => Some(Self::D),
+            "E" => Some(Self::E),
+            "F" => Some(Self::F),
+            "G" => Some(Self::G),
+            "H" => Some(Self::H),
+            "I" => Some(Self::I),
+            "J" => Some(Self::J),
+            "K" => Some(Self::K),
+            "L" => Some(Self::L),
+            "M" => Some(Self::M),
+            "N" => Some(Self::N),
+            "O" => Some(Self::O),
+            "P" => Some(Self::P),
+            "Q" => Some(Self::Q),
+            "R" => Some(Self::R),
+            "S" => Some(Self::S),
+            "T" => Some(Self::T),
+            "U" => Some(Self::U),
+            "V" => Some(Self::V),
+            "W" => Some(Self::W),
+            "X" => Some(Self::X),
+            "Y" => Some(Self::Y),
+            "Z" => Some(Self::Z),
+            "1" | "Number1" => Some(Self::Number1),
+            "2" | "Number2" => Some(Self::Number2),
+            "3" | "Number3" => Some(Self::Number3),
+            "4" | "Number4" => Some(Self::Number4),
+            "5" | "Number5" => Some(Self::Number5),
+            "6" | "Number6" => Some(Self::Number6),
+            "7" | "Number7" => Some(Self::Number7),
+            "8" | "Number8" => Some(Self::Number8),
+            "9" | "Number9" => Some(Self::Number9),
+            "0" | "Number0" => Some(Self::Number0),
             _ => None,
         }
     }
@@ -332,17 +338,14 @@ impl<'de> Deserialize<'de> for Key {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        let l = s.to_lowercase();
-        // Try alias first, then canonical name.
-        let canonical = key_names::resolve_alias(&l).unwrap_or(&l);
-        Self::from_canonical(canonical).ok_or_else(|| {
-            serde::de::Error::custom(key_names::unknown_key_error(&s))
+        Self::from_str(&s).ok_or_else(|| {
+            serde::de::Error::custom(crate::key_names::unknown_key_error(&s))
         })
     }
 }
 
 // ---------------------------------------------------------------------------
-// Modifier extraction — track specific key state for exact matching
+// Modifier handling — track specific key state for exact matching
 // ---------------------------------------------------------------------------
 
 /// Map a CGKeyCode to its modifier bit position.  Returns `None` for
@@ -438,8 +441,6 @@ struct TapContext {
     /// Avoids a per-keystroke allocation inside the hot callback path.
     source: CFRetained<CGEventSource>,
     /// Bitmask tracking which specific modifier keys are physically pressed.
-    /// Updated on every modifier key down/up event.  This enables exact
-    /// matching against compiled rules, which use specific bits (not groups).
     modifier_state: u8,
 }
 
@@ -452,18 +453,12 @@ struct EventTapHandle {
     #[allow(dead_code)]
     run_loop_source: CFRetained<CFRunLoopSource>,
     /// Raw pointer to the heap-allocated `TapContext` passed as `user_info`.
-    /// Reclaimed in `Drop` to avoid a memory leak.
     context_ptr: *mut TapContext,
 }
 
 impl Drop for EventTapHandle {
     fn drop(&mut self) {
-        // Disable the tap so no further callbacks fire.
         CGEvent::tap_enable(&self.tap, false);
-
-        // Reclaim and free the leaked `Box<TapContext>`. This also drops
-        // the `CFRetained<CGEventSource>`, releasing the CoreFoundation
-        // object.
         unsafe {
             drop(Box::from_raw(self.context_ptr));
         }
@@ -485,9 +480,6 @@ pub(crate) fn start_mapping(
         CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .ok_or("Failed to create CGEventSource")?;
 
-    // Allocate the context on the heap and leak the `Box` to get a stable
-    // pointer for the FFI callback.  The `EventTapHandle` owns this pointer
-    // and reclaims it in `Drop`.
     let context_ptr = Box::into_raw(Box::new(TapContext {
         lookup,
         source,
@@ -506,7 +498,6 @@ pub(crate) fn start_mapping(
     };
 
     let Some(tap) = tap else {
-        // Tap creation failed; reclaim the context to avoid the leak.
         unsafe {
             drop(Box::from_raw(context_ptr));
         }
@@ -529,49 +520,31 @@ pub(crate) fn start_mapping(
         .add_source(Some(&run_loop_source), unsafe { kCFRunLoopCommonModes });
 
     CGEvent::tap_enable(&tap, true);
-    println!("Modern compile-safe macOS Event Tap actively running...");
+    println!("macOS Event Tap running.");
 
-    // Register signal handlers for graceful shutdown.
     let handler_ptr = signal_handler as *const () as usize;
     unsafe {
         libc::signal(libc::SIGINT, handler_ptr);
         libc::signal(libc::SIGTERM, handler_ptr);
     }
 
-    // Own the tap, run-loop-source, and context pointer. Dropped together
-    // when the run-loop exits.
     let handle = EventTapHandle {
         tap,
         run_loop_source,
         context_ptr,
     };
 
-    // Poll the run-loop with a short timeout so we can check the shutdown
-    // flag each iteration. This avoids an infinite `CFRunLoop::run()` block
-    // and lets us exit cleanly on SIGINT / SIGTERM.
     while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
-        CFRunLoop::run_in_mode(
-            unsafe { kCFRunLoopCommonModes },
-            0.5, // 500 ms timeout
-            true,
-        );
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopCommonModes }, 0.5, true);
     }
 
     println!("Shutdown signal received. Cleaning up...");
-
-    // `handle` is dropped here, which:
-    // 1. Disables the tap
-    // 2. Reclaims and frees the `TapContext` (and its `CGEventSource`)
     drop(handle);
 
     Ok(())
 }
 
 /// FFI callback invoked by the event tap for every matching keyboard event.
-///
-/// # Safety
-/// Called from CoreGraphics on the run-loop thread.  `proxy` and `user_info`
-/// are managed by the system / our `TapContext`.
 unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
     _proxy: objc2_core_graphics::CGEventTapProxy,
     _type: CGEventType,
@@ -584,7 +557,6 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     let context = unsafe { &mut *(user_info as *mut TapContext) };
 
-    // CGKeyCode is u16 — matches the native key code directly.
     let native_key: CGKeyCode = unsafe {
         CGEvent::integer_value_field(
             Some(event.as_ref()),
@@ -594,26 +566,20 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     let is_down = _type == CGEventType::KeyDown;
 
-    // Track specific modifier key state so we can do exact matching against
-    // compiled rules (which use specific bits, not group flags).
+    // Track specific modifier key state for exact matching.
     if let Some(bit) = keycode_to_modifier_bit(native_key) {
         if is_down {
             context.modifier_state |= 1 << bit;
         } else {
             context.modifier_state &= !(1 << bit);
         }
-        // Modifier-only events are passed through — don't remap them.
         return event.as_ptr();
     }
 
-    // Use the tracked modifier state for lookup — this reflects exactly which
-    // physical modifier keys are pressed.
     let pressed_modifiers = context.modifier_state;
 
-    // Resolve the remapping through the trait interface.  Clone the outputs
-    // so we can drop the read lock before expensive CGEvent operations.
     let guard = context.lookup.read();
-    let current_app = guard.active_app().to_lowercase();
+    let current_app = guard.active_app().to_string();
     let active_outputs = guard
         .for_app(&current_app, native_key, pressed_modifiers)
         .or_else(|| guard.global(native_key, pressed_modifiers))
@@ -622,12 +588,10 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     if let Some(outputs) = active_outputs {
         if is_down {
-            // Emit all output key events as chords.
             for native_key in &outputs {
                 emit_key_event(&context.source, native_key);
             }
         }
-        // Suppress the original event.
         return std::ptr::null_mut();
     }
 

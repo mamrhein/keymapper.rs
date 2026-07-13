@@ -29,27 +29,27 @@ The daemon exits if no configuration file is found.
 ```yaml
 # Global: swap CapsLock and LeftControl
 - mappings:
-    capslock: leftcontrol
-    leftcontrol: capslock
+    CapsLock: LeftControl
+    LeftControl: CapsLock
 
 # Vim-style navigation in iTerm2
 - name: "iterm nav"
   apps: [iTerm2]
   mappings:
-    ctrl+h: left
-    ctrl+j: down
-    ctrl+k: up
-    ctrl+l: right
+    Ctrl+H: Left
+    Ctrl+J: Down
+    Ctrl+K: Up
+    Ctrl+L: Right
 
 # Global chord shortcuts — outputs are real chords, not sequential presses
 - name: "workspace switch"
   mappings:
-    ctrl+shift+left: cmd+left
-    ctrl+shift+right: cmd+right
+    Ctrl+Shift+Left: Cmd+Left
+    Ctrl+Shift+Right: Cmd+Right
 
-# Modifier remapping — emit OptionLeft+L when pressing OptionRight
+# Modifier remapping — emit LeftAlt+L when pressing OptionRight
 - mappings:
-    optionright: optionleft+l
+    OptionRight: LeftAlt+L
 ```
 
 ### Structure
@@ -70,10 +70,10 @@ Each mapping is a `trigger: output` pair inside a `mappings:` block.
 
 | Output | Description | Example |
 |--------|-------------|---------|
-| Single key or chord string | Replace the trigger with one key event (modifiers held while pressing base) | `capslock: leftcontrol` |
-| List of chord strings | Emit a sequence of key events (macro) | `f1: [cmd, t]` |
+| Single key or chord string | Replace the trigger with one key event (modifiers held while pressing base) | `CapsLock: LeftControl` |
+| List of chord strings | Emit a sequence of key events (macro) | `F1: [Cmd, T]` |
 
-Every output is a **chord**: modifier keys are held while the base key is pressed, then released in reverse. For example, `cmd+left` is emitted as "press cmd → press left → release left → release cmd", ensuring the modifier has its intended effect.
+Every output is a **chord**: modifier keys are held while the base key is pressed, then released in reverse. For example, `Cmd+Left` is emitted as "press Cmd → press Left → release Left → release Cmd", ensuring the modifier has its intended effect.
 
 ### Triggers
 
@@ -81,42 +81,42 @@ Triggers use compact `+`-separated strings. The last token is the base key; all 
 
 | Syntax | Example | Meaning |
 |--------|---------|---------|
-| Bare key | `capslock` | Single key with no modifier requirement |
-| Modifier + key | `ctrl+h` | Ctrl held while pressing H |
-| Multiple modifiers | `cmd+shift+t` | Cmd + Shift held while pressing T |
+| Bare key | `CapsLock` | Single key with no modifier requirement |
+| Modifier + key | `Ctrl+H` | Ctrl held while pressing H |
+| Multiple modifiers | `Cmd+Shift+T` | Cmd + Shift held while pressing T |
 
-**Modifier matching:** when you write `ctrl`, the rule matches either left or right Control. The same applies to `shift`, `alt`, and `cmd` (which also accepts `super` and `win` as aliases).
+**Modifier matching:** when you write `Ctrl`, the rule matches either left or right Control. The same applies to `Shift`, `Alt`, and `Cmd` (which also accepts `Super` and `Win` as aliases).
 
-**Extra modifiers don't prevent matches.** A rule for `ctrl+h` will also match when `ctrl+shift+h` is pressed. Use more specific triggers if you need to distinguish.
+**Extra modifiers don't prevent matches.** A rule for `Ctrl+H` will also match when `Ctrl+Shift+H` is pressed. Use more specific triggers if you need to distinguish.
 
 ### Key names
 
-All key names are case-insensitive. Underscores are ignored, so `left_control` and `leftcontrol` are equivalent. Recognised keys include:
+All key names are case-sensitive and use PascalCase. Recognised keys include:
 
-- **Modifiers:** `leftcontrol`, `rightcontrol`, `leftshift`, `rightshift`, `leftalt`, `rightalt`, `leftcommand`, `rightcommand`, `capslock`
-- **Navigation:** `tab`, `space`, `return`, `backspace`, `delete`, `escape`, `uparrow`, `downarrow`, `leftarrow`, `rightarrow`, `pageup`, `pagedown`, `home`, `end`
-- **Function keys:** `f1` through `f12`
-- **Letters:** `a` through `z`
+- **Modifiers:** `LeftControl`, `RightControl`, `LeftCtrl`, `RightCtrl`, `LeftShift`, `RightShift`, `LeftAlt`, `RightAlt`, `OptionLeft`, `OptionRight`, `LeftCommand`, `RightCommand`, `CapsLock`
+- **Navigation:** `Tab`, `Space`, `Return`, `Backspace`, `Delete`, `Escape`, `UpArrow`, `DownArrow`, `LeftArrow`, `RightArrow`, `PageUp`, `PageDown`, `Home`, `End`
+- **Function keys:** `F1` through `F12`
+- **Letters:** `A` through `Z`
 - **Numbers:** `0` through `9`
 
 ### Common aliases
 
-The following aliases resolve to their canonical key name:
+The following aliases resolve to the same platform key:
 
 | Alias | Resolves to |
 |-------|-------------|
-| `ctrl`, `leftctrl` | `leftcontrol` |
-| `rightctrl` | `rightcontrol` |
-| `shift`, `leftshift` | `leftshift` |
-| `alt`, `leftalt` | `leftalt` |
-| `rightalt`, `rightoption`, `optionright` | `rightalt` |
-| `cmd`, `command`, `super` | `leftcommand` |
-| `rightcmd`, `rightcommand` | `rightcommand` |
-| `caps` | `capslock` |
-| `enter` | `return` |
-| `esc` | `escape` |
-| `up`, `down`, `left`, `right` | arrow keys |
-| `pgup`, `pgdn` | `pageup`, `pagedown` |
+| `Ctrl`, `LeftCtrl` | left Control key |
+| `RightCtrl` | right Control key |
+| `Shift`, `LeftShift` | left Shift key |
+| `Alt`, `LeftAlt`, `Option`, `OptionLeft` | left Alt/Option key |
+| `RightAlt`, `OptionRight` | right Alt/Option key |
+| `Cmd`, `Command`, `Super` | left Command/Super key |
+| `RightCmd`, `RightCommand` | right Command/Super key |
+| `Caps` | CapsLock |
+| `Enter` | Return |
+| `Esc` | Escape |
+| `Up`, `Down`, `Left`, `Right` | arrow keys |
+| `PgUp`, `PgDn` | PageUp, PageDown |
 
 ## Hot-reload
 
@@ -132,7 +132,7 @@ The `apps` field matches against the running process name or bundle ID. Use thes
 | Linux | `ps -eo comm` or `pgrep -a <name>` |
 | Windows | Check the process name in Task Manager (Details tab) or use `Get-Process` in PowerShell |
 
-The match is case-insensitive.
+The match is case-sensitive.
 
 ## Troubleshooting
 

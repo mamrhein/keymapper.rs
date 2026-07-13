@@ -13,7 +13,7 @@ use crate::mapping_cache::{CompiledRule, NativeKey, RuntimeLookupCache};
 /// Deliberately small so that platform modules never learn about the
 /// internal structure of [`RuntimeState`].
 pub trait Lookup: Send + Sync {
-    /// Best-effort lookup scoped to the given application name (lower-cased).
+    /// Best-effort lookup scoped to the given application name.
     ///
     /// `modifiers` is the exact bitmask of currently pressed modifier keys.
     /// Returns the output events if a matching rule is found.
