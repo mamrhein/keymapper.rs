@@ -515,3 +515,47 @@ fn config_add_with_apps() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------------
+// server status / start subcommands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn server_status_not_running() {
+    // keymapperd is unlikely to be running in the test environment.
+    let output = Command::new(bin_path())
+        .args(["server", "status"])
+        .output()
+        .expect("failed to run keymapper");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Either "is running" or "is not running" is valid; the important thing
+    // is that the command exits successfully.
+    assert!(
+        stdout.contains("keymapperd"),
+        "output should mention keymapperd"
+    );
+}
+
+#[test]
+fn server_start_not_found() {
+    // keymapperd is not on PATH in the test environment, so starting it
+    // should fail with a clear error message.
+    let output = Command::new(bin_path())
+        .args(["server", "start"])
+        .output()
+        .expect("failed to run keymapper");
+
+    // The command should fail because keymapperd is not on PATH.
+    assert!(
+        !output.status.success(),
+        "server start should fail when keymapperd is not on PATH"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to start") || stderr.contains("No such file"),
+        "error message: {}",
+        stderr
+    );
+}

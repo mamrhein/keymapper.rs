@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use keymapperd::config::{AppConfig, KeyEvent, RuleGroup};
 
+mod server;
+
 /// CLI utility for managing the keymapperd configuration.
 #[derive(Parser)]
 #[command(name = "keymapper")]
@@ -29,6 +31,21 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+
+    /// Daemon process management.
+    Server {
+        #[command(subcommand)]
+        command: ServerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServerCommands {
+    /// Check whether keymapperd is running.
+    Status,
+
+    /// Start keymapperd if it is not already running.
+    Start,
 }
 
 #[derive(Subcommand)]
@@ -74,6 +91,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 group,
                 apps,
             } => cmd_config_add(&trigger, &output, &group, apps)?,
+        },
+        Commands::Server { command } => match command {
+            ServerCommands::Status => cmd_server_status()?,
+            ServerCommands::Start => cmd_server_start()?,
         },
     }
 
@@ -216,6 +237,28 @@ fn cmd_config_add(
         "Added '{}' -> '{}' to group '{}'",
         trigger_str, output_str, group_name
     );
+
+    Ok(())
+}
+
+fn cmd_server_status() -> Result<(), Box<dyn std::error::Error>> {
+    if server::is_running() {
+        println!("keymapperd is running");
+    } else {
+        println!("keymapperd is not running");
+    }
+
+    Ok(())
+}
+
+fn cmd_server_start() -> Result<(), Box<dyn std::error::Error>> {
+    if server::is_running() {
+        println!("keymapperd is already running");
+        return Ok(());
+    }
+
+    server::start().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    println!("keymapperd started");
 
     Ok(())
 }
