@@ -39,7 +39,7 @@ use crate::{mapping_cache::NativeKey, state::Lookup};
 // ---------------------------------------------------------------------------
 
 /// Windows virtual-key code for a physical key on a US ANSI keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum Key {
     LeftControl = 0xA2,  // VK_LCONTROL

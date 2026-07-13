@@ -38,7 +38,7 @@ use crate::{mapping_cache::NativeKey, state::Lookup};
 ///
 /// Discriminant values come from `<HIToolbox/Events.h>` (`kVK_*` constants).
 /// `key as u16` yields the native CGKeyCode — no translation needed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum Key {
     // --- Modifiers ---

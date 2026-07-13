@@ -27,7 +27,7 @@ use crate::{mapping_cache::NativeKey, state::Lookup};
 // ---------------------------------------------------------------------------
 
 /// Linux evdev keycode for a physical key on a US ANSI keyboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum Key {
     LeftControl = 29,   // KEY_LEFTCTRL

@@ -22,7 +22,7 @@ pub use crate::os::Key;
 /// - `"Ctrl+A"` -- Ctrl held while pressing A
 /// - `"Cmd+Shift+T"` -- Cmd + Shift held while pressing T
 /// - `"RightAlt+L"` -- right option held while pressing L
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyEvent {
     /// Modifier keys held during the event (empty for bare key presses).
     pub modifiers: Vec<Key>,
@@ -338,6 +338,105 @@ impl Serialize for AppConfig {
 impl AppConfig {
     pub fn load_from_str(yaml_str: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml_str)
+    }
+
+    /// Analyse the parsed configuration and return a list of diagnostic
+    /// findings.  Each finding is a human-readable message.
+    pub fn check(&self) -> Vec<String> {
+        let mut diagnostics = Vec::new();
+
+        if self.groups.is_empty() {
+            diagnostics.push("no rule groups defined".to_string());
+        }
+
+        // Collect all (trigger_key, group_index, group_name) entries to
+        // detect duplicates.
+        let mut seen_triggers: indexmap::IndexMap<
+            KeyEvent,
+            Vec<(usize, String)>,
+        > = indexmap::IndexMap::new();
+
+        for (group_idx, group) in self.groups.iter().enumerate() {
+            let label = group
+                .name
+                .as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("group {}", group_idx + 1));
+
+            if group.mappings.is_empty() {
+                diagnostics.push(format!("'{}' has no mappings", label));
+            }
+
+            for (trigger, outputs) in group.mappings.iter() {
+                seen_triggers
+                    .entry(trigger.clone())
+                    .or_default()
+                    .push((group_idx, label.clone()));
+
+                // No-op: the only output is identical to the trigger.
+                if outputs.len() == 1 && outputs[0] == *trigger {
+                    diagnostics.push(format!(
+                        "'{}': {} remaps to itself (no-op)",
+                        label,
+                        trigger_to_string(trigger)
+                    ));
+                }
+            }
+        }
+
+        // Duplicate triggers across groups.
+        for (trigger, locations) in &seen_triggers {
+            if locations.len() > 1 {
+                let names: Vec<&str> =
+                    locations.iter().map(|(_, name)| name.as_str()).collect();
+                diagnostics.push(format!(
+                    "trigger {} appears in multiple groups: {}",
+                    trigger_to_string(trigger),
+                    names.join(", ")
+                ));
+            }
+        }
+
+        // Circular pairs: A→B and B→A (both single-output rules).
+        // Check per-group to avoid mappings in other groups overwriting
+        // entries that form a circular pair within this group.
+        let mut reported_pairs: Vec<(KeyEvent, KeyEvent)> = Vec::new();
+        for group in &self.groups {
+            let mut single_map: indexmap::IndexMap<KeyEvent, KeyEvent> =
+                indexmap::IndexMap::new();
+            for (trigger, outputs) in group.mappings.iter() {
+                if outputs.len() == 1 {
+                    single_map.insert(trigger.clone(), outputs[0].clone());
+                }
+            }
+
+            for (trigger, output) in &single_map {
+                // Self-maps are no-ops, not swaps.
+                if trigger == output {
+                    continue;
+                }
+                if let Some(back) = single_map.get(output) {
+                    if back == trigger {
+                        // Avoid reporting both A→B and B→A.
+                        let pair = if trigger < output {
+                            (trigger.clone(), output.clone())
+                        } else {
+                            (output.clone(), trigger.clone())
+                        };
+                        if !reported_pairs.contains(&pair) {
+                            reported_pairs.push(pair.clone());
+                            diagnostics.push(format!(
+                                "{} and {} form a circular pair (swap)",
+                                trigger_to_string(&pair.0),
+                                trigger_to_string(&pair.1)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        diagnostics
     }
 }
 
@@ -725,5 +824,116 @@ unknown_field:
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         assert_eq!(config.groups[0].apps, vec!["iterm2".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // check() diagnostics
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_clean_returns_empty() {
+        let yaml = r#"
+- mappings:
+    CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        assert!(config.check().is_empty());
+    }
+
+    #[test]
+    fn check_detects_no_op() {
+        let yaml = r#"
+- mappings:
+    CapsLock: CapsLock
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        assert!(issues.iter().any(|i| i.contains("remaps to itself")));
+    }
+
+    #[test]
+    fn check_detects_duplicate_trigger() {
+        let yaml = r#"
+- mappings:
+    CapsLock: LeftControl
+
+- mappings:
+    CapsLock: Tab
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("appears in multiple groups"))
+        );
+    }
+
+    #[test]
+    fn check_detects_empty_group() {
+        let yaml = r#"
+- name: "placeholder"
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        assert!(issues.iter().any(|i| i.contains("has no mappings")));
+    }
+
+    #[test]
+    fn check_detects_circular_swap() {
+        let yaml = r#"
+- mappings:
+    CapsLock: LeftControl
+    LeftControl: CapsLock
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        assert!(issues.iter().any(|i| i.contains("circular pair")));
+    }
+
+    #[test]
+    fn check_no_self_map_not_reported_as_swap() {
+        // A self-map (no-op) should not be reported as a circular pair.
+        let yaml = r#"
+- mappings:
+    A: A
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        assert!(!issues.iter().any(|i| i.contains("circular pair")));
+        assert!(issues.iter().any(|i| i.contains("remaps to itself")));
+    }
+
+    #[test]
+    fn check_detects_empty_config() {
+        let config = AppConfig::load_from_str("groups: []").unwrap();
+        let issues = config.check();
+        assert!(issues.iter().any(|i| i.contains("no rule groups")));
+    }
+
+    #[test]
+    fn check_aggregates_multiple_issues() {
+        let yaml = r#"
+- name: "empty"
+
+- mappings:
+    A: A
+    CapsLock: LeftControl
+    LeftControl: CapsLock
+
+- mappings:
+    CapsLock: Tab
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+
+        assert!(issues.iter().any(|i| i.contains("has no mappings")));
+        assert!(issues.iter().any(|i| i.contains("remaps to itself")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("appears in multiple groups"))
+        );
+        assert!(issues.iter().any(|i| i.contains("circular pair")));
     }
 }
