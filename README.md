@@ -1,6 +1,6 @@
 # keymapperd
 
-Cross-platform key-remapping daemon for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a TOML configuration file, with per-application scoping, chord (modifier + key) triggers, and hot-reload.
+Cross-platform key-remapping daemon for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers, and hot-reload.
 
 ## Installation
 
@@ -14,52 +14,60 @@ Run with appropriate privileges for keyboard interception (Accessibility on macO
 
 ## Configuration
 
-Create `config.toml` in one of the following locations:
+Create `config.yaml` in one of the following locations:
 
 | Platform | Path |
 |----------|------|
-| Linux | `$XDG_CONFIG_HOME/keymapperd/config.toml` (defaults to `~/.config/keymapperd/`) |
-| macOS | `~/Library/Application Support/keymapperd/config.toml` |
-| Windows | `%APPDATA%\keymapperd\config.toml` |
+| Linux | `$XDG_CONFIG_HOME/keymapperd/config.yaml` (defaults to `~/.config/keymapperd/`) |
+| macOS | `~/Library/Application Support/keymapperd/config.yaml` |
+| Windows | `%APPDATA%\keymapperd\config.yaml` |
 
 The daemon exits if no configuration file is found.
 
 ### Format
 
-```toml
-[[rules]]
-description = "Remap CapsLock to LeftControl globally"
-trigger = "CapsLock"
-action = { RemapTo = "LeftControl" }
-applications = []
+```yaml
+# Global: swap CapsLock and LeftControl
+- mappings:
+    capslock: left_control
+    left_control: capslock
 
-[[rules]]
-description = "Map F1 to Cmd+T in Chrome"
-trigger = "F1"
-action = { Shortcut = ["leftcommand", "t"] }
-applications = ["Google Chrome"]
+# Vim-style navigation in iTerm2
+- name: "iterm nav"
+  apps: [iTerm2]
+  mappings:
+    ctrl+h: left
+    ctrl+j: down
+    ctrl+k: up
+    ctrl+l: right
 
-[[rules]]
-description = "Map Ctrl+H to LeftArrow globally"
-trigger = "ctrl+h"
-action = { RemapTo = "leftarrow" }
-applications = []
-
-[[rules]]
-description = "Map Cmd+Shift+T to F5 in VS Code"
-trigger = "cmd+shift+t"
-action = { RemapTo = "f5" }
-applications = ["Code"]
+# Global chord shortcuts
+- name: "workspace switch"
+  mappings:
+    ctrl+shift+left: [cmd, left]
+    ctrl+shift+right: [cmd, right]
 ```
 
-### Rule fields
+### Structure
+
+The document is a YAML sequence of rule groups. Each group has:
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `description` | No | Human-readable comment (ignored at runtime) |
-| `trigger` | Yes | The key or chord to intercept |
-| `action` | Yes | What to do when the trigger fires |
-| `applications` | Yes | List of application names to scope the rule. Empty list (`[]`) means global |
+| `name` | No | Human-readable label (ignored at runtime) |
+| `apps` | No | List of application names to scope the group. Omit or leave empty for global rules |
+| `mappings` | Yes | Key-value pairs mapping triggers to outputs |
+
+Groups are evaluated in definition order. Within each group, mappings are evaluated top-to-bottom; the first matching trigger wins.
+
+### Mappings
+
+Each mapping is a `trigger: output` pair inside a `mappings:` block.
+
+| Output | Description | Example |
+|--------|-------------|---------|
+| Single chord string | Replace the trigger with one key or chord | `capslock: left_control` |
+| List of chord strings | Emit a sequence of keys (macro) | `f1: [cmd, t]` |
 
 ### Triggers
 
@@ -67,24 +75,17 @@ Triggers use compact `+`-separated strings. The last token is the base key; all 
 
 | Syntax | Example | Meaning |
 |--------|---------|---------|
-| Bare key | `"CapsLock"` | Single key with no modifier requirement |
-| Modifier + key | `"ctrl+h"` | Ctrl held while pressing H |
-| Multiple modifiers | `"cmd+shift+t"` | Cmd + Shift held while pressing T |
+| Bare key | `capslock` | Single key with no modifier requirement |
+| Modifier + key | `ctrl+h` | Ctrl held while pressing H |
+| Multiple modifiers | `cmd+shift+t` | Cmd + Shift held while pressing T |
 
-**Modifier matching:** when you write `"ctrl"`, the rule matches either left or right Control. The same applies to `"shift"`, `"alt"`, and `"cmd"` (which also accepts `"super"` and `"win"` as aliases). To be specific about a side, use `"leftctrl"`, `"rightshift"`, etc.
+**Modifier matching:** when you write `ctrl`, the rule matches either left or right Control. The same applies to `shift`, `alt`, and `cmd` (which also accepts `super` and `win` as aliases). To be specific about a side, use `leftctrl`, `rightshift`, etc.
 
-**Extra modifiers don't prevent matches.** A rule for `"ctrl+h"` will also match when `ctrl+shift+h` is pressed. Use more specific triggers if you need to distinguish.
-
-### Actions
-
-| Action | Description | Example |
-|--------|-------------|---------|
-| `RemapTo` | Replace the key with another single key | `{ RemapTo = "LeftControl" }` |
-| `Shortcut` | Emit a sequence of key events | `{ Shortcut = ["leftcommand", "t"] }` |
+**Extra modifiers don't prevent matches.** A rule for `ctrl+h` will also match when `ctrl+shift+h` is pressed. Use more specific triggers if you need to distinguish.
 
 ### Key names
 
-All key names are case-insensitive. Recognised keys include:
+All key names are case-insensitive. Underscores are ignored, so `left_control` and `leftcontrol` are equivalent. Recognised keys include:
 
 - **Modifiers:** `leftcontrol`, `rightcontrol`, `leftshift`, `rightshift`, `leftalt`, `rightalt`, `leftcommand`, `rightcommand`, `capslock`
 - **Navigation:** `tab`, `space`, `return`, `backspace`, `delete`, `escape`, `uparrow`, `downarrow`, `leftarrow`, `rightarrow`, `pageup`, `pagedown`, `home`, `end`
@@ -107,13 +108,32 @@ The following aliases resolve to their canonical key name:
 | `caps` | `capslock` |
 | `enter` | `return` |
 | `esc` | `escape` |
-| `up`, `uparrow`, `up_arrow` | `uparrow` |
-| `down`, `left`, `right` | (direction + `arrow`) |
+| `up`, `down`, `left`, `right` | arrow keys |
 | `pgup`, `pgdn` | `pageup`, `pagedown` |
 
 ## Hot-reload
 
-Edit and save your `config.toml` while the daemon is running. Changes take effect immediately without restarting. Invalid configurations are rejected and the previous configuration is retained.
+Edit and save your `config.yaml` while the daemon is running. Changes take effect immediately without restarting. Invalid configurations are rejected and the previous configuration is retained.
+
+## Finding application names
+
+The `apps` field matches against the running process name or bundle ID. Use these platform-specific tools to find the correct name:
+
+| Platform | Command |
+|----------|---------|
+| macOS | `ls /Applications` for app bundles (use the bundle name, e.g. `Code` for VS Code), or `ps aux` for processes |
+| Linux | `ps -eo comm` or `pgrep -a <name>` |
+| Windows | Check the process name in Task Manager (Details tab) or use `Get-Process` in PowerShell |
+
+The match is case-insensitive.
+
+## Troubleshooting
+
+**macOS — "Failed to create CGEventTap":** grant Accessibility permission in System Settings > Privacy & Security > Accessibility. Restart the daemon after granting access.
+
+**Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
+
+**Rules don't take effect:** check that the `apps` value matches the actual process name. Use the commands in the section above to find it. Omit `apps` for global rules.
 
 ## How it works
 
