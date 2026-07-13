@@ -19,8 +19,8 @@ mod windows;
 // module.
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{Key, start_mapping};
+pub use linux::{Key, start_mapping};
 #[cfg(target_os = "macos")]
-pub(crate) use macos::{Key, start_mapping};
+pub use macos::{Key, start_mapping};
 #[cfg(target_os = "windows")]
-pub(crate) use windows::{Key, start_mapping};
+pub use windows::{Key, start_mapping};

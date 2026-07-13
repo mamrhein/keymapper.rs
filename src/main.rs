@@ -7,21 +7,13 @@
 // $Source$
 // $Revision$
 
-mod config;
-mod config_path;
-mod key_names;
-mod mapping_cache;
-mod os;
-mod state;
-mod watcher;
-
 use std::{sync::Arc, thread, time::Duration};
 
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(config_path) = config_path::find_config_path() else {
-        config_path::print_search_locations();
+    let Some(config_path) = keymapperd::config_path::find_config_path() else {
+        keymapperd::config_path::print_search_locations();
         std::process::exit(1);
     };
 
@@ -30,22 +22,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = config_path.canonicalize().unwrap_or(config_path);
 
     let initial_cache =
-        crate::mapping_cache::RuntimeLookupCache::compile_from_path(
+        keymapperd::mapping_cache::RuntimeLookupCache::compile_from_path(
             &config_path,
         )?;
 
     // Coerce to dyn Lookup at creation time.  All Arc::clone calls
     // downstream inherit this trait-object type, so platform modules
     // never see the concrete RuntimeState shape.
-    let state: Arc<RwLock<dyn crate::state::Lookup>> =
-        Arc::new(RwLock::new(crate::state::RuntimeState::new(
+    let state: Arc<RwLock<dyn keymapperd::state::Lookup>> =
+        Arc::new(RwLock::new(keymapperd::state::RuntimeState::new(
             initial_cache,
             String::from("unknown"),
         )));
 
     // Start hot-reloader thread
-    let _watcher =
-        watcher::start_config_watcher(&config_path, Arc::clone(&state))?;
+    let _watcher = keymapperd::watcher::start_config_watcher(
+        &config_path,
+        Arc::clone(&state),
+    )?;
 
     // Start tracking foreground windows natively
     let tracker_state = Arc::clone(&state);
@@ -73,5 +67,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Cross-platform runtime engines fully synchronized.");
 
-    crate::os::start_mapping(Arc::clone(&state))
+    keymapperd::os::start_mapping(Arc::clone(&state))
 }

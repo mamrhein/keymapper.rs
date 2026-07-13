@@ -46,7 +46,7 @@ pub struct RuntimeState {
 }
 
 impl RuntimeState {
-    pub(crate) fn new(cache: RuntimeLookupCache, app: String) -> Self {
+    pub fn new(cache: RuntimeLookupCache, app: String) -> Self {
         Self {
             lookup_cache: cache,
             active_app: app,

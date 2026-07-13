@@ -470,7 +470,7 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
     SHUTDOWN_REQUESTED.store(true, Ordering::Release);
 }
 
-pub(crate) fn start_mapping(
+pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mask: u64 =
