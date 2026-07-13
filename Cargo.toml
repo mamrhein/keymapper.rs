@@ -12,6 +12,10 @@ license-file = "LICENSE.TXT"
 keywords = ["Cross-platform", "keymapper", "macOS", "Linux", "Windows"]
 categories = ["utilities"]
 
+[[bin]]
+name = "keymapper"
+path = "src/bin/keymapper.rs"
+
 [dependencies]
 active-win-pos-rs = "0.11" # active window tracking
 dirs = "6" # platform config directory resolution
