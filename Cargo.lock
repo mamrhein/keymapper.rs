@@ -866,6 +866,9 @@ version = "0.1.0"
 dependencies = [
  "active-win-pos-rs",
  "clap",
+ "core-foundation",
+ "core-foundation-sys",
+ "core-graphics",
  "dirs",
  "evdev",
  "fs-err",
@@ -882,6 +885,7 @@ dependencies = [
  "serde_yaml",
  "uinput",
  "windows-sys 0.61.2",
+ "xcb",
 ]
 
 [[package]]

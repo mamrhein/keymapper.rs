@@ -33,8 +33,9 @@ fs-err = "3"
 evdev = "0.13"
 libc = "0.2"
 uinput = "0.1"
+xcb = "1.2" # window enumeration for `keymapper appnames`
 
-# Modern macOS framework bindings (Corrected)
+# macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
 objc2 = "0.6"
@@ -42,6 +43,9 @@ objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
 objc2-core-graphics = "0.3"
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
+core-graphics = "0.23" # window enumeration for `keymapper appnames`
+core-foundation = "0.9" # CFDictionary parsing for `keymapper appnames`
+core-foundation-sys = "0.8" # raw CFArray/CFNumber FFI for `keymapper appnames`
 
 # Windows-specific system bindings
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -49,5 +53,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
-    "Win32_UI_Input_KeyboardAndMouse"
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_Storage_FileSystem",
 ] }

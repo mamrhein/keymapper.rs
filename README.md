@@ -124,15 +124,34 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 ## Finding application names
 
-The `apps` field matches against the running process name or bundle ID. Use these platform-specific tools to find the correct name:
+Run the built-in discovery command to list every visible application along with the
+exact name keymapperd uses for matching:
 
-| Platform | Command |
-|----------|---------|
-| macOS | `ls /Applications` for app bundles (use the bundle name, e.g. `Code` for VS Code), or `ps aux` for processes |
-| Linux | `ps -eo comm` or `pgrep -a <name>` |
-| Windows | Check the process name in Task Manager (Details tab) or use `Get-Process` in PowerShell |
+```bash
+keymapper appnames
+```
 
-The match is case-sensitive.
+Example output:
+
+```
+Arc
+iTerm2
+Keyboard Maestro Engine
+Activity Monitor
+```
+
+Copy the names directly into your config:
+
+```yaml
+- name: "iterm nav"
+  apps: [iTerm2]
+  mappings:
+    Ctrl+H: Left
+```
+
+The match is case-sensitive.  On Wayland, `keymapper appnames` prints compositor-
+specific alternatives (e.g. `hyprctl`, `swaymsg`) since there is no universal
+window-enumeration API.
 
 ## Troubleshooting
 
@@ -140,7 +159,7 @@ The match is case-sensitive.
 
 **Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
 
-**Rules don't take effect:** check that the `apps` value matches the actual process name. Use the commands in the section above to find it. Omit `apps` for global rules.
+**Rules don't take effect:** check that the `apps` value matches the actual application name. Run `keymapper appnames` to find the correct value. Omit `apps` for global rules.
 
 ## How it works
 

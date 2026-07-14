@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use keymapperd::config::{AppConfig, KeyEvent, RuleGroup};
 
+mod apps;
 mod server;
 
 /// CLI utility for managing the keymapperd configuration.
@@ -26,6 +27,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// List application names for all visible windows.
+    ///
+    /// The printed names are the exact values that keymapperd uses to match
+    /// rules against running applications.  Use them in the `apps` field of
+    /// your config.yaml.
+    Appnames,
+
     /// Configuration file management.
     Config {
         #[command(subcommand)]
@@ -81,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Appnames => cmd_appnames()?,
         Commands::Config { command } => match command {
             ConfigCommands::List => cmd_config_list()?,
             ConfigCommands::Check => cmd_config_check()?,
@@ -111,6 +120,21 @@ fn load_config() -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
     let contents = fs_err::read_to_string(&path)?;
 
     Ok((path, contents))
+}
+
+fn cmd_appnames() -> Result<(), Box<dyn std::error::Error>> {
+    let names = apps::list_app_names();
+
+    if names.is_empty() {
+        println!("No visible applications found.");
+        return Ok(());
+    }
+
+    for name in &names {
+        println!("{name}");
+    }
+
+    Ok(())
 }
 
 fn cmd_config_list() -> Result<(), Box<dyn std::error::Error>> {
