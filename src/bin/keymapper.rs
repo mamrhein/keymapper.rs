@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use keymapperd::config::{AppConfig, KeyEvent, RuleGroup};
@@ -111,15 +111,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn load_config() -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
-    let path =
-        keymapperd::config_path::find_config_path().ok_or_else(|| {
-            keymapperd::config_path::print_search_locations();
-            "configuration file not found".to_string()
-        })?;
+    let path = keymapperd::config_path::find_config_path_strict().map_err(
+        |e| -> Box<dyn std::error::Error> {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+            unreachable!()
+        },
+    )?;
 
     let contents = fs_err::read_to_string(&path)?;
 
     Ok((path, contents))
+}
+
+/// Check that a config file is not a symbolic link and return it if valid.
+fn reject_symlink(path: &Path) -> Result<(), String> {
+    if std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|m| m.file_type().is_symlink())
+    {
+        Err(format!(
+            "config file {} is a symbolic link and will not be followed",
+            path.display(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn cmd_appnames() -> Result<(), Box<dyn std::error::Error>> {
@@ -215,8 +232,9 @@ fn cmd_config_add(
 
     let path = path.ok_or("could not determine config file location")?;
 
-    // Load existing config or start fresh.
+    // Load existing config or start fresh.  Reject symlinks on load.
     let mut config = if path.is_file() {
+        reject_symlink(&path)?;
         let contents = fs_err::read_to_string(&path)?;
         AppConfig::load_from_str(&contents).map_err(|err| {
             format!("failed to parse {}: {err}", path.display())

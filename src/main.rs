@@ -12,13 +12,17 @@ use std::{sync::Arc, thread, time::Duration};
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let Some(config_path) = keymapperd::config_path::find_config_path() else {
-        keymapperd::config_path::print_search_locations();
-        std::process::exit(1);
-    };
+    let config_path = keymapperd::config_path::find_config_path_strict()
+        .map_err(|e| {
+            eprintln!("Error: {}", e);
+            std::process::exit(1);
+            unreachable!()
+        })?;
 
     // Resolve to an absolute path so the watcher and cache compiler have
-    // a stable reference regardless of later CWD changes.
+    // a stable reference regardless of later CWD changes.  Symlinks in
+    // parent directory components are resolved here; the config file itself
+    // was already verified to not be a symlink.
     let config_path = config_path.canonicalize().unwrap_or(config_path);
 
     let initial_cache =
