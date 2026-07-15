@@ -220,7 +220,7 @@ impl Key {
         }
     }
 
-    pub fn from_str(name: &str) -> Option<Self> {
+    pub fn try_from_str(name: &str) -> Option<Self> {
         match name {
             "Ctrl" => Some(Self::LeftControl),
             "Shift" => Some(Self::LeftShift),

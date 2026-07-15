@@ -233,12 +233,12 @@ impl Key {
         }
     }
 
-    /// Parse a PascalCase key name into a Key variant.
+    /// Parse a TitleCase key name into a Key variant.
     ///
     /// Case-sensitive matching.  Generic modifier names (`Ctrl`, `Shift`,
     /// `Alt`, `Command`) resolve to left-side defaults.  Explicit names
     /// (`LeftControl`, `RightAlt`) are preserved.
-    pub fn from_str(name: &str) -> Option<Self> {
+    pub fn try_from_str(name: &str) -> Option<Self> {
         match name {
             // Generic modifiers — resolve to left-side defaults
             "Ctrl" => Some(Self::LeftControl),
@@ -338,7 +338,7 @@ impl<'de> Deserialize<'de> for Key {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).ok_or_else(|| {
+        Self::try_from_str(&s).ok_or_else(|| {
             serde::de::Error::custom(crate::key_names::unknown_key_error(&s))
         })
     }

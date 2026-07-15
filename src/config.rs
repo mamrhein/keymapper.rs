@@ -102,7 +102,7 @@ fn parse_key(token: &str) -> Result<Key, String> {
         return Err("empty key token in event string".to_string());
     }
 
-    Key::from_str(trimmed)
+    Key::try_from_str(trimmed)
         .ok_or_else(|| crate::key_names::unknown_key_error(trimmed))
 }
 
