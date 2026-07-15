@@ -90,8 +90,8 @@ pub fn find_config_path_strict() -> Result<PathBuf, String> {
 fn search_dirs() -> impl Iterator<Item = PathBuf> {
     [cwd_path()]
         .into_iter()
-        .filter_map(|d| d)
-        .chain(platform_config_dir().into_iter())
+        .flatten()
+        .chain(platform_config_dir())
 }
 
 /// Return the current working directory, or `None` if it cannot be determined.
