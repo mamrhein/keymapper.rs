@@ -130,7 +130,7 @@ fn platform_config_dir() -> Option<PathBuf> {
     std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
-        .unwrap_or_else(|| dirs::home_dir()?.join(".config"))
+        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
         .map(|d| d.join(APP_NAME))
 }
 
