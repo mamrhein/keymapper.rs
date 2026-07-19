@@ -420,22 +420,22 @@ impl AppConfig {
                 if trigger == output {
                     continue;
                 }
-                if let Some(back) = single_map.get(output) {
-                    if back == trigger {
-                        // Avoid reporting both A→B and B→A.
-                        let pair = if trigger < output {
-                            (trigger.clone(), output.clone())
-                        } else {
-                            (output.clone(), trigger.clone())
-                        };
-                        if !reported_pairs.contains(&pair) {
-                            reported_pairs.push(pair.clone());
-                            diagnostics.push(format!(
-                                "{} and {} form a circular pair (swap)",
-                                trigger_to_string(&pair.0),
-                                trigger_to_string(&pair.1)
-                            ));
-                        }
+                if let Some(back) = single_map.get(output)
+                    && back == trigger
+                {
+                    // Avoid reporting both A→B and B→A.
+                    let pair = if trigger < output {
+                        (trigger.clone(), output.clone())
+                    } else {
+                        (output.clone(), trigger.clone())
+                    };
+                    if !reported_pairs.contains(&pair) {
+                        reported_pairs.push(pair.clone());
+                        diagnostics.push(format!(
+                            "{} and {} form a circular pair (swap)",
+                            trigger_to_string(&pair.0),
+                            trigger_to_string(&pair.1)
+                        ));
                     }
                 }
             }

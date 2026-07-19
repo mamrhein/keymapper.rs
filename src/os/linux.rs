@@ -350,13 +350,13 @@ fn emit_key_event(
     let mut pressed_modifiers: Vec<u16> = Vec::new();
 
     for bit in 0..8 {
-        if (native_key.modifiers >> bit) & 1 == 1 {
-            if let Some(code) = modifier_bit_to_code(bit) {
-                device.write(EventType::KEY.0 as _, code as _, 1)?;
-                pressed_modifiers.push(code);
-                device.synchronize()?;
-                thread::sleep(Duration::from_millis(1));
-            }
+        if (native_key.modifiers >> bit) & 1 == 1
+            && let Some(code) = modifier_bit_to_code(bit)
+        {
+            device.write(EventType::KEY.0 as _, code as _, 1)?;
+            pressed_modifiers.push(code);
+            device.synchronize()?;
+            thread::sleep(Duration::from_millis(1));
         }
     }
 

@@ -259,10 +259,10 @@ fn cmd_config_add(
 
     // If --apps was given, apply it to the group (only if creating new or
     // the group has no apps yet).
-    if let (Some(g), Some(apps)) = (&mut group, &apps) {
-        if g.apps.is_empty() {
-            g.apps = apps.clone();
-        }
+    if let (Some(g), Some(apps)) = (&mut group, &apps)
+        && g.apps.is_empty()
+    {
+        g.apps = apps.clone();
     }
 
     // Add the mapping.
