@@ -7,15 +7,6 @@
 // $Source$
 // $Revision$
 
-// ---------------------------------------------------------------------------
-// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
-// License:     This program is part of a larger application. For license
-//              details please read the file LICENSE.TXT provided together
-//              with the application.
-// ---------------------------------------------------------------------------
-// $Source$
-// $Revision$
-
 //! Lists visible application names on Linux.
 //!
 //! On X11 the `app_name` is derived from the `WM_CLASS` property (the class
@@ -26,6 +17,8 @@
 //! helpful message is printed instead.
 
 use std::env;
+
+use xcb::XidNew;
 
 /// Return true if the session appears to be Wayland rather than X11.
 fn is_wayland() -> bool {
@@ -85,7 +78,7 @@ fn list_via_x11() -> Vec<String> {
     for &window in &windows {
         let prop_cookie = conn.send_request(&xcb::x::GetProperty {
             delete: false,
-            window: xcb::x::Window(window),
+            window: xcb::x::Window::new(window),
             property: wm_class_atom,
             r#type: xcb::x::ATOM_STRING,
             long_offset: 0,
