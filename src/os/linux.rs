@@ -102,24 +102,24 @@ pub enum Key {
     Number9 = 10,
     Number0 = 11,
     // --- Numpad ---
-    Numpad7 = 71,     // KEY_KP7
-    Numpad8 = 72,     // KEY_KP8
-    Numpad9 = 73,     // KEY_KP9
-    Numpad4 = 75,     // KEY_KP4
-    Numpad5 = 76,     // KEY_KP5
-    Numpad6 = 77,     // KEY_KP6
-    Numpad1 = 79,     // KEY_KP1
-    Numpad2 = 80,     // KEY_KP2
-    Numpad3 = 81,     // KEY_KP3
-    Numpad0 = 82,     // KEY_KP0
-    NumpadDecimal = 83,   // KEY_KPDOT
-    NumpadPlus = 78,      // KEY_KPPLUS
-    NumpadEnter = 96,     // KEY_KPENTER
+    Numpad7 = 71,       // KEY_KP7
+    Numpad8 = 72,       // KEY_KP8
+    Numpad9 = 73,       // KEY_KP9
+    Numpad4 = 75,       // KEY_KP4
+    Numpad5 = 76,       // KEY_KP5
+    Numpad6 = 77,       // KEY_KP6
+    Numpad1 = 79,       // KEY_KP1
+    Numpad2 = 80,       // KEY_KP2
+    Numpad3 = 81,       // KEY_KP3
+    Numpad0 = 82,       // KEY_KP0
+    NumpadDecimal = 83, // KEY_KPDOT
+    NumpadPlus = 78,    // KEY_KPPLUS
+    NumpadEnter = 96,   // KEY_KPENTER
     // Note: NumpadMultiply (KEY_KPASTERISK=55) shares code with F(55)
     // Note: NumpadMinus (KEY_KPMINUS=74) shares code with... nothing in our enum
-    NumpadMinus = 74,     // KEY_KPMINUS
-    NumpadMultiply = 55,  // KEY_KPASTERISK (shares evdev code with F)
-    NumpadDivide = 98,    // KEY_KPSLASH
+    NumpadMinus = 74,    // KEY_KPMINUS
+    NumpadMultiply = 55, // KEY_KPASTERISK (shares evdev code with F)
+    NumpadDivide = 98,   // KEY_KPSLASH
     // --- Punctuation / symbols ---
     Minus = 12,        // KEY_MINUS
     Equal = 13,        // KEY_EQUAL
@@ -133,7 +133,7 @@ pub enum Key {
     Slash = 53,        // KEY_SLASH
     Grave = 41,        // KEY_GRAVE
     IsoExtra = 86,     // KEY_102ND
-    IsoHash = 99       // KEY_HASHTHILDE
+    IsoHash = 99,      // KEY_HASHTHILDE
 }
 
 impl Key {
@@ -269,6 +269,227 @@ impl Key {
             Self::Grave => "Grave",
             Self::IsoExtra => "IsoExtra",
             Self::IsoHash => "IsoHash",
+        }
+    }
+
+    /// All defined key variants.
+    pub const ALL: [Self; 100] = [
+        // Modifiers
+        Self::LeftControl,
+        Self::RightControl,
+        Self::LeftShift,
+        Self::RightShift,
+        Self::LeftAlt,
+        Self::RightAlt,
+        Self::LeftCommand,
+        Self::RightCommand,
+        Self::CapsLock,
+        // Editor / misc
+        Self::Tab,
+        Self::Space,
+        Self::Return,
+        Self::Backspace,
+        Self::Delete,
+        Self::Escape,
+        // Navigation
+        Self::UpArrow,
+        Self::DownArrow,
+        Self::LeftArrow,
+        Self::RightArrow,
+        Self::PageUp,
+        Self::PageDown,
+        Self::Home,
+        Self::End,
+        // Function keys
+        Self::F1,
+        Self::F2,
+        Self::F3,
+        Self::F4,
+        Self::F5,
+        Self::F6,
+        Self::F7,
+        Self::F8,
+        Self::F9,
+        Self::F10,
+        Self::F11,
+        Self::F12,
+        // Letters
+        Self::A,
+        Self::B,
+        Self::C,
+        Self::D,
+        Self::E,
+        Self::F,
+        Self::G,
+        Self::H,
+        Self::I,
+        Self::J,
+        Self::K,
+        Self::L,
+        Self::M,
+        Self::N,
+        Self::O,
+        Self::P,
+        Self::Q,
+        Self::R,
+        Self::S,
+        Self::T,
+        Self::U,
+        Self::V,
+        Self::W,
+        Self::X,
+        Self::Y,
+        Self::Z,
+        // Numbers
+        Self::Number1,
+        Self::Number2,
+        Self::Number3,
+        Self::Number4,
+        Self::Number5,
+        Self::Number6,
+        Self::Number7,
+        Self::Number8,
+        Self::Number9,
+        Self::Number0,
+        // Numpad
+        Self::Numpad7,
+        Self::Numpad8,
+        Self::Numpad9,
+        Self::Numpad4,
+        Self::Numpad5,
+        Self::Numpad6,
+        Self::Numpad1,
+        Self::Numpad2,
+        Self::Numpad3,
+        Self::Numpad0,
+        Self::NumpadDecimal,
+        Self::NumpadPlus,
+        Self::NumpadEnter,
+        Self::NumpadMinus,
+        Self::NumpadMultiply,
+        Self::NumpadDivide,
+        // Punctuation
+        Self::Minus,
+        Self::Equal,
+        Self::BracketLeft,
+        Self::BracketRight,
+        Self::Backslash,
+        Self::Semicolon,
+        Self::Quote,
+        Self::Comma,
+        Self::Period,
+        Self::Slash,
+        Self::Grave,
+        Self::IsoExtra,
+        Self::IsoHash,
+    ];
+
+    /// Convert a native evdev key code back to a Key variant.
+    ///
+    /// Returns `None` for codes that are not defined in this enum.
+    pub const fn from_native(code: u16) -> Option<Self> {
+        match code {
+            29 => Some(Self::LeftControl),
+            97 => Some(Self::RightControl),
+            42 => Some(Self::LeftShift),
+            54 => Some(Self::RightShift),
+            56 => Some(Self::LeftAlt),
+            100 => Some(Self::RightAlt),
+            125 => Some(Self::LeftCommand),
+            126 => Some(Self::RightCommand),
+            58 => Some(Self::CapsLock),
+            15 => Some(Self::Tab),
+            57 => Some(Self::Space),
+            28 => Some(Self::Return),
+            14 => Some(Self::Backspace),
+            111 => Some(Self::Delete),
+            1 => Some(Self::Escape),
+            103 => Some(Self::UpArrow),
+            108 => Some(Self::DownArrow),
+            105 => Some(Self::LeftArrow),
+            106 => Some(Self::RightArrow),
+            104 => Some(Self::PageUp),
+            109 => Some(Self::PageDown),
+            102 => Some(Self::Home),
+            107 => Some(Self::End),
+            59 => Some(Self::F1),
+            60 => Some(Self::F2),
+            61 => Some(Self::F3),
+            62 => Some(Self::F4),
+            63 => Some(Self::F5),
+            64 => Some(Self::F6),
+            65 => Some(Self::F7),
+            66 => Some(Self::F8),
+            67 => Some(Self::F9),
+            68 => Some(Self::F10),
+            87 => Some(Self::F11),
+            88 => Some(Self::F12),
+            30 => Some(Self::A),
+            48 => Some(Self::B),
+            46 => Some(Self::C),
+            32 => Some(Self::D),
+            18 => Some(Self::E),
+            33 => Some(Self::F),
+            34 => Some(Self::G),
+            35 => Some(Self::H),
+            23 => Some(Self::I),
+            36 => Some(Self::J),
+            37 => Some(Self::K),
+            38 => Some(Self::L),
+            50 => Some(Self::M),
+            49 => Some(Self::N),
+            24 => Some(Self::O),
+            25 => Some(Self::P),
+            16 => Some(Self::Q),
+            19 => Some(Self::R),
+            31 => Some(Self::S),
+            20 => Some(Self::T),
+            22 => Some(Self::U),
+            47 => Some(Self::V),
+            17 => Some(Self::W),
+            45 => Some(Self::X),
+            21 => Some(Self::Y),
+            44 => Some(Self::Z),
+            2 => Some(Self::Number1),
+            3 => Some(Self::Number2),
+            4 => Some(Self::Number3),
+            5 => Some(Self::Number4),
+            6 => Some(Self::Number5),
+            7 => Some(Self::Number6),
+            8 => Some(Self::Number7),
+            9 => Some(Self::Number8),
+            10 => Some(Self::Number9),
+            11 => Some(Self::Number0),
+            71 => Some(Self::Numpad7),
+            72 => Some(Self::Numpad8),
+            73 => Some(Self::Numpad9),
+            75 => Some(Self::Numpad4),
+            76 => Some(Self::Numpad5),
+            77 => Some(Self::Numpad6),
+            79 => Some(Self::Numpad1),
+            80 => Some(Self::Numpad2),
+            81 => Some(Self::Numpad3),
+            82 => Some(Self::Numpad0),
+            83 => Some(Self::NumpadDecimal),
+            78 => Some(Self::NumpadPlus),
+            96 => Some(Self::NumpadEnter),
+            74 => Some(Self::NumpadMinus),
+            55 => Some(Self::NumpadMultiply),
+            98 => Some(Self::NumpadDivide),
+            12 => Some(Self::Minus),
+            13 => Some(Self::Equal),
+            26 => Some(Self::BracketLeft),
+            27 => Some(Self::BracketRight),
+            43 => Some(Self::Backslash),
+            39 => Some(Self::Semicolon),
+            40 => Some(Self::Quote),
+            51 => Some(Self::Comma),
+            52 => Some(Self::Period),
+            53 => Some(Self::Slash),
+            41 => Some(Self::Grave),
+            86 => Some(Self::IsoExtra),
+            99 => Some(Self::IsoHash),
+            _ => None,
         }
     }
 
@@ -491,9 +712,10 @@ static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
 fn determine_seat() -> String {
     // Check the environment first.
     if let Ok(seat) = std::env::var("XDG_SEAT")
-        && !seat.is_empty() {
-            return seat;
-        }
+        && !seat.is_empty()
+    {
+        return seat;
+    }
 
     // Resolve the session id and look up the seat in its systemd session file.
     if let Ok(session_id) = std::fs::read_to_string("/proc/self/sessionid") {
@@ -502,9 +724,10 @@ fn determine_seat() -> String {
         if let Ok(contents) = std::fs::read_to_string(&path) {
             for line in contents.lines() {
                 if let Some(seat) = line.strip_prefix("SEAT=")
-                    && !seat.is_empty() {
-                        return seat.to_string();
-                    }
+                    && !seat.is_empty()
+                {
+                    return seat.to_string();
+                }
             }
         }
     }
@@ -535,7 +758,9 @@ fn find_keyboard_device() -> Result<Device, Box<dyn std::error::Error>> {
 }
 
 /// Find a keyboard device for `seat` using udev.
-fn find_keyboard_device_udev(seat: &str) -> Result<Device, Box<dyn std::error::Error>> {
+fn find_keyboard_device_udev(
+    seat: &str,
+) -> Result<Device, Box<dyn std::error::Error>> {
     use std::sync::Arc;
 
     let udev = Arc::new(udevrs::Udev::new());
@@ -547,15 +772,18 @@ fn find_keyboard_device_udev(seat: &str) -> Result<Device, Box<dyn std::error::E
 
     for syspath_entry in enumerate.devices() {
         let sys = syspath_entry.syspath();
-        let Ok(udev_device) = udevrs::UdevDevice::new_from_syspath(Arc::clone(&udev), sys) else {
+        let Ok(udev_device) =
+            udevrs::UdevDevice::new_from_syspath(Arc::clone(&udev), sys)
+        else {
             continue;
         };
 
         // Skip devices that do not belong to the target seat.
         if let Some(dev_seat) = udev_device.get_property_value("ID_SEAT")
-            && dev_seat != seat {
-                continue;
-            }
+            && dev_seat != seat
+        {
+            continue;
+        }
 
         // Resolve the device node (e.g. /dev/input/event3).
         let devnode = udev_device.devnode();
@@ -564,16 +792,18 @@ fn find_keyboard_device_udev(seat: &str) -> Result<Device, Box<dyn std::error::E
         }
 
         if let Ok(device) = Device::open(devnode)
-            && device.supported_events().contains(EventType::KEY) {
-                return Ok(device);
-            }
+            && device.supported_events().contains(EventType::KEY)
+        {
+            return Ok(device);
+        }
     }
 
     Err(format!("no keyboard device found for seat {seat}").into())
 }
 
 /// Fallback: scan `/dev/input/event*` and return the first keyboard-capable device.
-fn find_keyboard_device_fallback() -> Result<Device, Box<dyn std::error::Error>> {
+fn find_keyboard_device_fallback() -> Result<Device, Box<dyn std::error::Error>>
+{
     use std::{fs, path::Path};
 
     let input_path = Path::new("/dev/input");
@@ -585,15 +815,17 @@ fn find_keyboard_device_fallback() -> Result<Device, Box<dyn std::error::Error>>
         let path = entry?.path();
         if path.to_string_lossy().starts_with("/dev/input/event")
             && let Ok(device) = Device::open(&path)
-            && device.supported_keys()
-                .is_some_and(|keys| keys.contains(KeyCode::KEY_ENTER)) {
+            && device
+                .supported_keys()
+                .is_some_and(|keys| keys.contains(KeyCode::KEY_ENTER))
+        {
             return Ok(device);
         }
     }
 
     Err("No keyboard device found. Try: sudo usermod -aG input \
                     $USER"
-            .into())
+        .into())
 }
 
 pub fn start_mapping(

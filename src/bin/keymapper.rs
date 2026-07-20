@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand};
 use keymapperd::config::{AppConfig, KeyEvent, RuleGroup};
 
 mod apps;
+mod keys;
 mod server;
 
 /// CLI utility for managing the keymapperd configuration.
@@ -40,6 +41,12 @@ enum Commands {
         command: ConfigCommands,
     },
 
+    /// Key introspection tools.
+    Keys {
+        #[command(subcommand)]
+        command: KeysCommands,
+    },
+
     /// Daemon process management.
     Server {
         #[command(subcommand)]
@@ -54,6 +61,20 @@ enum ServerCommands {
 
     /// Start keymapperd if it is not already running.
     Start,
+}
+
+#[derive(Subcommand)]
+enum KeysCommands {
+    /// Print all key names recognised in the configuration file.
+    ///
+    /// These are the canonical names (sorted alphabetically) that can be used
+    /// as triggers and outputs in key-mapping rules.
+    List,
+
+    /// Wait for physical key presses and print each key's name and code.
+    ///
+    /// Press Control+Escape to exit.
+    Probe,
 }
 
 #[derive(Subcommand)]
@@ -106,6 +127,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 group,
                 apps,
             } => cmd_config_add(&trigger, &output, &group, apps)?,
+        },
+        Commands::Keys { command } => match command {
+            KeysCommands::List => cmd_keys_list()?,
+            KeysCommands::Probe => cmd_keys_probe(),
         },
         Commands::Server { command } => match command {
             ServerCommands::Status => cmd_server_status()?,
@@ -346,4 +371,13 @@ fn cmd_server_start() -> Result<(), Box<dyn std::error::Error>> {
     println!("keymapperd started");
 
     Ok(())
+}
+
+fn cmd_keys_list() -> Result<(), Box<dyn std::error::Error>> {
+    keys::list();
+    Ok(())
+}
+
+fn cmd_keys_probe() {
+    keys::probe();
 }
