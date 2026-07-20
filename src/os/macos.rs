@@ -386,16 +386,16 @@ fn emit_key_event(source: &CFRetained<CGEventSource>, native_key: &NativeKey) {
 
     // Press modifiers in ascending bit order.
     for bit in 0..8 {
-        if (native_key.modifiers >> bit) & 1 == 1 {
-            if let Some(code) = modifier_bit_to_code(bit) {
-                if let Some(e) =
-                    CGEvent::new_keyboard_event(Some(source), code, true)
-                {
-                    CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
-                }
-                pressed_modifiers.push(code);
-                thread::sleep(Duration::from_millis(1));
+        if (native_key.modifiers >> bit) & 1 == 1
+            && let Some(code) = modifier_bit_to_code(bit)
+        {
+            if let Some(e) =
+                CGEvent::new_keyboard_event(Some(source), code, true)
+            {
+                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
             }
+            pressed_modifiers.push(code);
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
