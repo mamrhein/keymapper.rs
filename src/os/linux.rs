@@ -101,6 +101,25 @@ pub enum Key {
     Number8 = 9,
     Number9 = 10,
     Number0 = 11,
+    // --- Numpad ---
+    Numpad7 = 71,     // KEY_KP7
+    Numpad8 = 72,     // KEY_KP8
+    Numpad9 = 73,     // KEY_KP9
+    Numpad4 = 75,     // KEY_KP4
+    Numpad5 = 76,     // KEY_KP5
+    Numpad6 = 77,     // KEY_KP6
+    Numpad1 = 79,     // KEY_KP1
+    Numpad2 = 80,     // KEY_KP2
+    Numpad3 = 81,     // KEY_KP3
+    Numpad0 = 82,     // KEY_KP0
+    NumpadDecimal = 83,   // KEY_KPDOT
+    NumpadPlus = 78,      // KEY_KPPLUS
+    NumpadEnter = 96,     // KEY_KPENTER
+    // Note: NumpadMultiply (KEY_KPASTERISK=55) shares code with F(55)
+    // Note: NumpadMinus (KEY_KPMINUS=74) shares code with... nothing in our enum
+    NumpadMinus = 74,     // KEY_KPMINUS
+    NumpadMultiply = 55,  // KEY_KPASTERISK (shares evdev code with F)
+    NumpadDivide = 98,    // KEY_KPSLASH
     // --- Punctuation / symbols ---
     Minus = 12,        // KEY_MINUS
     Equal = 13,        // KEY_EQUAL
@@ -219,6 +238,23 @@ impl Key {
             Self::Number8 => "8",
             Self::Number9 => "9",
             Self::Number0 => "0",
+            // Numpad
+            Self::Numpad0 => "Numpad0",
+            Self::Numpad1 => "Numpad1",
+            Self::Numpad2 => "Numpad2",
+            Self::Numpad3 => "Numpad3",
+            Self::Numpad4 => "Numpad4",
+            Self::Numpad5 => "Numpad5",
+            Self::Numpad6 => "Numpad6",
+            Self::Numpad7 => "Numpad7",
+            Self::Numpad8 => "Numpad8",
+            Self::Numpad9 => "Numpad9",
+            Self::NumpadDecimal => "NumpadDecimal",
+            Self::NumpadMultiply => "NumpadMultiply",
+            Self::NumpadPlus => "NumpadPlus",
+            Self::NumpadDivide => "NumpadDivide",
+            Self::NumpadEnter => "NumpadEnter",
+            Self::NumpadMinus => "NumpadMinus",
             // Punctuation / symbols
             Self::Minus => "Minus",
             Self::Equal => "Equal",
@@ -313,6 +349,23 @@ impl Key {
             "8" | "Number8" => Some(Self::Number8),
             "9" | "Number9" => Some(Self::Number9),
             "0" | "Number0" => Some(Self::Number0),
+            // Numpad
+            "Numpad0" => Some(Self::Numpad0),
+            "Numpad1" => Some(Self::Numpad1),
+            "Numpad2" => Some(Self::Numpad2),
+            "Numpad3" => Some(Self::Numpad3),
+            "Numpad4" => Some(Self::Numpad4),
+            "Numpad5" => Some(Self::Numpad5),
+            "Numpad6" => Some(Self::Numpad6),
+            "Numpad7" => Some(Self::Numpad7),
+            "Numpad8" => Some(Self::Numpad8),
+            "Numpad9" => Some(Self::Numpad9),
+            "NumpadDecimal" | "KP_Decimal" => Some(Self::NumpadDecimal),
+            "NumpadMultiply" | "KP_Multiply" => Some(Self::NumpadMultiply),
+            "NumpadPlus" | "KP_Add" => Some(Self::NumpadPlus),
+            "NumpadDivide" | "KP_Divide" => Some(Self::NumpadDivide),
+            "NumpadEnter" | "KP_Enter" => Some(Self::NumpadEnter),
+            "NumpadMinus" | "KP_Subtract" => Some(Self::NumpadMinus),
             // Punctuation / symbols
             "Minus" => Some(Self::Minus),
             "Equal" => Some(Self::Equal),

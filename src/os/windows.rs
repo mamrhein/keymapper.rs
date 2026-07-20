@@ -113,6 +113,23 @@ pub enum Key {
     Number8 = 0x38,
     Number9 = 0x39,
     Number0 = 0x30,
+    // --- Numpad ---
+    Numpad0 = 0x60,        // VK_NUMPAD0
+    Numpad1 = 0x61,        // VK_NUMPAD1
+    Numpad2 = 0x62,        // VK_NUMPAD2
+    Numpad3 = 0x63,        // VK_NUMPAD3
+    Numpad4 = 0x64,        // VK_NUMPAD4
+    Numpad5 = 0x65,        // VK_NUMPAD5
+    Numpad6 = 0x66,        // VK_NUMPAD6
+    Numpad7 = 0x67,        // VK_NUMPAD7
+    Numpad8 = 0x68,        // VK_NUMPAD8
+    Numpad9 = 0x69,        // VK_NUMPAD9
+    NumpadDecimal = 0x6E,  // VK_DECIMAL
+    NumpadMultiply = 0x6A, // VK_MULTIPLY
+    NumpadPlus = 0x6B,     // VK_ADD
+    NumpadDivide = 0x6F,   // VK_DIVIDE
+    NumpadEnter = 0x92,    // VK_RETURN (extended)
+    NumpadMinus = 0x6D,    // VK_SUBTRACT
     // --- Punctuation / symbols ---
     Minus = 0xBD,        // VK_OEM_MINUS
     Equal = 0xBB,        // VK_OEM_PLUS
@@ -231,6 +248,23 @@ impl Key {
             Self::Number8 => "8",
             Self::Number9 => "9",
             Self::Number0 => "0",
+            // Numpad
+            Self::Numpad0 => "Numpad0",
+            Self::Numpad1 => "Numpad1",
+            Self::Numpad2 => "Numpad2",
+            Self::Numpad3 => "Numpad3",
+            Self::Numpad4 => "Numpad4",
+            Self::Numpad5 => "Numpad5",
+            Self::Numpad6 => "Numpad6",
+            Self::Numpad7 => "Numpad7",
+            Self::Numpad8 => "Numpad8",
+            Self::Numpad9 => "Numpad9",
+            Self::NumpadDecimal => "NumpadDecimal",
+            Self::NumpadMultiply => "NumpadMultiply",
+            Self::NumpadPlus => "NumpadPlus",
+            Self::NumpadDivide => "NumpadDivide",
+            Self::NumpadEnter => "NumpadEnter",
+            Self::NumpadMinus => "NumpadMinus",
             // Punctuation / symbols
             Self::Minus => "Minus",
             Self::Equal => "Equal",
@@ -327,6 +361,23 @@ impl Key {
             "8" | "Number8" => Some(Self::Number8),
             "9" | "Number9" => Some(Self::Number9),
             "0" | "Number0" => Some(Self::Number0),
+            // Numpad
+            "Numpad0" => Some(Self::Numpad0),
+            "Numpad1" => Some(Self::Numpad1),
+            "Numpad2" => Some(Self::Numpad2),
+            "Numpad3" => Some(Self::Numpad3),
+            "Numpad4" => Some(Self::Numpad4),
+            "Numpad5" => Some(Self::Numpad5),
+            "Numpad6" => Some(Self::Numpad6),
+            "Numpad7" => Some(Self::Numpad7),
+            "Numpad8" => Some(Self::Numpad8),
+            "Numpad9" => Some(Self::Numpad9),
+            "NumpadDecimal" => Some(Self::NumpadDecimal),
+            "NumpadMultiply" => Some(Self::NumpadMultiply),
+            "NumpadPlus" => Some(Self::NumpadPlus),
+            "NumpadDivide" => Some(Self::NumpadDivide),
+            "NumpadEnter" => Some(Self::NumpadEnter),
+            "NumpadMinus" => Some(Self::NumpadMinus),
             // Punctuation / symbols
             "Minus" => Some(Self::Minus),
             "Equal" => Some(Self::Equal),
@@ -417,7 +468,8 @@ fn modifier_bit_to_vk(bit: u8) -> Option<VIRTUAL_KEY> {
 fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
     matches!(
         vk,
-        0xA3 | 0xA5 | 0x21 | 0x22 | 0x23 | 0x25..=0x28 | 0x2D | 0x2E
+        0xA3 | 0xA5 | 0x21 | 0x22 | 0x23 | 0x25
+            ..=0x28 | 0x2D | 0x2E | 0x6F | 0x92
     )
 }
 
