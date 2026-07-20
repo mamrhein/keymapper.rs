@@ -423,7 +423,7 @@ fn modifier_bit_to_code(bit: u8) -> Option<CGKeyCode> {
 fn emit_key_event(source: &CFRetained<CGEventSource>, native_key: &NativeKey) {
     let mut pressed_modifiers: Vec<CGKeyCode> = Vec::new();
 
-    // Press modifiers in ascending bit order.
+    // Press modifiers.
     for bit in 0..8 {
         if (native_key.modifiers >> bit) & 1 == 1
             && let Some(code) = modifier_bit_to_code(bit)
@@ -458,8 +458,8 @@ fn emit_key_event(source: &CFRetained<CGEventSource>, native_key: &NativeKey) {
     }
     thread::sleep(Duration::from_millis(1));
 
-    // Release modifiers in reverse order.
-    for code in pressed_modifiers.into_iter().rev() {
+    // Release modifiers.
+    for code in pressed_modifiers.into_iter() {
         if let Some(e) = CGEvent::new_keyboard_event(Some(source), code, false)
         {
             CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
