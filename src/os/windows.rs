@@ -113,6 +113,20 @@ pub enum Key {
     Number8 = 0x38,
     Number9 = 0x39,
     Number0 = 0x30,
+    // --- Punctuation / symbols ---
+    Minus = 0xBD,        // VK_OEM_MINUS
+    Equal = 0xBB,        // VK_OEM_PLUS
+    BracketLeft = 0xDB,  // VK_OEM_4
+    BracketRight = 0xDD, // VK_OEM_6
+    Backslash = 0xDC,    // VK_OEM_5
+    Semicolon = 0xBA,    // VK_OEM_1
+    Quote = 0xDE,        // VK_OEM_7
+    Comma = 0xBC,        // VK_OEM_COMMA
+    Period = 0xBE,       // VK_OEM_PERIOD
+    Slash = 0xBF,        // VK_OEM_2
+    Grave = 0xC0,        // VK_OEM_3
+    IsoExtra = 0xE2,     // VK_OEM_102 (between Shift and Z on ISO)
+    IsoHash = 0xDF,      // VK_OEM_8
 }
 
 impl Key {
@@ -217,6 +231,20 @@ impl Key {
             Self::Number8 => "8",
             Self::Number9 => "9",
             Self::Number0 => "0",
+            // Punctuation / symbols
+            Self::Minus => "-",
+            Self::Equal => "=",
+            Self::BracketLeft => "[",
+            Self::BracketRight => "]",
+            Self::Backslash => "\\",
+            Self::Semicolon => ";",
+            Self::Quote => "'",
+            Self::Comma => ",",
+            Self::Period => ".",
+            Self::Slash => "/",
+            Self::Grave => "`",
+            Self::IsoExtra => "§",
+            Self::IsoHash => "#",
         }
     }
 
@@ -299,6 +327,20 @@ impl Key {
             "8" | "Number8" => Some(Self::Number8),
             "9" | "Number9" => Some(Self::Number9),
             "0" | "Number0" => Some(Self::Number0),
+            // Punctuation / symbols
+            "-" | "Minus" => Some(Self::Minus),
+            "=" | "Equal" => Some(Self::Equal),
+            "[" | "BracketLeft" => Some(Self::BracketLeft),
+            "]" | "BracketRight" => Some(Self::BracketRight),
+            "\\" | "Backslash" => Some(Self::Backslash),
+            ";" | "Semicolon" => Some(Self::Semicolon),
+            "'" | "Quote" => Some(Self::Quote),
+            "," | "Comma" => Some(Self::Comma),
+            "." | "Period" => Some(Self::Period),
+            "/" | "Slash" => Some(Self::Slash),
+            "`" | "Grave" => Some(Self::Grave),
+            "§" | "IsoExtra" => Some(Self::IsoExtra),
+            "#" | "IsoHash" => Some(Self::IsoHash),
             _ => None,
         }
     }
@@ -319,7 +361,7 @@ impl<'de> Deserialize<'de> for Key {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::from_str(&s).ok_or_else(|| {
+        Self::try_from_str(&s).ok_or_else(|| {
             serde::de::Error::custom(crate::key_names::unknown_key_error(&s))
         })
     }

@@ -101,6 +101,20 @@ pub enum Key {
     Number8 = 9,
     Number9 = 10,
     Number0 = 11,
+    // --- Punctuation / symbols ---
+    Minus = 12,        // KEY_MINUS
+    Equal = 13,        // KEY_EQUAL
+    BracketLeft = 26,  // KEY_LEFTBRACE
+    BracketRight = 27, // KEY_RIGHTBRACE
+    Backslash = 43,    // KEY_BACKSHLASH
+    Semicolon = 39,    // KEY_SEMICOLON
+    Quote = 40,        // KEY_APOSTROPHE
+    Comma = 51,        // KEY_COMMA
+    Period = 52,       // KEY_DOT
+    Slash = 53,        // KEY_SLASH
+    Grave = 41,        // KEY_GRAVE
+    IsoExtra = 86,     // KEY_102ND
+    IsoHash = 99       // KEY_HASHTHILDE
 }
 
 impl Key {
@@ -205,6 +219,20 @@ impl Key {
             Self::Number8 => "8",
             Self::Number9 => "9",
             Self::Number0 => "0",
+            // Punctuation / symbols
+            Self::Minus => "-",
+            Self::Equal => "=",
+            Self::BracketLeft => "[",
+            Self::BracketRight => "]",
+            Self::Backslash => "\\",
+            Self::Semicolon => ";",
+            Self::Quote => "'",
+            Self::Comma => ",",
+            Self::Period => ".",
+            Self::Slash => "/",
+            Self::Grave => "`",
+            Self::IsoExtra => "§",
+            Self::IsoHash => "#",
         }
     }
 
@@ -285,6 +313,20 @@ impl Key {
             "8" | "Number8" => Some(Self::Number8),
             "9" | "Number9" => Some(Self::Number9),
             "0" | "Number0" => Some(Self::Number0),
+            // Punctuation / symbols
+            "-" | "Minus" => Some(Self::Minus),
+            "=" | "Equal" => Some(Self::Equal),
+            "[" | "BracketLeft" => Some(Self::BracketLeft),
+            "]" | "BracketRight" => Some(Self::BracketRight),
+            "\\" | "Backslash" => Some(Self::Backslash),
+            ";" | "Semicolon" => Some(Self::Semicolon),
+            "'" | "Quote" => Some(Self::Quote),
+            "," | "Comma" => Some(Self::Comma),
+            "." | "Period" => Some(Self::Period),
+            "/" | "Slash" => Some(Self::Slash),
+            "`" | "Grave" => Some(Self::Grave),
+            "§" | "IsoExtra" => Some(Self::IsoExtra),
+            "#" | "IsoHash" => Some(Self::IsoHash),
             _ => None,
         }
     }

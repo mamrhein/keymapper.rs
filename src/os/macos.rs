@@ -50,7 +50,7 @@ pub enum Key {
     RightAlt = 61,     // kVK_RightOption
     LeftCommand = 55,  // kVK_Command
     RightCommand = 54, // kVK_RightCommand
-    CapsLock = 27,     // kVK_CapsLock
+    CapsLock = 57,     // kVK_CapsLock
     // --- Editor / misc ---
     Tab = 48,       // kVK_Tab
     Space = 49,     // kVK_Space
@@ -118,6 +118,19 @@ pub enum Key {
     Number8 = 28, // kVK_ANSI_8
     Number9 = 25, // kVK_ANSI_9
     Number0 = 29, // kVK_ANSI_0
+    // --- Punctuation / symbols ---
+    Minus = 27,        // kVK_ANSI_Minus
+    Equal = 24,        // kVK_ANSI_Equal
+    BracketLeft = 33,  // kVK_ANSI_LeftBracket
+    BracketRight = 30, // kVK_ANSI_RightBracket
+    Backslash = 42,    // kVK_ANSI_Backslash
+    Semicolon = 41,    // kVK_ANSI_Semicolon
+    Quote = 39,        // kVK_ANSI_Quote
+    Comma = 43,        // kVK_ANSI_Comma
+    Period = 47,       // kVK_ANSI_Period
+    Slash = 44,        // kVK_ANSI_Slash
+    Grave = 50,        // kVK_ANSI_Grave
+    IsoExtra = 10,     // kVK_ISO_Section (between Shift and Z on ISO)
 }
 
 impl Key {
@@ -230,6 +243,19 @@ impl Key {
             Self::Number8 => "8",
             Self::Number9 => "9",
             Self::Number0 => "0",
+            // Punctuation / symbols
+            Self::Minus => "-",
+            Self::Equal => "=",
+            Self::BracketLeft => "[",
+            Self::BracketRight => "]",
+            Self::Backslash => "\\",
+            Self::Semicolon => ";",
+            Self::Quote => "'",
+            Self::Comma => ",",
+            Self::Period => ".",
+            Self::Slash => "/",
+            Self::Grave => "`",
+            Self::IsoExtra => "§",
         }
     }
 
@@ -318,6 +344,19 @@ impl Key {
             "8" | "Number8" => Some(Self::Number8),
             "9" | "Number9" => Some(Self::Number9),
             "0" | "Number0" => Some(Self::Number0),
+            // Punctuation / symbols
+            "-" | "Minus" => Some(Self::Minus),
+            "=" | "Equal" => Some(Self::Equal),
+            "[" | "BracketLeft" => Some(Self::BracketLeft),
+            "]" | "BracketRight" => Some(Self::BracketRight),
+            "\\" | "Backslash" => Some(Self::Backslash),
+            ";" | "Semicolon" => Some(Self::Semicolon),
+            "'" | "Quote" => Some(Self::Quote),
+            "," | "Comma" => Some(Self::Comma),
+            "." | "Period" => Some(Self::Period),
+            "/" | "Slash" => Some(Self::Slash),
+            "`" | "Grave" => Some(Self::Grave),
+            "§" | "NonUSBackslash" => Some(Self::IsoExtra),
             _ => None,
         }
     }

@@ -11,7 +11,7 @@
 pub fn unknown_key_error(s: &str) -> String {
     format!(
         "unknown key name '{}'. Use names like CapsLock, LeftCtrl, A, F1, 1, \
-         etc.",
+         Minus, Equal, BracketLeft, etc.",
         s
     )
 }
