@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-use evdev::{Device, EventType};
+use evdev::{Device, EventType, KeyCode};
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -486,31 +486,19 @@ fn find_keyboard_device_fallback() -> Result<Device, Box<dyn std::error::Error>>
         return Err("No /dev/input directory found.".into());
     }
 
-    let mut devices: Vec<Device> = Vec::new();
     for entry in fs::read_dir(input_path)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.to_string_lossy().starts_with("/dev/input/event") {
-            continue;
-        }
-        if let Ok(device) = Device::open(&path) {
-            devices.push(device);
-        }
-    }
-
-    if devices.is_empty() {
-        return Err("No keyboard device found. Try: sudo usermod -aG input \
-                    $USER"
-            .into());
-    }
-
-    for device in devices {
-        if device.supported_events().contains(EventType::KEY) {
+        let path = entry?.path();
+        if path.to_string_lossy().starts_with("/dev/input/event")
+            && let Ok(device) = Device::open(&path)
+            && device.supported_keys()
+                .is_some_and(|keys| keys.contains(KeyCode::KEY_ENTER)) {
             return Ok(device);
         }
     }
 
-    Err("No keyboard device found that supports EV_KEY".into())
+    Err("No keyboard device found. Try: sudo usermod -aG input \
+                    $USER"
+            .into())
 }
 
 pub fn start_mapping(
