@@ -429,6 +429,16 @@ fn config_creates_empty_file() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Added"));
+
+    // Verify the file was created and contains the mapping.
+    let config_path = dir.join("config.yaml");
+    assert!(config_path.is_file());
+    let contents = std::fs::read_to_string(&config_path).unwrap();
+    assert!(contents.contains("CapsLock"));
+    assert!(contents.contains("LeftControl"));
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
