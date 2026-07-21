@@ -12,7 +12,7 @@ use super::mapping_cache::{CompiledRule, NativeKey, RuntimeLookupCache};
 /// Minimal interface for OS event-loop callbacks and state managers.
 /// Deliberately small so that platform modules never learn about the
 /// internal structure of [`RuntimeState`].
-pub trait Lookup: Send + Sync {
+pub trait Lookup: Send + Sync + std::fmt::Debug {
     /// Best-effort lookup scoped to the given application name.
     ///
     /// `modifiers` is the exact bitmask of currently pressed modifier keys.
@@ -40,6 +40,7 @@ pub trait Lookup: Send + Sync {
 
 /// Live runtime state shared between the config hot-reloader, the foreground-
 /// app tracker, and the platform-specific event tap.
+#[derive(Debug)]
 pub struct RuntimeState {
     lookup_cache: RuntimeLookupCache,
     active_app: String,

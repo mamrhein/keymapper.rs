@@ -829,7 +829,7 @@ fn find_keyboard_device_fallback() -> Result<Device, Box<dyn std::error::Error>>
 }
 
 pub fn start_mapping(
-    lookup: Arc<RwLock<dyn Lookup>>,
+    lookup: Arc<RwLock<dyn Lookup + std::fmt::Debug>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut raw_device = find_keyboard_device()?;
     raw_device.grab()?;

@@ -48,7 +48,7 @@ enum ReloadResult {
 /// only pushes events onto a channel.
 fn spawn_reload_thread(
     path_to_watch: Arc<PathBuf>,
-    state: Arc<RwLock<dyn Lookup>>,
+    state: Arc<RwLock<dyn Lookup + std::fmt::Debug>>,
 ) -> mpsc::Sender<()> {
     let (tx, rx) = mpsc::channel();
 
@@ -132,7 +132,7 @@ fn drain_channel(rx: &mpsc::Receiver<()>) {
 /// checks before parsing.
 fn attempt_reload(
     config_path: &Path,
-    state: &Arc<RwLock<dyn Lookup>>,
+    state: &Arc<RwLock<dyn Lookup + std::fmt::Debug>>,
 ) -> ReloadResult {
     // Security check: file still exists and is a regular file.
     let Ok(metadata) = config_path.metadata() else {
@@ -197,7 +197,7 @@ fn attempt_reload(
 
 pub fn start_config_watcher<P: AsRef<Path>>(
     config_path: P,
-    state: Arc<RwLock<dyn Lookup>>,
+    state: Arc<RwLock<dyn Lookup + std::fmt::Debug>>,
 ) -> Result<RecommendedWatcher, notify::Error> {
     let path_to_watch = Arc::new(config_path.as_ref().to_owned());
     let reload_tx = spawn_reload_thread(Arc::clone(&path_to_watch), state);

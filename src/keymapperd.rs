@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Coerce to dyn Lookup at creation time.  All Arc::clone calls
     // downstream inherit this trait-object type, so platform modules
     // never see the concrete RuntimeState shape.
-    let state: Arc<RwLock<dyn keymapper::daemon::state::Lookup>> =
+    let state: Arc<RwLock<dyn keymapper::daemon::state::Lookup + std::fmt::Debug>> =
         Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
             initial_cache,
             String::from("unknown"),

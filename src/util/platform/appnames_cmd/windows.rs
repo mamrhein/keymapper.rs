@@ -16,7 +16,7 @@
 use std::{collections::HashSet, path::Path};
 
 use windows_sys::Win32::{
-    Foundation::{FALSE, HWND, TRUE},
+    Foundation::HWND,
     System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
         TH32CS_SNAPMODULE,
@@ -27,7 +27,7 @@ use windows_sys::Win32::{
     },
 };
 
-type SnapshotHandle = isize;
+type SnapshotHandle = i64;
 
 /// Convert a null-terminated UTF-16 slice to a Rust String.
 fn utf16_to_string(data: &[u16]) -> String {
@@ -53,7 +53,7 @@ unsafe fn ver_query_value(buffer: &[u8], sub_block: &str) -> Option<Vec<u16>> {
         sub_block_utf16.as_ptr() as _,
         &mut lplp_buffer as *const _ as *mut _,
         &mut pu_len,
-    ) == FALSE.as_i32()
+    ) == 0
     {
         return None;
     }
@@ -102,7 +102,7 @@ fn get_file_description(path: &str) -> Option<String> {
             0,
             size,
             buffer.as_mut_ptr() as _,
-        ) == FALSE.as_i32()
+        ) == 0
         {
             return None;
         }
@@ -148,21 +148,21 @@ fn get_process_exe_path(pid: u32) -> Option<String> {
     unsafe {
         let mod_snap: SnapshotHandle =
             CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | pid, pid);
-        if mod_snap.is_negative() {
+        if mod_snap < 0 {
             return None;
         }
 
         let mut me = std::mem::zeroed::<MODULEENTRY32W>();
         me.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
 
-        let result = if Module32FirstW(mod_snap, &mut me) == TRUE.as_i32() {
+        let result = if Module32FirstW(mod_snap as _, &mut me) == 1 {
             let path = utf16_to_string(&me.szExePath);
             if path.is_empty() { None } else { Some(path) }
         } else {
             None
         };
 
-        windows_sys::Win32::Foundation::CloseHandle(mod_snap);
+        windows_sys::Win32::Foundation::CloseHandle(mod_snap as _);
         result
     }
 }
@@ -173,7 +173,7 @@ struct WindowCollector {
 }
 
 extern "system" fn enum_windows_proc(hwnd: HWND, param: usize) -> i32 {
-    if unsafe { IsWindowVisible(hwnd) } == TRUE.as_i32() {
+    if unsafe { IsWindowVisible(hwnd) } == 1 {
         let mut pid: u32 = 0;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         if pid != 0 {
@@ -185,7 +185,7 @@ extern "system" fn enum_windows_proc(hwnd: HWND, param: usize) -> i32 {
             }
         }
     }
-    TRUE.as_i32() // continue enumeration
+    1 // continue enumeration
 }
 
 /// Enumerate all visible top-level windows and extract unique app names.

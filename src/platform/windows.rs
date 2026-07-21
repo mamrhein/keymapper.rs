@@ -8,6 +8,7 @@
 // $Revision$
 
 use std::{
+    fmt::Debug,
     ptr::null_mut,
     sync::{Arc, OnceLock},
     thread,
@@ -16,7 +17,7 @@ use std::{
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use windows_sys::Windows::Win32::{
+use windows_sys::Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
@@ -766,10 +767,11 @@ fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
 // Low-level keyboard hook
 // ---------------------------------------------------------------------------
 
-static SHARED_LOOKUP: OnceLock<Arc<RwLock<dyn Lookup>>> = OnceLock::new();
+static SHARED_LOOKUP: OnceLock<Arc<RwLock<dyn Lookup + Debug>>> =
+    OnceLock::new();
 static HOOK_HANDLE: OnceLock<HHOOK> = OnceLock::new();
 
-fn set_shared_lookup(lookup: Arc<RwLock<dyn Lookup>>) {
+fn set_shared_lookup(lookup: Arc<RwLock<dyn Lookup + Debug>>) {
     SHARED_LOOKUP
         .set(lookup)
         .expect("shared lookup already initialised");
@@ -785,8 +787,8 @@ fn hook_handle() -> HHOOK {
     *HOOK_HANDLE.get().expect("hook handle not initialised")
 }
 
-pub(crate) fn start_mapping(
-    lookup: Arc<RwLock<dyn Lookup>>,
+pub fn start_mapping(
+    lookup: Arc<RwLock<dyn Lookup + Debug>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     set_shared_lookup(lookup);
 

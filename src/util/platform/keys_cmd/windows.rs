@@ -11,22 +11,18 @@
 
 use std::sync::OnceLock;
 
-use windows_sys::{
-    Windows::Win32::{
-        Foundation::HWND,
-        System::LibraryLoader::GetModuleHandleW,
-        UI::{
-            Input::KeyboardAndMouse::{MapVirtualKeyW, VIRTUAL_KEY},
-            WindowsAndMessaging::{
-                CallNextHookEx, DispatchMessageW, GetKeyState, GetMessageW,
-                HHOOK, HINSTANCE, KBDLLHOOKSTRUCT, LPARAM, LRESULT, MSG,
-                PostQuitMessage, SetWindowsHookExW, TranslateMessage,
-                UnhookWindowsHookEx, VK_CONTROL, WH_KEYBOARD_LL, WM_KEYDOWN,
-                WM_SYSKEYDOWN, WPARAM,
-            },
+use windows_sys::Win32::{
+    Foundation::HWND,
+    System::LibraryLoader::GetModuleHandleW,
+    UI::{
+        Input::KeyboardAndMouse::{MapVirtualKeyW, VIRTUAL_KEY},
+        WindowsAndMessaging::{
+            CallNextHookEx, DispatchMessageW, GetKeyState, GetMessageW, HHOOK,
+            HINSTANCE, KBDLLHOOKSTRUCT, LPARAM, LRESULT, MSG, PostQuitMessage,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+            VK_CONTROL, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN, WPARAM,
         },
     },
-    core::PCWSTR,
 };
 
 use crate::platform::Key;
@@ -57,8 +53,7 @@ pub fn probe() {
     println!("Press keys to see their names and codes.");
     println!("Press Control+Escape to exit.\n");
 
-    let h_instance: HINSTANCE =
-        unsafe { GetModuleHandleW(PCWSTR(std::ptr::null())) };
+    let h_instance: HINSTANCE = unsafe { GetModuleHandleW(std::ptr::null()) };
 
     let handle: HHOOK = unsafe {
         SetWindowsHookExW(

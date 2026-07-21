@@ -54,6 +54,7 @@ pub struct CompiledRule {
 /// discrimination happens at lookup time by scanning entries with matching
 /// modifier bits.  The first match wins, preserving definition order within
 /// each app scope.
+#[derive(Debug)]
 pub struct RuntimeLookupCache {
     /// Per-app rules: app name -> list of compiled rules.
     process_rules: IndexMap<String, Vec<CompiledRule>>,
@@ -135,7 +136,9 @@ impl RuntimeLookupCache {
 }
 
 /// Compile a list of output key events into native form.
-fn compile_outputs(events: &[crate::common::config::KeyEvent]) -> Vec<NativeKey> {
+fn compile_outputs(
+    events: &[crate::common::config::KeyEvent],
+) -> Vec<NativeKey> {
     events
         .iter()
         .map(|event| NativeKey {

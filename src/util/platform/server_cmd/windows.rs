@@ -8,13 +8,16 @@
 // $Revision$
 
 use windows_sys::Win32::{
-    Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
-        Process32NextW, TH32CS_SNAPPROCESS,
-    },
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
-    System::Threading::{
-        CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW,
+    System::{
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
+            Process32NextW, TH32CS_SNAPPROCESS,
+        },
+        Threading::{
+            CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION,
+            STARTUPINFOW,
+        },
     },
 };
 
