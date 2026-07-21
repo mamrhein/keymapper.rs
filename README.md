@@ -1,10 +1,10 @@
-# keymapperd
+# keymapper
 
-Cross-platform key-remapping daemon for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, and hot-reload.
+Cross-platform key-remapping daemon and cli utility for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, and hot-reload.
 
 ## Installation
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.88+ (edition 2024).
 
 ```bash
 cargo install --path .
@@ -91,7 +91,7 @@ Triggers use compact `+`-separated strings. The last token is the base key; all 
 
 ### Key names
 
-All key names are case-sensitive and use PascalCase. Recognised keys include:
+All key names are case-sensitive and use TitleCase. Recognised keys include:
 
 - **Modifiers:** `LeftControl`, `RightControl`, `LeftCtrl`, `RightCtrl`, `LeftShift`, `RightShift`, `LeftAlt`, `RightAlt`, `OptionLeft`, `OptionRight`, `LeftCommand`, `RightCommand`, `CapsLock`
 - **Navigation:** `Tab`, `Space`, `Return`, `Backspace`, `Delete`, `Escape`, `UpArrow`, `DownArrow`, `LeftArrow`, `RightArrow`, `PageUp`, `PageDown`, `Home`, `End`
