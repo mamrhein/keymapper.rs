@@ -50,13 +50,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARCHIVE="keymapper-${{ github.ref_name }}-${{ matrix.target }}.tar.xz"
-          tar -cJf "$ARCHIVE" \
-            --sort=name \
-            --transform="s|^|keymapper/${{ github.ref_name }}/" \
-            "target/${{ matrix.target }}/release/keymapper" \
-            "target/${{ matrix.target }}/release/keymapperd" \
-            LICENSE.TXT \
-            README.md
+          STAGING="dist/keymapper/${{ github.ref_name }}"
+          mkdir -p "$STAGING"
+          cp "target/${{ matrix.target }}/release/keymapper" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/keymapperd" "$STAGING/"
+          cp LICENSE.TXT README.md "$STAGING/"
+          tar -cJf "$ARCHIVE" "dist/keymapper/${{ github.ref_name }}"
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE"
 
   # -----------------------------------------------------------------------
@@ -73,6 +72,11 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
 
       - name: Add build target
         if: matrix.target != 'x86_64-unknown-linux-gnu'
