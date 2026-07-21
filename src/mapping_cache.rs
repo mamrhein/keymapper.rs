@@ -11,7 +11,7 @@ use std::{fs, path::Path};
 
 use indexmap::IndexMap;
 
-use crate::config::{AppConfig, Key};
+use crate::common::config::{AppConfig, Key};
 
 // ---------------------------------------------------------------------------
 // Modifier bitmask layout (u8): specific key bits only.
@@ -135,7 +135,7 @@ impl RuntimeLookupCache {
 }
 
 /// Compile a list of output key events into native form.
-fn compile_outputs(events: &[crate::config::KeyEvent]) -> Vec<NativeKey> {
+fn compile_outputs(events: &[crate::common::config::KeyEvent]) -> Vec<NativeKey> {
     events
         .iter()
         .map(|event| NativeKey {

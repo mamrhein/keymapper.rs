@@ -103,7 +103,7 @@ fn parse_key(token: &str) -> Result<Key, String> {
     }
 
     Key::try_from_str(trimmed)
-        .ok_or_else(|| crate::key_names::unknown_key_error(trimmed))
+        .ok_or_else(|| super::key_names::unknown_key_error(trimmed))
 }
 
 // ---------------------------------------------------------------------------

@@ -7,9 +7,7 @@
 // $Source$
 // $Revision$
 
-pub mod config;
-pub mod config_path;
-mod key_names;
+pub mod common;
 pub mod mapping_cache;
 pub mod platform;
 pub mod state;

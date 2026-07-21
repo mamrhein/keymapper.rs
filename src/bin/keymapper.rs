@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use keymapper::config::{AppConfig, KeyEvent, RuleGroup};
+use keymapper::common::config::{AppConfig, KeyEvent, RuleGroup};
 
 mod apps;
 mod keys;
@@ -150,12 +150,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn load_config() -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
-    let path = keymapper::config_path::find_config_path_strict().map_err(
-        |e| -> Box<dyn std::error::Error> {
+    let path = keymapper::common::config_path::find_config_path_strict()
+        .map_err(|e| -> Box<dyn std::error::Error> {
             eprintln!("Error: {e}");
             std::process::exit(1);
-        },
-    )?;
+        })?;
 
     let contents = fs_err::read_to_string(&path)?;
 
@@ -239,8 +238,11 @@ fn cmd_config_check(
         None => load_config()?,
     };
 
-    let config = keymapper::config::AppConfig::load_from_str(&contents)
-        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let config =
+        keymapper::common::config::AppConfig::load_from_str(&contents)
+            .map_err(|err| {
+                format!("failed to parse {}: {err}", path.display())
+            })?;
 
     let diagnostics = config.check();
 
@@ -261,7 +263,7 @@ fn cmd_config_create(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = match dir {
         Some(d) => d.join("config.yaml"),
-        None => keymapper::config_path::default_config_path()
+        None => keymapper::common::config_path::default_config_path()
             .ok_or("could not determine default config directory")?,
     };
 
@@ -302,14 +304,15 @@ fn cmd_config_add(
         .map_err(|e| format!("invalid output '{}': {e}", output_str))?;
 
     // Find an existing config file.
-    let path =
-        keymapper::config_path::find_config_path().ok_or_else(|| {
+    let path = keymapper::common::config_path::find_config_path().ok_or_else(
+        || {
             eprintln!(
                 "No configuration file found. Create one with `keymapper \
                  config create`"
             );
             "configuration file not found"
-        })?;
+        },
+    )?;
 
     // Load existing config.  `find_config_path` guarantees the file exists.
     reject_symlink(&path)?;
