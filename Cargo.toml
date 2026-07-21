@@ -1,5 +1,5 @@
 [package]
-name = "keymapperd"
+name = "keymapper"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
@@ -15,6 +15,10 @@ categories = ["utilities"]
 [[bin]]
 name = "keymapper"
 path = "src/bin/keymapper.rs"
+
+[[bin]]
+name = "keymapperd"
+path = "src/main.rs"
 
 [dependencies]
 active-win-pos-rs = "0.11" # active window tracking

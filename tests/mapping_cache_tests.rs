@@ -9,7 +9,7 @@
 
 use std::env;
 
-use keymapperd::mapping_cache::RuntimeLookupCache;
+use keymapper::mapping_cache::RuntimeLookupCache;
 
 /// Write *content* to a temp file, return its path.  Each invocation gets
 // a unique filename keyed by *label* to avoid races when tests run in

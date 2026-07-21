@@ -513,7 +513,7 @@ fn config_add_fails_without_config() {
 
     // Ensure the platform default config is temporarily out of the way so
     // that `find_config_path` returns `None`.
-    let default_path = keymapperd::config_path::default_config_path()
+    let default_path = keymapper::config_path::default_config_path()
         .expect("no default path");
     let had_existing = default_path.is_file();
     let backup_path = if had_existing {

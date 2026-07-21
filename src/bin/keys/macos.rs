@@ -9,7 +9,7 @@
 
 //! macOS implementation of `keymapper keys probe`.
 
-use keymapperd::os::Key;
+use keymapper::os::Key;
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopCommonModes};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventTapLocation,

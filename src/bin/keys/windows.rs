@@ -11,7 +11,7 @@
 
 use std::sync::OnceLock;
 
-use keymapperd::os::Key;
+use keymapper::os::Key;
 use windows_sys::{
     Windows::Win32::{
         Foundation::HWND,

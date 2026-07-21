@@ -12,7 +12,7 @@ use std::{sync::Arc, thread, time::Duration};
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = keymapperd::config_path::find_config_path_strict()
+    let config_path = keymapper::config_path::find_config_path_strict()
         .map_err(|e| {
             eprintln!("Error: {}", e);
             std::process::exit(1);
@@ -25,21 +25,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = config_path.canonicalize().unwrap_or(config_path);
 
     let initial_cache =
-        keymapperd::mapping_cache::RuntimeLookupCache::compile_from_path(
+        keymapper::mapping_cache::RuntimeLookupCache::compile_from_path(
             &config_path,
         )?;
 
     // Coerce to dyn Lookup at creation time.  All Arc::clone calls
     // downstream inherit this trait-object type, so platform modules
     // never see the concrete RuntimeState shape.
-    let state: Arc<RwLock<dyn keymapperd::state::Lookup>> =
-        Arc::new(RwLock::new(keymapperd::state::RuntimeState::new(
+    let state: Arc<RwLock<dyn keymapper::state::Lookup>> =
+        Arc::new(RwLock::new(keymapper::state::RuntimeState::new(
             initial_cache,
             String::from("unknown"),
         )));
 
     // Start hot-reloader thread
-    let _watcher = keymapperd::watcher::start_config_watcher(
+    let _watcher = keymapper::watcher::start_config_watcher(
         &config_path,
         Arc::clone(&state),
     )?;
@@ -70,5 +70,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Cross-platform runtime engines fully synchronized.");
 
-    keymapperd::os::start_mapping(Arc::clone(&state))
+    keymapper::os::start_mapping(Arc::clone(&state))
 }

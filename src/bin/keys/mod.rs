@@ -17,7 +17,7 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-use keymapperd::os::Key;
+use keymapper::os::Key;
 
 /// Print all key names recognised in the configuration file, sorted
 /// alphabetically.
