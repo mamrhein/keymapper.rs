@@ -32,7 +32,7 @@ use windows_sys::Windows::Win32::{
     },
 };
 
-use crate::{mapping_cache::NativeKey, state::Lookup};
+use crate::daemon::{mapping_cache::NativeKey, state::Lookup};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the VK_* codes

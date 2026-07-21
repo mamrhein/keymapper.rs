@@ -19,7 +19,7 @@ use notify::{
 };
 use parking_lot::RwLock;
 
-use crate::{mapping_cache::RuntimeLookupCache, state::Lookup};
+use super::{mapping_cache::RuntimeLookupCache, state::Lookup};
 
 /// Maximum config file size in bytes (1 MB).  A key-mapping configuration
 /// should never approach this limit; a larger file indicates either a write

@@ -25,21 +25,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = config_path.canonicalize().unwrap_or(config_path);
 
     let initial_cache =
-        keymapper::mapping_cache::RuntimeLookupCache::compile_from_path(
+        keymapper::daemon::mapping_cache::RuntimeLookupCache::compile_from_path(
             &config_path,
         )?;
 
     // Coerce to dyn Lookup at creation time.  All Arc::clone calls
     // downstream inherit this trait-object type, so platform modules
     // never see the concrete RuntimeState shape.
-    let state: Arc<RwLock<dyn keymapper::state::Lookup>> =
-        Arc::new(RwLock::new(keymapper::state::RuntimeState::new(
+    let state: Arc<RwLock<dyn keymapper::daemon::state::Lookup>> =
+        Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
             initial_cache,
             String::from("unknown"),
         )));
 
     // Start hot-reloader thread
-    let _watcher = keymapper::watcher::start_config_watcher(
+    let _watcher = keymapper::daemon::watcher::start_config_watcher(
         &config_path,
         Arc::clone(&state),
     )?;

@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-use crate::mapping_cache::{CompiledRule, NativeKey, RuntimeLookupCache};
+use super::mapping_cache::{CompiledRule, NativeKey, RuntimeLookupCache};
 
 /// Minimal interface for OS event-loop callbacks and state managers.
 /// Deliberately small so that platform modules never learn about the

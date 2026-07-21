@@ -20,7 +20,7 @@ use evdev::{Device, EventType, KeyCode};
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{mapping_cache::NativeKey, state::Lookup};
+use crate::{daemon::mapping_cache::NativeKey, daemon::state::Lookup};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the evdev KEY_* codes

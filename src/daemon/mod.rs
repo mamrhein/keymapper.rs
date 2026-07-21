@@ -7,10 +7,8 @@
 // $Source$
 // $Revision$
 
-pub mod common;
-pub mod daemon;
-pub mod platform;
+//! Daemon runtime: mapping cache, state management, and config hot-reload.
 
-// Re-export the platform-specific Key type so downstream code (and tests)
-// can refer to it via the crate root.
-pub use platform::Key;
+pub mod mapping_cache;
+pub mod state;
+pub mod watcher;
