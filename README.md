@@ -1,6 +1,11 @@
 # keymapper
 
-Cross-platform key-remapping daemon and cli utility for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, and hot-reload.
+Cross-platform key-remapping daemon and CLI utility for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, hot-reload, and macros.
+
+The project ships two binaries:
+
+- **`keymapperd`** — the background daemon that intercepts keyboard events and applies remapping rules.
+- **`keymapper`** — a CLI utility for managing configuration, inspecting keys, and controlling the daemon.
 
 ## Installation
 
@@ -10,7 +15,26 @@ Requires Rust 1.88+ (edition 2024).
 cargo install --path .
 ```
 
-Run with appropriate privileges for keyboard interception (Accessibility on macOS, `/dev/input` access on Linux).
+Run `keymapperd` with appropriate privileges for keyboard interception (Accessibility on macOS, `/dev/input` access on Linux).
+
+## Quick start
+
+```bash
+# Create an empty configuration file
+keymapper config create
+
+# List visible applications (for scoping rules)
+keymapper appnames
+
+# Add a mapping rule
+keymapper config add CapsLock LeftControl
+
+# Validate your configuration
+keymapper config check
+
+# Start the daemon
+keymapper server start
+```
 
 ## Configuration
 
@@ -21,8 +45,11 @@ Create `config.yaml` in one of the following locations:
 | Linux | `$XDG_CONFIG_HOME/keymapperd/config.yaml` (defaults to `~/.config/keymapperd/`) |
 | macOS | `~/Library/Application Support/keymapperd/config.yaml` |
 | Windows | `%APPDATA%\keymapperd\config.yaml` |
+| Any | Current working directory (development convenience) |
 
-The daemon exits if no configuration file is found.
+Search order is CWD first, then the platform-specific application config directory. Symbolic links are rejected; `config.yaml` must be a regular file.
+
+The daemon exits with an error if no configuration file is found in any search location.
 
 ### Format
 
@@ -47,9 +74,13 @@ The daemon exits if no configuration file is found.
     Ctrl+Shift+Left: Cmd+Left
     Ctrl+Shift+Right: Cmd+Right
 
-# Modifier remapping — emit LeftAlt+L when pressing OptionRight
+# Modifier remapping — emit LeftAlt+L when pressing RightAlt
 - mappings:
-    OptionRight: LeftAlt+L
+    RightAlt: LeftAlt+L
+
+# Macro — emit a sequence of key events
+- mappings:
+    F1: [Cmd+C, T]
 ```
 
 ### Structure
@@ -71,9 +102,9 @@ Each mapping is a `trigger: output` pair inside a `mappings:` block.
 | Output | Description | Example |
 |--------|-------------|---------|
 | Single key or chord string | Replace the trigger with one key event (modifiers held while pressing base) | `CapsLock: LeftControl` |
-| List of chord strings | Emit a sequence of key events (macro) | `F1: [Cmd, T]` |
+| List of chord strings | Emit a sequence of key events (macro) | `F1: [Cmd+C, T]` |
 
-Every output is a **chord**: modifier keys are held while the base key is pressed, then released in reverse. For example, `Cmd+Left` is emitted as "press Cmd → press Left → release Left → release Cmd", ensuring the modifier has its intended effect.
+Every output is a **chord**: modifier keys are held while the base key is pressed, then released in reverse. For example, `Cmd+C` is emitted as "press Cmd → press C → release C → release Cmd", ensuring the modifier has its intended effect.
 
 ### Triggers
 
@@ -85,19 +116,21 @@ Triggers use compact `+`-separated strings. The last token is the base key; all 
 | Modifier + key | `Ctrl+H` | Ctrl held while pressing H |
 | Multiple modifiers | `Cmd+Shift+T` | Cmd + Shift held while pressing T |
 
-**Modifier matching:** when you write `Ctrl`, the rule matches either left or right Control. The same applies to `Shift`, `Alt`, and `Cmd` (which also accepts `Super` and `Win` as aliases).
+**Modifier resolution:** generic modifier names resolve to their left-side default. `Ctrl` becomes left Control, `Alt` becomes left Alt, `Cmd` becomes left Command, and so on. Use the explicit names (`LeftCtrl`, `RightCtrl`, etc.) when you need to target a specific side.
 
 **Extra modifiers don't prevent matches.** A rule for `Ctrl+H` will also match when `Ctrl+Shift+H` is pressed. Use more specific triggers if you need to distinguish.
 
 ### Key names
 
-All key names are case-sensitive and use TitleCase. Recognised keys include:
+All key names are case-sensitive and use TitleCase. Use `keymapper keys list` to print all recognized names.
 
-- **Modifiers:** `LeftControl`, `RightControl`, `LeftCtrl`, `RightCtrl`, `LeftShift`, `RightShift`, `LeftAlt`, `RightAlt`, `OptionLeft`, `OptionRight`, `LeftCommand`, `RightCommand`, `CapsLock`
+- **Modifiers:** `LeftControl`, `RightControl`, `LeftCtrl`, `RightCtrl`, `LeftShift`, `RightShift`, `LeftAlt`, `RightAlt`, `LeftOption`, `RightOption`, `LeftCommand`, `RightCommand`, `LeftCmd`, `RightCmd`, `CapsLock`
 - **Navigation:** `Tab`, `Space`, `Return`, `Backspace`, `Delete`, `Escape`, `UpArrow`, `DownArrow`, `LeftArrow`, `RightArrow`, `PageUp`, `PageDown`, `Home`, `End`
 - **Function keys:** `F1` through `F12`
 - **Letters:** `A` through `Z`
-- **Numbers:** `0` through `9`
+- **Numbers:** `0` through `9` (also `Number0` through `Number9`)
+- **Numpad:** `Numpad0`–`Numpad9`, `NumpadDecimal`, `NumpadMultiply`, `NumpadPlus`, `NumpadClear`, `NumpadDivide`, `NumpadEnter`, `NumpadMinus`, `NumpadEqual`
+- **Symbols:** `Minus`, `Equal`, `BracketLeft`, `BracketRight`, `Backslash`, `Semicolon`, `Quote`, `Comma`, `Period`, `Slash`, `Grave`, `IsoExtra`
 
 ### Common aliases
 
@@ -108,30 +141,23 @@ The following aliases resolve to the same platform key:
 | `Ctrl`, `LeftCtrl` | left Control key |
 | `RightCtrl` | right Control key |
 | `Shift`, `LeftShift` | left Shift key |
-| `Alt`, `LeftAlt`, `Option`, `OptionLeft` | left Alt/Option key |
-| `RightAlt`, `OptionRight` | right Alt/Option key |
-| `Cmd`, `Command`, `Super` | left Command/Super key |
+| `Alt`, `LeftAlt`, `Option`, `LeftOption` | left Alt/Option key |
+| `RightAlt`, `RightOption` | right Alt/Option key |
+| `Cmd`, `Command`, `Super`, `LeftCmd` | left Command/Super key |
 | `RightCmd`, `RightCommand` | right Command/Super key |
 | `Caps` | CapsLock |
 | `Enter` | Return |
 | `Esc` | Escape |
 | `Up`, `Down`, `Left`, `Right` | arrow keys |
 | `PgUp`, `PgDn` | PageUp, PageDown |
+| `KP_Multiply`, `KP_Add`, `KP_Divide`, `KP_Enter`, `KP_Subtract` | numpad operator keys |
+| `NonUSBackslash` | IsoExtra key (international keyboards) |
 
-## Hot-reload
+## CLI reference
 
-Edit and save your `config.yaml` while the daemon is running. Changes take effect immediately without restarting. Invalid configurations are rejected and the previous configuration is retained.
+### `keymapper appnames`
 
-## Finding application names
-
-Run the built-in discovery command to list every visible application along with the
-exact name keymapperd uses for matching:
-
-```bash
-keymapper appnames
-```
-
-Example output:
+List every visible application along with the exact name keymapperd uses for matching. Use these values in the `apps` field of your config.
 
 ```
 Arc
@@ -140,18 +166,40 @@ Keyboard Maestro Engine
 Activity Monitor
 ```
 
-Copy the names directly into your config:
+The match is case-sensitive. On Wayland, this command prints compositor-specific alternatives (e.g. `hyprctl`, `swaymsg`) since there is no universal window-enumeration API.
 
-```yaml
-- name: "iterm nav"
-  apps: [iTerm2]
-  mappings:
-    Ctrl+H: Left
-```
+### `keymapper config`
 
-The match is case-sensitive.  On Wayland, `keymapper appnames` prints compositor-
-specific alternatives (e.g. `hyprctl`, `swaymsg`) since there is no universal
-window-enumeration API.
+Manage the configuration file.
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | Print the configuration file to stdout |
+| `check [path]` | Validate and diagnose the configuration. Detects no-op rules, duplicate triggers, empty groups, and circular pairs. Accepts an optional path to a config file or directory containing `config.yaml` |
+| `create [dir]` | Create an empty configuration file at the given directory or the default platform-specific location |
+| `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names) |
+
+### `keymapper keys`
+
+Key introspection tools.
+
+| Subcommand | Description |
+|------------|-------------|
+| `list` | Print all key names recognised in the configuration file |
+| `probe` | Wait for physical key presses and print each key's name and code. Press Control+Escape to exit |
+
+### `keymapper server`
+
+Daemon process management.
+
+| Subcommand | Description |
+|------------|-------------|
+| `status` | Check whether keymapperd is running |
+| `start` | Start keymapperd if it is not already running |
+
+## Hot-reload
+
+Edit and save your `config.yaml` while the daemon is running. Changes take effect immediately without restarting. Invalid configurations are rejected and the previous configuration is retained.
 
 ## Troubleshooting
 
@@ -160,6 +208,8 @@ window-enumeration API.
 **Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
 
 **Rules don't take effect:** check that the `apps` value matches the actual application name. Run `keymapper appnames` to find the correct value. Omit `apps` for global rules.
+
+**Config file not found:** the daemon searches CWD first, then the platform-specific application config directory. Use `keymapper config create` to generate a default configuration. Note that symbolic links are not followed.
 
 ## How it works
 
