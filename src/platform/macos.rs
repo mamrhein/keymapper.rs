@@ -757,7 +757,7 @@ fn emit_key_event(source: &CFRetained<CGEventSource>, native_key: &NativeKey) {
 /// Shared mutable state bridged into the C callback via `user_info`.
 struct TapContext {
     /// Trait-object lookup: decouples this module from RuntimeState's shape.
-    lookup: Arc<RwLock<dyn Lookup + std::fmt::Debug>>,
+    lookup: Arc<RwLock<dyn Lookup>>,
     /// Pre-created event source reused for every synthetic keyboard event.
     /// Avoids a per-keystroke allocation inside the hot callback path.
     source: CFRetained<CGEventSource>,
@@ -792,7 +792,7 @@ extern "C" fn signal_handler(_sig: libc::c_int) {
 }
 
 pub fn start_mapping(
-    lookup: Arc<RwLock<dyn Lookup + std::fmt::Debug>>,
+    lookup: Arc<RwLock<dyn Lookup>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mask: u64 =
         (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::KeyUp.0);
