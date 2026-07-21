@@ -1,0 +1,155 @@
+# ---------------------------------------------------------------------------
+# name:     release
+# triggers: version tags (v*)
+#
+# Builds release archives for macOS (x86_64 + aarch64), Linux, and Windows.
+# Runs tests via cargo-nextest, then uploads compressed archives to the
+# corresponding GitHub Release.
+# ---------------------------------------------------------------------------
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # -----------------------------------------------------------------------
+  # macOS — build for both x86_64 and aarch64
+  # -----------------------------------------------------------------------
+  macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add build target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run tests
+        run: cargo nextest run
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARCHIVE="keymapper-${{ github.ref_name }}-${{ matrix.target }}.tar.xz"
+          tar -cJf "$ARCHIVE" \
+            --sort=name \
+            --transform="s|^|keymapper/${{ github.ref_name }}/" \
+            "target/${{ matrix.target }}/release/keymapper" \
+            "target/${{ matrix.target }}/release/keymapperd" \
+            LICENSE.TXT \
+            README.md
+          gh release upload "$GITHUB_REF_NAME" "$ARCHIVE"
+
+  # -----------------------------------------------------------------------
+  # Linux — x86_64 + aarch64
+  # -----------------------------------------------------------------------
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add build target
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cargo-nextest
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cross
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+        uses: taiki-e/install-action@cross
+
+      - name: Install QEMU user static
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+
+      - name: Run tests
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo nextest run
+
+      - name: Build release (native)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build release (cross)
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Upload artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARCHIVE="keymapper-${{ github.ref_name }}-${{ matrix.target }}.tar.xz"
+          tar -cJf "$ARCHIVE" \
+            --sort=name \
+            --transform="s|^|keymapper/${{ github.ref_name }}/" \
+            "target/${{ matrix.target }}/release/keymapper" \
+            "target/${{ matrix.target }}/release/keymapperd" \
+            LICENSE.TXT \
+            README.md
+          gh release upload "$GITHUB_REF_NAME" "$ARCHIVE"
+
+  # -----------------------------------------------------------------------
+  # Windows — x86_64
+  # -----------------------------------------------------------------------
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run tests
+        run: cargo nextest run
+
+      - name: Build release
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Upload artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $archive = "keymapper-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip"
+          $files = @(
+            "target/x86_64-pc-windows-msvc/release/keymapper.exe",
+            "target/x86_64-pc-windows-msvc/release/keymapperd.exe",
+            "LICENSE.TXT",
+            "README.md"
+          )
+          7z a "$archive" $files
+          gh release upload "${{ github.ref_name }}" "$archive"
