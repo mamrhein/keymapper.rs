@@ -16,7 +16,7 @@ use std::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use windows_sys::Win32::{
-    Foundation::HINSTANCE,
+    Foundation::{HINSTANCE,LPARAM,LRESULT,WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
@@ -32,10 +32,8 @@ use windows_sys::Win32::{
 };
 
 /// Type aliases for hook types not re-exported in windows-sys 0.61.
+#[allow(clippy::upper_case_acronyms)]
 type HHOOK = *mut std::ffi::c_void;
-type LPARAM = isize;
-type LRESULT = isize;
-type WPARAM = usize;
 
 use crate::daemon::{mapping_cache::NativeKey, state::Lookup};
 
@@ -707,7 +705,7 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
 
-    let mut input = INPUT {
+    let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
@@ -732,13 +730,12 @@ fn emit_key_event(native_key: &NativeKey) {
     let mut pressed_modifiers: Vec<VIRTUAL_KEY> = Vec::new();
 
     for bit in 0..8 {
-        if (native_key.modifiers >> bit) & 1 == 1 {
-            if let Some(vk) = modifier_bit_to_vk(bit) {
+        if (native_key.modifiers >> bit) & 1 == 1
+            && let Some(vk) = modifier_bit_to_vk(bit) {
                 simulate_key_event(vk, false);
                 pressed_modifiers.push(vk);
                 thread::sleep(Duration::from_millis(1));
             }
-        }
     }
 
     simulate_key_event(native_key.base as VIRTUAL_KEY, false);

@@ -123,14 +123,13 @@ fn get_file_description(path: &str) -> Option<String> {
         }
 
         // Resolve from the actual translation table.
-        if let Some(sub_block) = resolve_file_description_path(&buffer) {
-            if let Some(desc) = ver_query_value(&buffer, &sub_block) {
+        if let Some(sub_block) = resolve_file_description_path(&buffer)
+            && let Some(desc) = ver_query_value(&buffer, &sub_block) {
                 let s = utf16_to_string(&desc);
                 if !s.is_empty() {
                     return Some(s);
                 }
             }
-        }
 
         None
     }

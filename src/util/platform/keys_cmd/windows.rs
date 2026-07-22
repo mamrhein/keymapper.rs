@@ -10,7 +10,7 @@
 //! Windows implementation of `keymapper keys probe`.
 
 use windows_sys::Win32::{
-    Foundation::HINSTANCE,
+    Foundation::{HINSTANCE,LPARAM,LRESULT,WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
@@ -25,10 +25,8 @@ use windows_sys::Win32::{
 };
 
 /// Type aliases for hook types not re-exported in windows-sys 0.61.
+#[allow(clippy::upper_case_acronyms)]
 type HHOOK = *mut std::ffi::c_void;
-type LPARAM = isize;
-type LRESULT = isize;
-type WPARAM = usize;
 
 use crate::platform::Key;
 

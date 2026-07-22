@@ -20,6 +20,7 @@ use windows_sys::Win32::{
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// STARTUPINFOW — describes how a new process should start.
+#[allow(clippy::upper_case_acronyms)]
 #[allow(non_snake_case)]
 #[repr(C)]
 struct STARTUPINFOW {
