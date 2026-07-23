@@ -10,7 +10,7 @@ homepage = "https://github.com/mamrhein/keymapper.rs"
 repository = "https://github.com/mamrhein/keymapper.rs"
 license-file = "LICENSE.TXT"
 keywords = ["Cross-platform", "keymapper", "macOS", "Linux", "Windows"]
-categories = ["utilities"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "keymapper"
