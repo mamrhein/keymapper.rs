@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "keymapper"
-version = "0.0.1-test5"
+version = "0.0.1-test6"
 dependencies = [
  "active-win-pos-rs",
  "clap",
