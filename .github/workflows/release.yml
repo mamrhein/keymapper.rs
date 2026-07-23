@@ -140,13 +140,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ARCHIVE="keymapper-${{ github.ref_name }}-${{ matrix.target }}.tar.xz"
-          tar -cJf "$ARCHIVE" \
-            --sort=name \
-            --transform="s|^|keymapper/${{ github.ref_name }}/" \
-            "target/${{ matrix.target }}/release/keymapper" \
-            "target/${{ matrix.target }}/release/keymapperd" \
-            LICENSE.TXT \
-            README.md
+          STAGING="dist/keymapper/${{ github.ref_name }}"
+          mkdir -p "$STAGING"
+          cp "target/${{ matrix.target }}/release/keymapper" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/keymapperd" "$STAGING/"
+          cp LICENSE.TXT README.md "$STAGING/"
+          tar -cJf "$ARCHIVE" --sort=name "$STAGING"
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
 
   # -----------------------------------------------------------------------
