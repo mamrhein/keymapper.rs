@@ -15,6 +15,8 @@ Requires Rust 1.88+ (edition 2024).
 cargo install --path .
 ```
 
+Alternatively, download a pre-built DMG from the [releases page](https://github.com/mamrhein/keymapper.rs/releases), mount it, and run `install.sh`.
+
 Run `keymapperd` with appropriate privileges for keyboard interception (Accessibility on macOS, `/dev/input` access on Linux).
 
 ## Quick start

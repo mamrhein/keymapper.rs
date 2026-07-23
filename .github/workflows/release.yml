@@ -67,7 +67,7 @@ jobs:
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      - name: Upload tar.xz artifact
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -79,6 +79,16 @@ jobs:
           cp LICENSE.TXT README.md "$STAGING/"
           tar -cJf "$ARCHIVE" "dist/keymapper/${{ github.ref_name }}"
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
+
+      - name: Build DMG
+        run: bash scripts/package-macos.sh "${GITHUB_REF_NAME#v}" "${{ matrix.target }}"
+
+      - name: Upload DMG artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DMG="keymapper-${{ github.ref_name }}-${{ matrix.target }}.dmg"
+          gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber
 
   # -----------------------------------------------------------------------
   # Linux — x86_64 (native)
