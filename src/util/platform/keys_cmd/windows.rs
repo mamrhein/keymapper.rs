@@ -10,7 +10,7 @@
 //! Windows implementation of `keymapper keys probe`.
 
 use windows_sys::Win32::{
-    Foundation::{HINSTANCE,LPARAM,LRESULT,WPARAM},
+    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
@@ -34,23 +34,7 @@ use crate::platform::Key;
 const VK_LCONTROL: VIRTUAL_KEY = 0xA2;
 const VK_RCONTROL: VIRTUAL_KEY = 0xA3;
 
-static HOOK_HANDLE: parking_lot::Mutex<isize> =
-    parking_lot::Mutex::new(0);
-
-/// Check whether a virtual-key code corresponds to a modifier key.
-fn is_modifier(vk: VIRTUAL_KEY) -> bool {
-    matches!(
-        vk,
-        VK_LCONTROL
-            | VK_RCONTROL
-            | 0xA0 // VK_LSHIFT
-            | 0xA1 // VK_RSHIFT
-            | 0xA4 // VK_LMENU (LeftAlt)
-            | 0xA5 // VK_RMENU (RightAlt)
-            | 0x5B // VK_LWIN (LeftCommand)
-            | 0x5C // VK_RWIN (RightCommand)
-    )
-}
+static HOOK_HANDLE: parking_lot::Mutex<isize> = parking_lot::Mutex::new(0);
 
 /// Probe for key presses using a WH_KEYBOARD_LL hook.
 pub fn probe() {
@@ -94,7 +78,9 @@ extern "system" fn probe_keyboard_proc(
     l_param: LPARAM,
 ) -> LRESULT {
     if code < 0 {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param) };
+        return unsafe {
+            CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
+        };
     }
 
     let kbd_struct = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
@@ -109,13 +95,10 @@ extern "system" fn probe_keyboard_proc(
         let ctrl_state = unsafe { GetKeyState(VK_CONTROL as i32) };
         if ctrl_state < 0 {
             unsafe { PostQuitMessage(0) };
-            return unsafe { CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param) };
+            return unsafe {
+                CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
+            };
         }
-    }
-
-    // Skip modifier keys.
-    if is_modifier(vk_code) {
-        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param) };
     }
 
     // Print on key down.

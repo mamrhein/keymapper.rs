@@ -929,4 +929,3 @@ pub fn start_mapping(
     println!("Shutdown signal received. Cleaning up...");
     Ok(())
 }
-x

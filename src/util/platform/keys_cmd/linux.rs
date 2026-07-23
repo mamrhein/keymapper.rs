@@ -11,24 +11,9 @@
 
 use std::time::Duration;
 
-use evdev::{Device, EventType, FetchEventSync};
+use evdev::{Device, EventType};
 
 use crate::platform::Key;
-
-/// Check whether a keycode corresponds to a modifier key.
-fn is_modifier(code: u16) -> bool {
-    matches!(
-        code,
-        Key::LeftControl.as_native()
-            | Key::RightControl.as_native()
-            | Key::LeftShift.as_native()
-            | Key::RightShift.as_native()
-            | Key::LeftAlt.as_native()
-            | Key::RightAlt.as_native()
-            | Key::LeftCommand.as_native()
-            | Key::RightCommand.as_native()
-    )
-}
 
 /// Probe for key presses by reading from an evdev keyboard device.
 pub fn probe() {
@@ -67,15 +52,10 @@ pub fn probe() {
                             return;
                         }
 
-                        // Skip printing modifier keys.
-                        if is_modifier(code) {
-                            continue;
-                        }
-
                         // Print only on key down.
                         if is_key_down {
                             let (name, code_str) = if let Some(key) =
-                                Key::from_native(code as u16)
+                                Key::from_native(code)
                             {
                                 (
                                     key.as_str().to_string(),

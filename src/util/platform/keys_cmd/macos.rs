@@ -97,19 +97,6 @@ unsafe extern "C-unwind" fn probe_callback(
             return event.as_ptr();
         }
 
-        // Skip printing modifier key events.
-        if keycode == Key::LeftControl.as_native()
-            || keycode == Key::RightControl.as_native()
-            || keycode == Key::LeftShift.as_native()
-            || keycode == Key::RightShift.as_native()
-            || keycode == Key::LeftAlt.as_native()
-            || keycode == Key::RightAlt.as_native()
-            || keycode == Key::LeftCommand.as_native()
-            || keycode == Key::RightCommand.as_native()
-        {
-            return event.as_ptr();
-        }
-
         // Print the key information.
         let (name, code_str) = if let Some(key) = Key::from_native(keycode) {
             (key.as_str().to_string(), format!("{}", key.as_native()))
