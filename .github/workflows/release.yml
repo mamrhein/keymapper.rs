@@ -103,7 +103,7 @@ jobs:
             pkg-config \
             libdbus-1-dev \
             libudev-dev \
-            libxcb-dev
+            libxcb1-dev
 
       - name: Add build target
         if: matrix.target != 'x86_64-unknown-linux-gnu'
