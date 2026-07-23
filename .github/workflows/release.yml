@@ -99,7 +99,11 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libdbus-1-dev
+          sudo apt-get install -y \
+            pkg-config \
+            libdbus-1-dev \
+            libudev-dev \
+            libxcb-dev
 
       - name: Add build target
         if: matrix.target != 'x86_64-unknown-linux-gnu'
@@ -118,11 +122,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
-
-      - name: Install System Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libudev-dev
 
       - name: Run tests
         if: matrix.target == 'x86_64-unknown-linux-gnu'
