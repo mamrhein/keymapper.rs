@@ -1,6 +1,6 @@
 [package]
 name = "keymapper"
-version = "0.1.0"
+version = "0.0.1-test4"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Michael Amrhein <michael@adrhinum.de>"]
