@@ -142,6 +142,21 @@ fn attempt_reload(
     {
         use std::os::unix::fs::OpenOptionsExt;
 
+        // Security check: verify the file is not a symlink.  This is an extra
+        // guard beyond O_NOFOLLOW below, covering edge cases such as parent
+        // directory components being replaced with symlinks.
+        let sym_meta = match std::fs::symlink_metadata(config_path) {
+            Ok(m) => m,
+            Err(_) => {
+                return ReloadResult::Err("config file not found".to_string());
+            }
+        };
+        if sym_meta.file_type().is_symlink() {
+            return ReloadResult::Err(
+                "config file is now a symlink".to_string(),
+            );
+        }
+
         // Open with O_NOFOLLOW so we never follow a symlink, and we can do
         // metadata checks + read on the same file descriptor.
         let mut file = match std::fs::OpenOptions::new()
@@ -169,6 +184,19 @@ fn attempt_reload(
 
     #[cfg(not(unix))]
     {
+        // Security check: verify the file is not a symlink.
+        let sym_meta = match std::fs::symlink_metadata(config_path) {
+            Ok(m) => m,
+            Err(_) => {
+                return ReloadResult::Err("config file not found".to_string());
+            }
+        };
+        if sym_meta.file_type().is_symlink() {
+            return ReloadResult::Err(
+                "config file is now a symlink".to_string(),
+            );
+        }
+
         let mut file = match File::open(config_path) {
             Ok(f) => f,
             Err(_) => {
