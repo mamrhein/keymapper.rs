@@ -17,6 +17,7 @@ use std::{
 };
 
 use evdev::{Device, EventType, KeyCode};
+use signal_hook::flag::register;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -697,12 +698,6 @@ fn emit_key_event(
 // evdev event loop
 // ---------------------------------------------------------------------------
 
-extern "C" fn signal_handler(_sig: libc::c_int) {
-    SHUTDOWN_REQUESTED.store(true, Ordering::Release);
-}
-
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-
 /// Determine the seat of the current user session.
 ///
 /// Strategy (first match wins):
@@ -842,15 +837,15 @@ pub fn start_mapping(
     thread::sleep(Duration::from_millis(200));
     println!("Linux uinput virtual keyboard ready.");
 
-    let handler_ptr = signal_handler as *const () as usize;
-    unsafe {
-        libc::signal(libc::SIGINT, handler_ptr);
-        libc::signal(libc::SIGTERM, handler_ptr);
-    }
+    let shutdown = Arc::new(AtomicBool::new(false));
+    register(libc::SIGINT, shutdown.clone())
+        .expect("failed to register SIGINT handler");
+    register(libc::SIGTERM, shutdown.clone())
+        .expect("failed to register SIGTERM handler");
 
     let mut active_modifiers: u8 = 0;
 
-    while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+    while !shutdown.load(Ordering::Acquire) {
         match raw_device.fetch_events() {
             Ok(events) => {
                 for event in events {

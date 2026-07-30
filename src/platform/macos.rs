@@ -27,6 +27,7 @@ use objc2_core_graphics::{
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use signal_hook::flag::register;
 
 use crate::daemon::{mapping_cache::NativeKey, state::Lookup};
 
@@ -765,8 +766,6 @@ struct TapContext {
     modifier_state: u8,
 }
 
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-
 /// Holds the tap, run-loop-source, and callback context so they stay alive
 /// for the lifetime of the event-loop, and are cleanly reclaimed on drop.
 struct EventTapHandle {
@@ -784,11 +783,6 @@ impl Drop for EventTapHandle {
             drop(Box::from_raw(self.context_ptr));
         }
     }
-}
-
-/// Async-signal-safe handler that flips the shutdown flag.
-extern "C" fn signal_handler(_sig: libc::c_int) {
-    SHUTDOWN_REQUESTED.store(true, Ordering::Release);
 }
 
 pub fn start_mapping(
@@ -843,11 +837,11 @@ pub fn start_mapping(
     CGEvent::tap_enable(&tap, true);
     println!("macOS Event Tap running.");
 
-    let handler_ptr = signal_handler as *const () as usize;
-    unsafe {
-        libc::signal(libc::SIGINT, handler_ptr);
-        libc::signal(libc::SIGTERM, handler_ptr);
-    }
+    let shutdown = Arc::new(AtomicBool::new(false));
+    register(libc::SIGINT, shutdown.clone())
+        .expect("failed to register SIGINT handler");
+    register(libc::SIGTERM, shutdown.clone())
+        .expect("failed to register SIGTERM handler");
 
     let handle = EventTapHandle {
         tap,
@@ -855,7 +849,7 @@ pub fn start_mapping(
         context_ptr,
     };
 
-    while !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
+    while !shutdown.load(Ordering::Acquire) {
         CFRunLoop::run_in_mode(unsafe { kCFRunLoopCommonModes }, 0.5, true);
     }
 
