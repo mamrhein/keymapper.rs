@@ -167,10 +167,10 @@ fn compile_outputs(
 fn compile_modifier_bits(keys: &[crate::common::Key]) -> u8 {
     let mut bits: u8 = 0;
     for key in keys {
-        if let Some(platform_key) = Key::from_common(*key) {
-            if let Some(bit) = platform_key.as_modifier_bit() {
-                bits |= 1 << bit;
-            }
+        if let Some(platform_key) = Key::from_common(*key)
+            && let Some(bit) = platform_key.as_modifier_bit()
+        {
+            bits |= 1 << bit;
         }
     }
     bits
@@ -193,10 +193,10 @@ fn expand_modifier_bits(modifiers: &[crate::common::Key]) -> Vec<u8> {
     let choices: Vec<Vec<u8>> = modifiers
         .iter()
         .map(|key| {
-            if let Some(platform_key) = Key::from_common(*key) {
-                if let Some(positions) = platform_key.as_modifier_positions() {
-                    return positions;
-                }
+            if let Some(platform_key) = Key::from_common(*key)
+                && let Some(positions) = platform_key.as_modifier_positions()
+            {
+                return positions;
             }
             // Non-modifier in modifier position -- should not happen,
             // but treat as no contribution.
