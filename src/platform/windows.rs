@@ -190,7 +190,6 @@ impl Key {
     /// (`NumpadClear`, `NumpadEqual`).
     pub const fn from_common(key: crate::common::Key) -> Option<Self> {
         Some(match key {
-        match key {
             crate::common::Key::LeftControl => Self::LeftControl,
             crate::common::Key::RightControl => Self::RightControl,
             crate::common::Key::LeftShift => Self::LeftShift,
