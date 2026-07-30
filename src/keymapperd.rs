@@ -11,6 +11,10 @@ use std::{sync::Arc, thread, time::Duration};
 
 use parking_lot::RwLock;
 
+// Import Lookup so read-only trait methods are in scope, and MutableLookup so
+// mutation methods are callable on the concrete RuntimeState type.
+use keymapper::daemon::state::{Lookup, MutableLookup};
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = keymapper::common::config_path::find_config_path_strict(
     )
@@ -30,10 +34,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config_path,
         )?;
 
-    // Coerce to dyn Lookup at creation time.  All Arc::clone calls
-    // downstream inherit this trait-object type, so platform modules
-    // never see the concrete RuntimeState shape.
-    let state: Arc<RwLock<dyn keymapper::daemon::state::Lookup>> =
+    // Coerce to dyn MutableLookup at creation time.  The daemon-internal code
+    // (watcher, tracker) can call mutation methods via MutableLookup.  A
+    // pointer cast produces a dyn Lookup Arc for platform code, which only
+    // needs the read-only interface.  Both Arcs share the same allocation.
+    let state: Arc<RwLock<dyn MutableLookup>> =
         Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
             initial_cache,
             String::from("unknown"),
@@ -56,8 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => String::from("unknown"),
                 };
 
-            // Read-check -> conditional write-escalation.  Uses trait
-            // methods so this code is also decoupled from RuntimeState.
+            // Read-check -> conditional write-escalation.
             if !current_focused_app.eq(&**tracker_state.read().active_app()) {
                 let mut write_guard = tracker_state.write();
                 if !current_focused_app.eq(&**write_guard.active_app()) {
@@ -71,5 +75,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Cross-platform runtime engines fully synchronized.");
 
-    keymapper::platform::start_mapping(Arc::clone(&state))
+    // Cast the Arc pointer to produce an Arc<RwLock<dyn Lookup>> that shares
+    // the same underlying allocation.  Safe because dyn MutableLookup's vtable
+    // is a superset of dyn Lookup's vtable, and the data pointer is identical.
+    let platform_state: Arc<RwLock<dyn Lookup>> = unsafe {
+        let ptr: *const RwLock<dyn MutableLookup> = Arc::as_ptr(&state);
+        Arc::from_raw(ptr as *const RwLock<dyn Lookup>)
+    };
+
+    keymapper::platform::start_mapping(platform_state)
 }

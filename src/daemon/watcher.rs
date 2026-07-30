@@ -21,7 +21,7 @@ use notify::{
 };
 use parking_lot::RwLock;
 
-use super::{mapping_cache::RuntimeLookupCache, state::Lookup};
+use super::{mapping_cache::RuntimeLookupCache, state::MutableLookup};
 
 /// Maximum config file size in bytes (1 MB).  A key-mapping configuration
 /// should never approach this limit; a larger file indicates either a write
@@ -50,7 +50,7 @@ enum ReloadResult {
 /// only pushes events onto a channel.
 fn spawn_reload_thread(
     path_to_watch: Arc<PathBuf>,
-    state: Arc<RwLock<dyn Lookup>>,
+    state: Arc<RwLock<dyn MutableLookup>>,
 ) -> mpsc::Sender<()> {
     let (tx, rx) = mpsc::channel();
 
@@ -136,7 +136,7 @@ fn drain_channel(rx: &mpsc::Receiver<()>) {
 /// between metadata inspection and content read.
 fn attempt_reload(
     config_path: &Path,
-    state: &Arc<RwLock<dyn Lookup>>,
+    state: &Arc<RwLock<dyn MutableLookup>>,
 ) -> ReloadResult {
     #[cfg(unix)]
     {
@@ -224,7 +224,7 @@ fn attempt_reload(
 fn validate_and_reload(
     file: &mut File,
     metadata: &std::fs::Metadata,
-    state: &Arc<RwLock<dyn Lookup>>,
+    state: &Arc<RwLock<dyn MutableLookup>>,
 ) -> ReloadResult {
     use std::os::unix::fs::MetadataExt;
 
@@ -273,7 +273,7 @@ fn validate_and_reload(
 fn validate_and_reload(
     file: &mut File,
     metadata: &std::fs::Metadata,
-    state: &Arc<RwLock<dyn Lookup>>,
+    state: &Arc<RwLock<dyn MutableLookup>>,
 ) -> ReloadResult {
     if !metadata.is_file() {
         return ReloadResult::Err(
@@ -302,7 +302,7 @@ fn validate_and_reload(
 /// Parse and compile the config string, then swap the runtime cache.
 fn reload_from_str(
     content: &str,
-    state: &Arc<RwLock<dyn Lookup>>,
+    state: &Arc<RwLock<dyn MutableLookup>>,
 ) -> ReloadResult {
     match RuntimeLookupCache::compile_from_str(content) {
         Ok(new_cache) => {
@@ -320,7 +320,7 @@ fn reload_from_str(
 
 pub fn start_config_watcher<P: AsRef<Path>>(
     config_path: P,
-    state: Arc<RwLock<dyn Lookup>>,
+    state: Arc<RwLock<dyn MutableLookup>>,
 ) -> Result<RecommendedWatcher, notify::Error> {
     let path_to_watch = Arc::new(config_path.as_ref().to_owned());
     let reload_tx = spawn_reload_thread(Arc::clone(&path_to_watch), state);

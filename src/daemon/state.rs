@@ -11,9 +11,9 @@ use std::sync::Arc;
 
 use super::mapping_cache::{CompiledRule, NativeKey, RuntimeLookupCache};
 
-/// Minimal interface for OS event-loop callbacks and state managers.
+/// Read-only interface for OS event-loop callbacks and state managers.
 /// Deliberately small so that platform modules never learn about the
-/// internal structure of [`RuntimeState`].
+/// internal structure of [`RuntimeState`] or its mutation operations.
 pub trait Lookup: Send + Sync + std::fmt::Debug {
     /// Best-effort lookup scoped to the given application name.
     ///
@@ -32,7 +32,13 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
     /// Name of the currently foreground application.  Returns an
     /// `Arc<str>` so callers can read without cloning.
     fn active_app(&self) -> &Arc<str>;
+}
 
+/// Mutable operations on the runtime state.  Only the daemon internal code
+/// (hot-reloader and app tracker) needs this; platform modules depend solely
+/// on the read-only [`Lookup`] trait.  External callers cannot implement this
+/// trait because [`RuntimeState`] has private fields.
+pub trait MutableLookup: Lookup {
     /// Update the foreground application name (called behind a write lock).
     fn set_active_app(&mut self, app: String);
 
@@ -79,7 +85,9 @@ impl Lookup for RuntimeState {
     fn active_app(&self) -> &Arc<str> {
         &self.active_app
     }
+}
 
+impl MutableLookup for RuntimeState {
     fn set_active_app(&mut self, app: String) {
         self.active_app = app.into();
     }
