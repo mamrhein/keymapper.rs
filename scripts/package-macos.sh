@@ -42,11 +42,19 @@ cp "${PROJECT_ROOT}/target/${TARGET}/release/keymapperd" "${VOLUME_DIR}/bin/"
 cp "${PROJECT_ROOT}/README.md" "${VOLUME_DIR}/"
 cp "${PROJECT_ROOT}/LICENSE.TXT" "${VOLUME_DIR}/"
 
-# Install script — copies binaries to a usable location.
+# Copy the launchd plist template and service install script.
+mkdir -p "${VOLUME_DIR}/resources/launchd"
+cp "${PROJECT_ROOT}/resources/launchd/de.adrhinum.keymapperd.plist" \
+   "${VOLUME_DIR}/resources/launchd/"
+cp "${PROJECT_ROOT}/scripts/install-macos.sh" "${VOLUME_DIR}/"
+cp "${PROJECT_ROOT}/scripts/uninstall-macos.sh" "${VOLUME_DIR}/"
+
+# Install script — copies binaries to a usable location and sets up launchd.
 cat > "${VOLUME_DIR}/install.sh" << 'INSTALL'
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Installs keymapper binaries to /usr/local/bin (default) or a custom path.
+# Installs keymapper binaries to /usr/local/bin (default) or a custom path,
+# then registers the launchd service.
 #
 # Usage: ./install.sh [destination]
 # ---------------------------------------------------------------------------
@@ -66,9 +74,13 @@ sudo cp "${SCRIPT_DIR}/bin/keymapperd" "$DEST/"
 
 echo "Installed keymapper to ${DEST}."
 echo ""
+
+# Register the launchd service.
+"${SCRIPT_DIR}/install-macos.sh" "${DEST}/keymapperd"
+
+echo ""
 echo "Next steps:"
 echo "  keymapper config create   # create a configuration file"
-echo "  keymapper server start    # start the daemon"
 INSTALL
 chmod +x "${VOLUME_DIR}/install.sh"
 
@@ -83,10 +95,14 @@ Quick install:
 Manual install:
   cp bin/keymapper /usr/local/bin/
   cp bin/keymapperd /usr/local/bin/
+  ./install-macos.sh /usr/local/bin/keymapperd
 
 Then:
   keymapper config create    # create a configuration file
-  keymapper server start     # start the daemon
+  keymapper server status    # verify the daemon is running
+
+To uninstall:
+  ./uninstall-macos.sh
 
 Full documentation is in README.md.
 READMI

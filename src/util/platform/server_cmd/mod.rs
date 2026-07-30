@@ -8,6 +8,9 @@
 // $Revision$
 
 //! Platform-specific helpers for managing the keymapperd daemon process.
+//!
+//! On macOS and Linux this delegates to the native service manager (launchd /
+//! systemd --user).  On Windows it directly spawns the daemon binary.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -34,21 +37,20 @@ pub fn is_running() -> bool {
     windows::is_daemon_running(DAEMON_NAME)
 }
 
-/// Attempt to start keymapperd as a background process.
+/// Attempt to start keymapperd via the platform service manager (or direct
+/// spawn on Windows).
 ///
-/// Returns `Ok(())` when the daemon was spawned and verified to be running.
-/// Returns `Err` if the executable could not be found, the spawn failed, or
-/// the process exited immediately after starting.
+/// Returns `Ok(())` when the daemon was started successfully.  On macOS and
+/// Linux the service manager handles this synchronously, so no additional
+/// verification is needed.
 #[cfg(target_os = "macos")]
 pub fn start() -> Result<(), String> {
-    let spawn_result = macos::spawn_daemon(DAEMON_NAME);
-    verify_start(spawn_result)
+    macos::spawn_daemon(DAEMON_NAME)
 }
 
 #[cfg(target_os = "linux")]
 pub fn start() -> Result<(), String> {
-    let spawn_result = linux::spawn_daemon(DAEMON_NAME);
-    verify_start(spawn_result)
+    linux::spawn_daemon(DAEMON_NAME)
 }
 
 #[cfg(target_os = "windows")]
@@ -57,7 +59,53 @@ pub fn start() -> Result<(), String> {
     verify_start(spawn_result)
 }
 
-/// After a successful spawn, wait briefly and confirm the daemon is still alive.
+/// Stop the keymapperd service.
+#[cfg(target_os = "macos")]
+pub fn stop() -> Result<(), String> {
+    macos::stop_daemon()
+}
+
+#[cfg(target_os = "linux")]
+pub fn stop() -> Result<(), String> {
+    linux::stop_daemon()
+}
+
+#[cfg(target_os = "windows")]
+pub fn stop() -> Result<(), String> {
+    // On Windows we send a termination signal by finding the process and
+    // closing its handle.  For now fall back to asking the user to use the
+    // Task Manager or a future Windows service implementation.
+    Err(
+        "stop is not supported on Windows yet; use Task Manager or restart \
+         to stop keymapperd"
+            .into(),
+    )
+}
+
+/// Restart the keymapperd service.
+#[cfg(target_os = "macos")]
+pub fn restart() -> Result<(), String> {
+    macos::restart_daemon()
+}
+
+#[cfg(target_os = "linux")]
+pub fn restart() -> Result<(), String> {
+    linux::restart_daemon()
+}
+
+#[cfg(target_os = "windows")]
+pub fn restart() -> Result<(), String> {
+    stop()?;
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    start()
+}
+
+/// After a successful spawn, wait briefly and confirm the daemon is still
+/// alive.
+///
+/// Only used on Windows where we spawn directly and need to verify the process
+/// didn't crash immediately.
+#[cfg(target_os = "windows")]
 fn verify_start(spawn_result: Result<(), String>) -> Result<(), String> {
     spawn_result?;
 

@@ -60,6 +60,12 @@ enum ServerCommands {
 
     /// Start keymapperd if it is not already running.
     Start,
+
+    /// Stop keymapperd if it is running.
+    Stop,
+
+    /// Restart keymapperd (stop then start).
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -142,6 +148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Server { command } => match command {
             ServerCommands::Status => cmd_server_status()?,
             ServerCommands::Start => cmd_server_start()?,
+            ServerCommands::Stop => cmd_server_stop()?,
+            ServerCommands::Restart => cmd_server_restart()?,
         },
     }
 
@@ -378,6 +386,27 @@ fn cmd_server_start() -> Result<(), Box<dyn std::error::Error>> {
     server_cmd::start()
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     println!("keymapperd started");
+
+    Ok(())
+}
+
+fn cmd_server_stop() -> Result<(), Box<dyn std::error::Error>> {
+    if !server_cmd::is_running() {
+        println!("keymapperd is not running");
+        return Ok(());
+    }
+
+    server_cmd::stop()
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    println!("keymapperd stopped");
+
+    Ok(())
+}
+
+fn cmd_server_restart() -> Result<(), Box<dyn std::error::Error>> {
+    server_cmd::restart()
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    println!("keymapperd restarted");
 
     Ok(())
 }

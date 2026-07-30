@@ -1,0 +1,12 @@
+[Unit]
+Description=keymapperd - keyboard remapping daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=@BINARY_PATH@
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

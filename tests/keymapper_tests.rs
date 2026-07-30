@@ -720,24 +720,35 @@ fn server_status_not_running() {
 
 #[test]
 fn server_start_not_found() {
-    // keymapperd is not on PATH in the test environment, so starting it
-    // should fail with a clear error message.
+    // With service-manager integration, `server start` either fails with a
+    // clear error (service not installed) or reports already-running if the
+    // service is known to launchd/systemd.  Both outcomes are valid; we just
+    // verify the command doesn't crash or hang.
     let output = Command::new(bin_path())
         .args(["server", "start"])
         .output()
         .expect("failed to run keymapper");
 
-    // The command should fail because keymapperd is not on PATH.
-    assert!(
-        !output.status.success(),
-        "server start should fail when keymapperd is not on PATH"
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("failed to start")
+
+    // Acceptable outcomes:
+    // 1. Success: "already running" (service is registered with
+    //    launchd/systemd)
+    // 2. Failure: meaningful error message (service not installed, etc.)
+    let already_running = stdout.contains("already running");
+    let has_error = !output.status.success()
+        && (stderr.contains("failed to start")
             || stderr.contains("exited immediately")
-            || stderr.contains("No such file"),
-        "error message: {}",
+            || stderr.contains("No such file")
+            || stderr.contains("plist not found")
+            || stderr.contains("unit not found"));
+
+    assert!(
+        already_running || has_error,
+        "server start should either report 'already running' or fail with a \
+         clear error.\nstdout: {}\nstderr: {}",
+        stdout,
         stderr
     );
 }
