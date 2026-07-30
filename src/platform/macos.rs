@@ -887,6 +887,11 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     let is_down = _type == CGEventType::KeyDown;
 
+    // Capture the modifier state for rule matching before updating it,
+    // so that bare-modifier triggers (e.g. "Control: A") match correctly
+    // against the concurrent modifier set.
+    let lookup_modifiers = context.modifier_state;
+
     // Track specific modifier key state for exact matching.
     if let Some(bit) = keycode_to_modifier_bit(native_key) {
         if is_down {
@@ -894,16 +899,13 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
         } else {
             context.modifier_state &= !(1 << bit);
         }
-        return event.as_ptr();
     }
-
-    let pressed_modifiers = context.modifier_state;
 
     let guard = context.lookup.read();
     let current_app = guard.active_app().to_string();
     let active_outputs = guard
-        .for_app(&current_app, native_key, pressed_modifiers)
-        .or_else(|| guard.global(native_key, pressed_modifiers))
+        .for_app(&current_app, native_key, lookup_modifiers)
+        .or_else(|| guard.global(native_key, lookup_modifiers))
         .map(|v| v.to_vec());
     drop(guard);
 

@@ -858,6 +858,12 @@ pub fn start_mapping(
                         let code = event.code();
                         let value = event.value();
 
+                        // Capture the modifier state to use for rule matching.
+                        // For modifier keys this is the pre-update snapshot so
+                        // that bare-modifier triggers (e.g. "LeftControl: A")
+                        // match correctly against the concurrent modifier set.
+                        let lookup_modifiers = active_modifiers;
+
                         if let Some(bit) = keycode_to_modifier_bit(code) {
                             if value == 1 {
                                 active_modifiers |= 1 << bit;
@@ -869,8 +875,8 @@ pub fn start_mapping(
                         let guard = lookup.read();
                         let current_app = guard.active_app().to_string();
                         let active_outputs = guard
-                            .for_app(&current_app, code, active_modifiers)
-                            .or_else(|| guard.global(code, active_modifiers))
+                            .for_app(&current_app, code, lookup_modifiers)
+                            .or_else(|| guard.global(code, lookup_modifiers))
                             .map(|v| v.to_vec());
                         drop(guard);
 

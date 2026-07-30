@@ -16,7 +16,7 @@ use std::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use windows_sys::Win32::{
-    Foundation::{HINSTANCE,LPARAM,LRESULT,WPARAM},
+    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
@@ -25,8 +25,8 @@ use windows_sys::Win32::{
         },
         WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSG,
-            SetWindowsHookExW, UnhookWindowsHookEx,
-            WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+            WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
         },
     },
 };
@@ -731,11 +731,12 @@ fn emit_key_event(native_key: &NativeKey) {
 
     for bit in 0..8 {
         if (native_key.modifiers >> bit) & 1 == 1
-            && let Some(vk) = modifier_bit_to_vk(bit) {
-                simulate_key_event(vk, false);
-                pressed_modifiers.push(vk);
-                thread::sleep(Duration::from_millis(1));
-            }
+            && let Some(vk) = modifier_bit_to_vk(bit)
+        {
+            simulate_key_event(vk, false);
+            pressed_modifiers.push(vk);
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 
     simulate_key_event(native_key.base as VIRTUAL_KEY, false);
@@ -769,8 +770,7 @@ fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
 // ---------------------------------------------------------------------------
 
 static SHARED_LOOKUP: OnceLock<Arc<RwLock<dyn Lookup>>> = OnceLock::new();
-static HOOK_HANDLE: parking_lot::Mutex<isize> =
-    parking_lot::Mutex::new(0);
+static HOOK_HANDLE: parking_lot::Mutex<isize> = parking_lot::Mutex::new(0);
 
 fn set_shared_lookup(lookup: Arc<RwLock<dyn Lookup>>) {
     SHARED_LOOKUP
@@ -843,14 +843,13 @@ extern "system" fn low_level_keyboard_proc(
     let _is_key_up =
         w_param as u32 == WM_KEYUP || w_param as u32 == WM_SYSKEYUP;
 
-    // Pass through modifier-only events.
-    if vk_to_modifier_bit(vk_code).is_some() {
-        return unsafe {
-            CallNextHookEx(hook_handle(), code, w_param, l_param)
-        };
+    // Clear the current key's modifier bit from the polled state so that
+    // bare-modifier triggers (e.g. "LeftControl: A") match correctly against
+    // the concurrent modifier set.
+    let mut pressed_modifiers = extract_modifier_bits();
+    if let Some(bit) = vk_to_modifier_bit(vk_code) {
+        pressed_modifiers &= !(1 << bit);
     }
-
-    let pressed_modifiers = extract_modifier_bits();
 
     let guard = lookup.read();
     let current_app = guard.active_app().to_string();
