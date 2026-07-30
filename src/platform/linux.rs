@@ -17,12 +17,15 @@ use std::{
 };
 
 use evdev::{Device, EventType, KeyCode};
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
-use signal_hook::flag::register;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::flag::register;
 
-use crate::{daemon::mapping_cache::NativeKey, daemon::state::Lookup};
+use crate::{
+    common::modifier::ModifierRole, daemon::mapping_cache::NativeKey,
+    daemon::state::Lookup,
+};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the evdev KEY_* codes
@@ -144,27 +147,34 @@ impl Key {
     }
 
     pub const fn as_modifier_bit(self) -> Option<u8> {
-        match self {
-            Self::LeftControl => Some(0),
-            Self::RightControl => Some(1),
-            Self::LeftShift => Some(2),
-            Self::RightShift => Some(3),
-            Self::LeftAlt => Some(4),
-            Self::RightAlt => Some(5),
-            Self::LeftCommand => Some(6),
-            Self::RightCommand => Some(7),
-            _ => None,
-        }
+        let role = match self {
+            Self::LeftControl => ModifierRole::LeftControl,
+            Self::RightControl => ModifierRole::RightControl,
+            Self::LeftShift => ModifierRole::LeftShift,
+            Self::RightShift => ModifierRole::RightShift,
+            Self::LeftAlt => ModifierRole::LeftAlt,
+            Self::RightAlt => ModifierRole::RightAlt,
+            Self::LeftCommand => ModifierRole::LeftCommand,
+            Self::RightCommand => ModifierRole::RightCommand,
+            _ => return None,
+        };
+        Some(role.bit())
     }
 
     pub fn as_modifier_positions(self) -> Option<Vec<u8>> {
-        match self {
-            Self::LeftControl | Self::RightControl => Some(vec![0, 1]),
-            Self::LeftShift | Self::RightShift => Some(vec![2, 3]),
-            Self::LeftAlt | Self::RightAlt => Some(vec![4, 5]),
-            Self::LeftCommand | Self::RightCommand => Some(vec![6, 7]),
-            _ => None,
-        }
+        let role = match self {
+            Self::LeftControl => ModifierRole::LeftControl,
+            Self::RightControl => ModifierRole::RightControl,
+            Self::LeftShift => ModifierRole::LeftShift,
+            Self::RightShift => ModifierRole::RightShift,
+            Self::LeftAlt => ModifierRole::LeftAlt,
+            Self::RightAlt => ModifierRole::RightAlt,
+            Self::LeftCommand => ModifierRole::LeftCommand,
+            Self::RightCommand => ModifierRole::RightCommand,
+            _ => return None,
+        };
+        let (a, b) = role.family_positions();
+        Some(vec![a, b])
     }
 
     pub fn as_str(self) -> &'static str {
@@ -624,7 +634,9 @@ impl<'de> Deserialize<'de> for Key {
     {
         let s = String::deserialize(deserializer)?;
         Self::try_from_str(&s).ok_or_else(|| {
-            serde::de::Error::custom(crate::common::key_names::unknown_key_error(&s))
+            serde::de::Error::custom(
+                crate::common::key_names::unknown_key_error(&s),
+            )
         })
     }
 }
@@ -633,32 +645,39 @@ impl<'de> Deserialize<'de> for Key {
 // Modifier handling
 // ---------------------------------------------------------------------------
 
+/// Map a raw evdev keycode to its modifier bit position via the shared
+/// `ModifierRole` type.
 fn keycode_to_modifier_bit(code: u16) -> Option<u8> {
-    match code {
-        29 => Some(0),  // KEY_LEFTCTRL
-        97 => Some(1),  // KEY_RIGHTCTRL
-        42 => Some(2),  // KEY_LEFTSHIFT
-        54 => Some(3),  // KEY_RIGHTSHIFT
-        56 => Some(4),  // KEY_LEFTALT
-        100 => Some(5), // KEY_RIGHTALT
-        125 => Some(6), // KEY_LEFTMETA
-        126 => Some(7), // KEY_RIGHTMETA
-        _ => None,
-    }
+    let role = match code {
+        29 => ModifierRole::LeftControl, // KEY_LEFTCTRL
+        97 => ModifierRole::RightControl, // KEY_RIGHTCTRL
+        42 => ModifierRole::LeftShift,   // KEY_LEFTSHIFT
+        54 => ModifierRole::RightShift,  // KEY_RIGHTSHIFT
+        56 => ModifierRole::LeftAlt,     // KEY_LEFTALT
+        100 => ModifierRole::RightAlt,   // KEY_RIGHTALT
+        125 => ModifierRole::LeftCommand, // KEY_LEFTMETA
+        126 => ModifierRole::RightCommand, // KEY_RIGHTMETA
+        _ => return None,
+    };
+    Some(role.bit())
 }
 
+/// Map a modifier bit position back to the native evdev keycode for emission.
 fn modifier_bit_to_code(bit: u8) -> Option<u16> {
-    match bit {
-        0 => Some(29),  // KEY_LEFTCTRL
-        1 => Some(97),  // KEY_RIGHTCTRL
-        2 => Some(42),  // KEY_LEFTSHIFT
-        3 => Some(54),  // KEY_RIGHTSHIFT
-        4 => Some(56),  // KEY_LEFTALT
-        5 => Some(100), // KEY_RIGHTALT
-        6 => Some(125), // KEY_LEFTMETA
-        7 => Some(126), // KEY_RIGHTMETA
-        _ => None,
-    }
+    let Some(role) = ModifierRole::try_from_bit(bit) else {
+        return None;
+    };
+    let key = match role {
+        ModifierRole::LeftControl => Key::LeftControl,
+        ModifierRole::RightControl => Key::RightControl,
+        ModifierRole::LeftShift => Key::LeftShift,
+        ModifierRole::RightShift => Key::RightShift,
+        ModifierRole::LeftAlt => Key::LeftAlt,
+        ModifierRole::RightAlt => Key::RightAlt,
+        ModifierRole::LeftCommand => Key::LeftCommand,
+        ModifierRole::RightCommand => Key::RightCommand,
+    };
+    Some(key.as_native())
 }
 
 fn emit_key_event(
@@ -737,7 +756,8 @@ fn determine_seat() -> String {
 /// This uses `udevrs` to enumerate devices tagged for the seat and filtered to
 /// keyboards.  If udev enumeration fails or returns no candidates it falls back
 /// to the legacy approach of scanning `/dev/input/event*`.
-pub(crate) fn find_keyboard_device() -> Result<Device, Box<dyn std::error::Error>> {
+pub(crate) fn find_keyboard_device()
+-> Result<Device, Box<dyn std::error::Error>> {
     let seat = determine_seat();
 
     // Try seat-aware udev enumeration first.
@@ -877,6 +897,12 @@ pub fn start_mapping(
                         drop(guard);
 
                         if let Some(outputs) = active_outputs {
+                            // Emit mapped outputs and swallow the original
+                            // event.  This applies to modifier keys as well:
+                            // if a bare modifier (e.g. LeftControl alone) is
+                            // mapped, its outputs are emitted and the original
+                            // modifier press is NOT forwarded to the virtual
+                            // device, preventing double emission.
                             if value == 1 {
                                 for native_key in &outputs {
                                     if let Err(e) = emit_key_event(

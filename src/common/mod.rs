@@ -7,8 +7,9 @@
 // $Source$
 // $Revision$
 
-//! Shared configuration parsing and path resolution.
+//! Shared configuration parsing, path resolution, and modifier definitions.
 
 pub mod config;
 pub mod config_path;
 pub(crate) mod key_names;
+pub(crate) mod modifier;

@@ -35,6 +35,7 @@ use windows_sys::Win32::{
 #[allow(clippy::upper_case_acronyms)]
 type HHOOK = *mut std::ffi::c_void;
 
+use crate::common::modifier::ModifierRole;
 use crate::daemon::{mapping_cache::NativeKey, state::Lookup};
 
 // ---------------------------------------------------------------------------
@@ -155,27 +156,34 @@ impl Key {
     }
 
     pub const fn as_modifier_bit(self) -> Option<u8> {
-        match self {
-            Self::LeftControl => Some(0),
-            Self::RightControl => Some(1),
-            Self::LeftShift => Some(2),
-            Self::RightShift => Some(3),
-            Self::LeftAlt => Some(4),
-            Self::RightAlt => Some(5),
-            Self::LeftCommand => Some(6),
-            Self::RightCommand => Some(7),
-            _ => None,
-        }
+        let role = match self {
+            Self::LeftControl => ModifierRole::LeftControl,
+            Self::RightControl => ModifierRole::RightControl,
+            Self::LeftShift => ModifierRole::LeftShift,
+            Self::RightShift => ModifierRole::RightShift,
+            Self::LeftAlt => ModifierRole::LeftAlt,
+            Self::RightAlt => ModifierRole::RightAlt,
+            Self::LeftCommand => ModifierRole::LeftCommand,
+            Self::RightCommand => ModifierRole::RightCommand,
+            _ => return None,
+        };
+        Some(role.bit())
     }
 
     pub fn as_modifier_positions(self) -> Option<Vec<u8>> {
-        match self {
-            Self::LeftControl | Self::RightControl => Some(vec![0, 1]),
-            Self::LeftShift | Self::RightShift => Some(vec![2, 3]),
-            Self::LeftAlt | Self::RightAlt => Some(vec![4, 5]),
-            Self::LeftCommand | Self::RightCommand => Some(vec![6, 7]),
-            _ => None,
-        }
+        let role = match self {
+            Self::LeftControl => ModifierRole::LeftControl,
+            Self::RightControl => ModifierRole::RightControl,
+            Self::LeftShift => ModifierRole::LeftShift,
+            Self::RightShift => ModifierRole::RightShift,
+            Self::LeftAlt => ModifierRole::LeftAlt,
+            Self::RightAlt => ModifierRole::RightAlt,
+            Self::LeftCommand => ModifierRole::LeftCommand,
+            Self::RightCommand => ModifierRole::RightCommand,
+            _ => return None,
+        };
+        let (a, b) = role.family_positions();
+        Some(vec![a, b])
     }
 
     pub fn as_str(self) -> &'static str {
@@ -650,45 +658,49 @@ impl<'de> Deserialize<'de> for Key {
 
 fn extract_modifier_bits() -> u8 {
     let mut bits: u8 = 0;
-    if unsafe { GetAsyncKeyState(0xA2) } < 0 {
-        bits |= 1 << 0;
+    if unsafe { GetAsyncKeyState(Key::LeftControl.as_native()) } < 0 {
+        bits |= ModifierRole::LeftControl.mask();
     }
-    if unsafe { GetAsyncKeyState(0xA3) } < 0 {
-        bits |= 1 << 1;
+    if unsafe { GetAsyncKeyState(Key::RightControl.as_native()) } < 0 {
+        bits |= ModifierRole::RightControl.mask();
     }
-    if unsafe { GetAsyncKeyState(0xA0) } < 0 {
-        bits |= 1 << 2;
+    if unsafe { GetAsyncKeyState(Key::LeftShift.as_native()) } < 0 {
+        bits |= ModifierRole::LeftShift.mask();
     }
-    if unsafe { GetAsyncKeyState(0xA1) } < 0 {
-        bits |= 1 << 3;
+    if unsafe { GetAsyncKeyState(Key::RightShift.as_native()) } < 0 {
+        bits |= ModifierRole::RightShift.mask();
     }
-    if unsafe { GetAsyncKeyState(0xA4) } < 0 {
-        bits |= 1 << 4;
+    if unsafe { GetAsyncKeyState(Key::LeftAlt.as_native()) } < 0 {
+        bits |= ModifierRole::LeftAlt.mask();
     }
-    if unsafe { GetAsyncKeyState(0xA5) } < 0 {
-        bits |= 1 << 5;
+    if unsafe { GetAsyncKeyState(Key::RightAlt.as_native()) } < 0 {
+        bits |= ModifierRole::RightAlt.mask();
     }
-    if unsafe { GetAsyncKeyState(0x5B) } < 0 {
-        bits |= 1 << 6;
+    if unsafe { GetAsyncKeyState(Key::LeftCommand.as_native()) } < 0 {
+        bits |= ModifierRole::LeftCommand.mask();
     }
-    if unsafe { GetAsyncKeyState(0x5C) } < 0 {
-        bits |= 1 << 7;
+    if unsafe { GetAsyncKeyState(Key::RightCommand.as_native()) } < 0 {
+        bits |= ModifierRole::RightCommand.mask();
     }
     bits
 }
 
+/// Map a modifier bit position back to the native VIRTUAL_KEY for emission.
 fn modifier_bit_to_vk(bit: u8) -> Option<VIRTUAL_KEY> {
-    match bit {
-        0 => Some(0xA2),
-        1 => Some(0xA3),
-        2 => Some(0xA0),
-        3 => Some(0xA1),
-        4 => Some(0xA4),
-        5 => Some(0xA5),
-        6 => Some(0x5B),
-        7 => Some(0x5C),
-        _ => None,
-    }
+    let Some(role) = ModifierRole::try_from_bit(bit) else {
+        return None;
+    };
+    let key = match role {
+        ModifierRole::LeftControl => Key::LeftControl,
+        ModifierRole::RightControl => Key::RightControl,
+        ModifierRole::LeftShift => Key::LeftShift,
+        ModifierRole::RightShift => Key::RightShift,
+        ModifierRole::LeftAlt => Key::LeftAlt,
+        ModifierRole::RightAlt => Key::RightAlt,
+        ModifierRole::LeftCommand => Key::LeftCommand,
+        ModifierRole::RightCommand => Key::RightCommand,
+    };
+    Some(key.as_native())
 }
 
 fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
@@ -751,18 +763,21 @@ fn emit_key_event(native_key: &NativeKey) {
     }
 }
 
+/// Map a raw VIRTUAL_KEY to its modifier bit position via the shared
+/// `ModifierRole` type.
 fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
-    match vk {
-        0xA2 => Some(0),
-        0xA3 => Some(1),
-        0xA0 => Some(2),
-        0xA1 => Some(3),
-        0xA4 => Some(4),
-        0xA5 => Some(5),
-        0x5B => Some(6),
-        0x5C => Some(7),
-        _ => None,
-    }
+    let role = match vk {
+        0xA2 => ModifierRole::LeftControl,
+        0xA3 => ModifierRole::RightControl,
+        0xA0 => ModifierRole::LeftShift,
+        0xA1 => ModifierRole::RightShift,
+        0xA4 => ModifierRole::LeftAlt,
+        0xA5 => ModifierRole::RightAlt,
+        0x5B => ModifierRole::LeftCommand,
+        0x5C => ModifierRole::RightCommand,
+        _ => return None,
+    };
+    Some(role.bit())
 }
 
 // ---------------------------------------------------------------------------
@@ -860,6 +875,9 @@ extern "system" fn low_level_keyboard_proc(
     drop(guard);
 
     if let Some(outputs) = active_outputs {
+        // Emit mapped outputs and swallow the original event.  This applies
+        // to modifier keys as well: if a bare modifier is mapped, its outputs
+        // are emitted and the original key is NOT passed to the next hook.
         if is_key_down {
             for native_key in &outputs {
                 emit_key_event(native_key);

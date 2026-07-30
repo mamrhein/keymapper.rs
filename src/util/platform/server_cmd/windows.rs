@@ -154,9 +154,9 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
         CreateProcessW(
             std::ptr::null_mut(), // lpApplicationName: parse from command line
             cmd_wide.as_ptr() as *mut u16, // lpCommandLine: mutable per API contract
-            std::ptr::null_mut(), // lpProcessAttributes
-            std::ptr::null_mut(), // lpThreadAttributes
-            0, // bInheritHandles
+            std::ptr::null_mut(),          // lpProcessAttributes
+            std::ptr::null_mut(),          // lpThreadAttributes
+            0,                             // bInheritHandles
             CREATE_NO_WINDOW, // dwCreationFlags: no console window
             std::ptr::null_mut(), // lpEnvironment
             std::ptr::null_mut(), // lpCurrentDirectory

@@ -12,11 +12,12 @@ use std::{sync::Arc, thread, time::Duration};
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = keymapper::common::config_path::find_config_path_strict()
-        .map_err(|e| {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        })?;
+    let config_path = keymapper::common::config_path::find_config_path_strict(
+    )
+    .map_err(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    })?;
 
     // Resolve to an absolute path so the watcher and cache compiler have
     // a stable reference regardless of later CWD changes.  Symlinks in

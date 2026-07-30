@@ -74,7 +74,8 @@ unsafe fn ver_query_value(buffer: &[u8], sub_block: &str) -> Option<Vec<u16>> {
 /// Resolve the actual language-specific `FileDescription` sub-block path by
 /// reading the translation table from the version resource.
 unsafe fn resolve_file_description_path(buffer: &[u8]) -> Option<String> {
-    let lang_data = unsafe { ver_query_value(buffer, "\\VarFileInfo\\Translation") }?;
+    let lang_data =
+        unsafe { ver_query_value(buffer, "\\VarFileInfo\\Translation") }?;
     if lang_data.len() < 2 {
         return None;
     }
@@ -124,12 +125,13 @@ fn get_file_description(path: &str) -> Option<String> {
 
         // Resolve from the actual translation table.
         if let Some(sub_block) = resolve_file_description_path(&buffer)
-            && let Some(desc) = ver_query_value(&buffer, &sub_block) {
-                let s = utf16_to_string(&desc);
-                if !s.is_empty() {
-                    return Some(s);
-                }
+            && let Some(desc) = ver_query_value(&buffer, &sub_block)
+        {
+            let s = utf16_to_string(&desc);
+            if !s.is_empty() {
+                return Some(s);
             }
+        }
 
         None
     }
@@ -174,7 +176,10 @@ struct WindowCollector {
     pids: HashSet<u32>,
 }
 
-extern "system" fn enum_windows_proc(hwnd: *mut std::ffi::c_void, param: isize) -> i32 {
+extern "system" fn enum_windows_proc(
+    hwnd: *mut std::ffi::c_void,
+    param: isize,
+) -> i32 {
     if unsafe { IsWindowVisible(hwnd as _) } == 1 {
         let mut pid: u32 = 0;
         unsafe { GetWindowThreadProcessId(hwnd as _, &mut pid) };

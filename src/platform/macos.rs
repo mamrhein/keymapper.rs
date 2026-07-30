@@ -32,7 +32,10 @@ use signal_hook::{
     flag::register,
 };
 
-use crate::daemon::{mapping_cache::NativeKey, state::Lookup};
+use crate::{
+    common::modifier::ModifierRole,
+    daemon::{mapping_cache::NativeKey, state::Lookup},
+};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the CGKeyCode values
@@ -165,17 +168,18 @@ impl Key {
 
     /// Return the modifier bit **position** (0–7) for this key.
     pub const fn as_modifier_bit(self) -> Option<u8> {
-        match self {
-            Self::LeftControl => Some(0),
-            Self::RightControl => Some(1),
-            Self::LeftShift => Some(2),
-            Self::RightShift => Some(3),
-            Self::LeftAlt => Some(4),
-            Self::RightAlt => Some(5),
-            Self::LeftCommand => Some(6),
-            Self::RightCommand => Some(7),
-            _ => None,
-        }
+        let role = match self {
+            Self::LeftControl => ModifierRole::LeftControl,
+            Self::RightControl => ModifierRole::RightControl,
+            Self::LeftShift => ModifierRole::LeftShift,
+            Self::RightShift => ModifierRole::RightShift,
+            Self::LeftAlt => ModifierRole::LeftAlt,
+            Self::RightAlt => ModifierRole::RightAlt,
+            Self::LeftCommand => ModifierRole::LeftCommand,
+            Self::RightCommand => ModifierRole::RightCommand,
+            _ => return None,
+        };
+        Some(role.bit())
     }
 
     /// Return the possible modifier bit positions for this key.
@@ -183,13 +187,19 @@ impl Key {
     /// Modifier keys return both left and right positions, enabling
     /// "either side" matching.  Non-modifier keys return `None`.
     pub fn as_modifier_positions(self) -> Option<Vec<u8>> {
-        match self {
-            Self::LeftControl | Self::RightControl => Some(vec![0, 1]),
-            Self::LeftShift | Self::RightShift => Some(vec![2, 3]),
-            Self::LeftAlt | Self::RightAlt => Some(vec![4, 5]),
-            Self::LeftCommand | Self::RightCommand => Some(vec![6, 7]),
-            _ => None,
-        }
+        let role = match self {
+            Self::LeftControl => ModifierRole::LeftControl,
+            Self::RightControl => ModifierRole::RightControl,
+            Self::LeftShift => ModifierRole::LeftShift,
+            Self::RightShift => ModifierRole::RightShift,
+            Self::LeftAlt => ModifierRole::LeftAlt,
+            Self::RightAlt => ModifierRole::RightAlt,
+            Self::LeftCommand => ModifierRole::LeftCommand,
+            Self::RightCommand => ModifierRole::RightCommand,
+            _ => return None,
+        };
+        let (a, b) = role.family_positions();
+        Some(vec![a, b])
     }
 
     /// Return the canonical config-name for this key.
@@ -675,33 +685,37 @@ impl<'de> Deserialize<'de> for Key {
 
 /// Map a CGKeyCode to its modifier bit position.  Returns `None` for
 /// non-modifier keys.
+/// Map a raw CGKeyCode to its modifier bit position via the shared
+/// `ModifierRole` type.
 fn keycode_to_modifier_bit(code: CGKeyCode) -> Option<u8> {
-    match code {
-        59 => Some(0), // kVK_Control (left)
-        62 => Some(1), // kVK_RightControl
-        56 => Some(2), // kVK_Shift (left)
-        60 => Some(3), // kVK_RightShift
-        58 => Some(4), // kVK_Option (left)
-        61 => Some(5), // kVK_RightOption
-        55 => Some(6), // kVK_Command (left)
-        54 => Some(7), // kVK_RightCommand
-        _ => None,
-    }
+    let role = match code {
+        59 => ModifierRole::LeftControl, // kVK_Control (left)
+        62 => ModifierRole::RightControl, // kVK_RightControl
+        56 => ModifierRole::LeftShift,   // kVK_Shift (left)
+        60 => ModifierRole::RightShift,  // kVK_RightShift
+        58 => ModifierRole::LeftAlt,     // kVK_Option (left)
+        61 => ModifierRole::RightAlt,    // kVK_RightOption
+        55 => ModifierRole::LeftCommand, // kVK_Command (left)
+        54 => ModifierRole::RightCommand, // kVK_RightCommand
+        _ => return None,
+    };
+    Some(role.bit())
 }
 
 /// Map a modifier bit position back to the native CGKeyCode for emission.
 fn modifier_bit_to_code(bit: u8) -> Option<CGKeyCode> {
-    match bit {
-        0 => Some(59), // kVK_Control (left)
-        1 => Some(62), // kVK_RightControl
-        2 => Some(56), // kVK_Shift (left)
-        3 => Some(60), // kVK_RightShift
-        4 => Some(58), // kVK_Option (left)
-        5 => Some(61), // kVK_RightOption
-        6 => Some(55), // kVK_Command (left)
-        7 => Some(54), // kVK_RightCommand
-        _ => None,
-    }
+    let role = ModifierRole::try_from_bit(bit)?;
+    let key = match role {
+        ModifierRole::LeftControl => Key::LeftControl,
+        ModifierRole::RightControl => Key::RightControl,
+        ModifierRole::LeftShift => Key::LeftShift,
+        ModifierRole::RightShift => Key::RightShift,
+        ModifierRole::LeftAlt => Key::LeftAlt,
+        ModifierRole::RightAlt => Key::RightAlt,
+        ModifierRole::LeftCommand => Key::LeftCommand,
+        ModifierRole::RightCommand => Key::RightCommand,
+    };
+    Some(key.as_native())
 }
 
 /// Emit a single `NativeKey` as a chord: hold modifiers, press base,
@@ -907,6 +921,9 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
     drop(guard);
 
     if let Some(outputs) = active_outputs {
+        // Emit mapped outputs and swallow the original event.  This applies
+        // to modifier keys as well: if a bare modifier is mapped, its outputs
+        // are emitted and `null` is returned to suppress the original event.
         if is_down {
             for native_key in &outputs {
                 emit_key_event(&context.source, native_key);
