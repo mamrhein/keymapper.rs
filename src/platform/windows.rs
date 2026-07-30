@@ -867,9 +867,8 @@ extern "system" fn low_level_keyboard_proc(
     }
 
     let guard = lookup.read();
-    let current_app = guard.active_app().to_string();
     let active_outputs = guard
-        .for_app(&current_app, vk_code, pressed_modifiers)
+        .for_app(&**guard.active_app(), vk_code, pressed_modifiers)
         .or_else(|| guard.global(vk_code, pressed_modifiers))
         .map(|v| v.to_vec());
     drop(guard);

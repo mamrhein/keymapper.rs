@@ -889,9 +889,8 @@ pub fn start_mapping(
                         }
 
                         let guard = lookup.read();
-                        let current_app = guard.active_app().to_string();
                         let active_outputs = guard
-                            .for_app(&current_app, code, lookup_modifiers)
+                            .for_app(&**guard.active_app(), code, lookup_modifiers)
                             .or_else(|| guard.global(code, lookup_modifiers))
                             .map(|v| v.to_vec());
                         drop(guard);

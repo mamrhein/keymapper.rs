@@ -58,9 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Read-check -> conditional write-escalation.  Uses trait
             // methods so this code is also decoupled from RuntimeState.
-            if !tracker_state.read().active_app().eq(&current_focused_app) {
+            if !current_focused_app.eq(&**tracker_state.read().active_app()) {
                 let mut write_guard = tracker_state.write();
-                if !write_guard.active_app().eq(&current_focused_app) {
+                if !current_focused_app.eq(&**write_guard.active_app()) {
                     write_guard.set_active_app(current_focused_app);
                 }
             }

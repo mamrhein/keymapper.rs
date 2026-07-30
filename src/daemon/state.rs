@@ -7,6 +7,8 @@
 // $Source$
 // $Revision$
 
+use std::sync::Arc;
+
 use super::mapping_cache::{CompiledRule, NativeKey, RuntimeLookupCache};
 
 /// Minimal interface for OS event-loop callbacks and state managers.
@@ -27,8 +29,9 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
     /// Global (application-agnostic) lookup.
     fn global(&self, key: u16, modifiers: u8) -> Option<&[NativeKey]>;
 
-    /// Name of the currently foreground application.
-    fn active_app(&self) -> &str;
+    /// Name of the currently foreground application.  Returns an
+    /// `Arc<str>` so callers can read without cloning.
+    fn active_app(&self) -> &Arc<str>;
 
     /// Update the foreground application name (called behind a write lock).
     fn set_active_app(&mut self, app: String);
@@ -43,14 +46,14 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
 #[derive(Debug)]
 pub struct RuntimeState {
     lookup_cache: RuntimeLookupCache,
-    active_app: String,
+    active_app: Arc<str>,
 }
 
 impl RuntimeState {
     pub fn new(cache: RuntimeLookupCache, app: String) -> Self {
         Self {
             lookup_cache: cache,
-            active_app: app,
+            active_app: app.into(),
         }
     }
 }
@@ -73,12 +76,12 @@ impl Lookup for RuntimeState {
         find_match(self.lookup_cache.global_rules(), key, modifiers)
     }
 
-    fn active_app(&self) -> &str {
+    fn active_app(&self) -> &Arc<str> {
         &self.active_app
     }
 
     fn set_active_app(&mut self, app: String) {
-        self.active_app = app;
+        self.active_app = app.into();
     }
 
     fn set_lookup_cache(&mut self, cache: RuntimeLookupCache) {
