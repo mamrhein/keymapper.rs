@@ -35,8 +35,10 @@ use windows_sys::Win32::{
 #[allow(clippy::upper_case_acronyms)]
 type HHOOK = *mut std::ffi::c_void;
 
-use crate::common::modifier::ModifierRole;
-use crate::daemon::{mapping_cache::NativeKey, state::Lookup};
+use crate::{
+    common::modifier::ModifierRole,
+    daemon::{mapping_cache::NativeKey, state::Lookup},
+};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the VK_* codes
@@ -855,8 +857,6 @@ extern "system" fn low_level_keyboard_proc(
 
     let is_key_down =
         w_param as u32 == WM_KEYDOWN || w_param as u32 == WM_SYSKEYDOWN;
-    let _is_key_up =
-        w_param as u32 == WM_KEYUP || w_param as u32 == WM_SYSKEYUP;
 
     // Clear the current key's modifier bit from the polled state so that
     // bare-modifier triggers (e.g. "LeftControl: A") match correctly against
