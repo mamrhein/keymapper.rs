@@ -17,6 +17,7 @@ use std::{
 };
 
 use evdev::{Device, EventType, KeyCode};
+use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag::register;
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -838,9 +839,9 @@ pub fn start_mapping(
     println!("Linux uinput virtual keyboard ready.");
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    register(libc::SIGINT, shutdown.clone())
+    register(SIGINT, shutdown.clone())
         .expect("failed to register SIGINT handler");
-    register(libc::SIGTERM, shutdown.clone())
+    register(SIGTERM, shutdown.clone())
         .expect("failed to register SIGTERM handler");
 
     let mut active_modifiers: u8 = 0;

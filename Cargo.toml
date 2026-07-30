@@ -31,20 +31,19 @@ serde_yaml = "0.9"
 clap = { version = "4", features = ["derive"]}
 fs-err = "3"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+signal-hook = "0.3"
 
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
-libc = "0.2"
-signal-hook = "0.3"
 udevrs = "0.5"
 uinput = "0.1"
 xcb = "1.7" # window enumeration for `keymapper appnames`
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
-signal-hook = "0.3"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
