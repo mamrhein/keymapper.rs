@@ -8,6 +8,8 @@
 // $Revision$
 
 use std::{
+    fs::File,
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
@@ -129,15 +131,74 @@ fn drain_channel(rx: &mpsc::Receiver<()>) {
 }
 
 /// Attempt a single reload of the configuration file, performing security
-/// checks before parsing.
+/// checks before parsing.  On Unix the file is opened with O_NOFOLLOW and
+/// all checks are done on the same file descriptor, eliminating TOCTOU races
+/// between metadata inspection and content read.
 fn attempt_reload(
     config_path: &Path,
     state: &Arc<RwLock<dyn Lookup>>,
 ) -> ReloadResult {
-    // Security check: file still exists and is a regular file.
-    let Ok(metadata) = config_path.metadata() else {
-        return ReloadResult::Err("config file not found".to_string());
-    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Open with O_NOFOLLOW so we never follow a symlink, and we can do
+        // metadata checks + read on the same file descriptor.
+        let mut file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(config_path)
+        {
+            Ok(f) => f,
+            Err(_) => {
+                return ReloadResult::Err("config file not found".to_string());
+            }
+        };
+
+        let metadata = match file.metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                return ReloadResult::Err(
+                    "failed to read config file metadata".to_string(),
+                );
+            }
+        };
+
+        validate_and_reload(&mut file, &metadata, state)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let mut file = match File::open(config_path) {
+            Ok(f) => f,
+            Err(_) => {
+                return ReloadResult::Err("config file not found".to_string());
+            }
+        };
+
+        let metadata = match file.metadata() {
+            Ok(m) => m,
+            Err(_) => {
+                return ReloadResult::Err(
+                    "failed to read config file metadata".to_string(),
+                );
+            }
+        };
+
+        validate_and_reload(&mut file, &metadata, state)
+    }
+}
+
+/// Validate security constraints and perform the hot-reload.  The file must
+/// be open and its metadata already fetched from the same handle, so there is
+/// no race between checking and reading.
+#[cfg(unix)]
+fn validate_and_reload(
+    file: &mut File,
+    metadata: &std::fs::Metadata,
+    state: &Arc<RwLock<dyn Lookup>>,
+) -> ReloadResult {
+    use std::os::unix::fs::MetadataExt;
 
     if !metadata.is_file() {
         return ReloadResult::Err(
@@ -154,40 +215,74 @@ fn attempt_reload(
         ));
     }
 
-    // Security check: on Unix, verify the file is owned by the current user.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let uid = metadata.uid();
-        if uid != unsafe { libc::getuid() } {
-            return ReloadResult::Err(format!(
-                "config file is owned by uid {} (current user: {})",
-                uid,
-                unsafe { libc::getuid() },
-            ));
-        }
-
-        // Security check: file is not world-writable (prevents other users
-        // on the same system from tampering with it).
-        let mode = metadata.mode() as libc::mode_t;
-        if (mode & libc::S_IWOTH) != 0 {
-            return ReloadResult::Err(
-                "config file is world-writable".to_string(),
-            );
-        }
+    // Security check: file is owned by the current user.
+    let uid = metadata.uid();
+    if uid != unsafe { libc::getuid() } {
+        return ReloadResult::Err(format!(
+            "config file is owned by uid {} (current user: {})",
+            uid,
+            unsafe { libc::getuid() },
+        ));
     }
 
-    // Reparse and recompile via the shared loader.
-    match RuntimeLookupCache::compile_from_path(config_path) {
+    // Security check: file is not world-writable (prevents other users on the
+    // same system from tampering with it).
+    let mode = metadata.mode() as libc::mode_t;
+    if (mode & libc::S_IWOTH) != 0 {
+        return ReloadResult::Err("config file is world-writable".to_string());
+    }
+
+    // Read content from the already-open handle — no race with metadata.
+    let mut content = String::new();
+    if file.read_to_string(&mut content).is_err() {
+        return ReloadResult::Err("failed to read config file".to_string());
+    }
+
+    reload_from_str(&content, state)
+}
+
+#[cfg(not(unix))]
+fn validate_and_reload(
+    file: &mut File,
+    metadata: &std::fs::Metadata,
+    state: &Arc<RwLock<dyn Lookup>>,
+) -> ReloadResult {
+    if !metadata.is_file() {
+        return ReloadResult::Err(
+            "config path is not a regular file".to_string(),
+        );
+    }
+
+    // Security check: file size is within acceptable bounds.
+    if metadata.len() > MAX_CONFIG_SIZE {
+        return ReloadResult::Err(format!(
+            "config file is too large ({} bytes, limit {})",
+            metadata.len(),
+            MAX_CONFIG_SIZE,
+        ));
+    }
+
+    // Read content from the already-open handle.
+    let mut content = String::new();
+    if file.read_to_string(&mut content).is_err() {
+        return ReloadResult::Err("failed to read config file".to_string());
+    }
+
+    reload_from_str(&content, state)
+}
+
+/// Parse and compile the config string, then swap the runtime cache.
+fn reload_from_str(
+    content: &str,
+    state: &Arc<RwLock<dyn Lookup>>,
+) -> ReloadResult {
+    match RuntimeLookupCache::compile_from_str(content) {
         Ok(new_cache) => {
-            // Safely acquire a write lock and swap out the cache via the
-            // trait interface.
             let mut write_guard = state.write();
             write_guard.set_lookup_cache(new_cache);
             println!("Configuration hot-swapped successfully!");
         }
         Err(err) => {
-            // Parsing failed; keep the previous configuration rules safe.
             return ReloadResult::Err(err.to_string());
         }
     }

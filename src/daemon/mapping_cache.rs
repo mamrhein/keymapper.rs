@@ -77,12 +77,20 @@ impl RuntimeLookupCache {
 
 impl RuntimeLookupCache {
     /// Load a YAML config file, parse it, and compile the lookup cache
-    /// in one step.  Used by both initialisation and hot-reload.
+    /// in one step.  Used by initialisation.
     pub fn compile_from_path<P: AsRef<Path>>(
         path: P,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let content = fs::read_to_string(path)?;
-        let parsed = AppConfig::load_from_str(&content)?;
+        Self::compile_from_str(&content)
+    }
+
+    /// Compile a lookup cache from a YAML config string.  Used by hot-reload
+    /// to accept content read from an already-open file handle.
+    pub fn compile_from_str(
+        content: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let parsed = AppConfig::load_from_str(content)?;
         Ok(Self::compile_from_config(&parsed))
     }
 
