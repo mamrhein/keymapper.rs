@@ -7,11 +7,7 @@
 // $Source$
 // $Revision$
 
-use std::{
-    sync::{Arc, OnceLock},
-    thread,
-    time::Duration,
-};
+use std::{sync::Arc, thread, time::Duration};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -786,13 +782,16 @@ fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
 // Low-level keyboard hook
 // ---------------------------------------------------------------------------
 
-static SHARED_LOOKUP: OnceLock<Arc<RwLock<dyn Lookup>>> = OnceLock::new();
+static SHARED_LOOKUP: parking_lot::Mutex<Option<Arc<RwLock<dyn Lookup>>>> =
+    parking_lot::Mutex::new(None);
 static HOOK_HANDLE: parking_lot::Mutex<isize> = parking_lot::Mutex::new(0);
 
 fn set_shared_lookup(lookup: Arc<RwLock<dyn Lookup>>) {
-    SHARED_LOOKUP
-        .set(lookup)
-        .expect("shared lookup already initialised");
+    *SHARED_LOOKUP.lock() = Some(lookup);
+}
+
+fn get_shared_lookup() -> Option<Arc<RwLock<dyn Lookup>>> {
+    SHARED_LOOKUP.lock().clone()
 }
 
 fn set_hook_handle(handle: HHOOK) {
@@ -801,6 +800,17 @@ fn set_hook_handle(handle: HHOOK) {
 
 fn hook_handle() -> HHOOK {
     *HOOK_HANDLE.lock() as _
+}
+
+/// Clears hook callback state so tests can run in isolation.
+///
+/// Windows `WH_KEYBOARD_LL` requires module-level statics because the hook
+/// callback cannot capture user data. This function resets both statics to
+/// their initial state.
+#[cfg(test)]
+pub fn reset_for_tests() {
+    *SHARED_LOOKUP.lock() = None;
+    *HOOK_HANDLE.lock() = 0;
 }
 
 pub fn start_mapping(
@@ -846,7 +856,7 @@ extern "system" fn low_level_keyboard_proc(
         };
     }
 
-    let Some(lookup) = SHARED_LOOKUP.get() else {
+    let Some(lookup) = get_shared_lookup() else {
         return unsafe {
             CallNextHookEx(hook_handle(), code, w_param, l_param)
         };
