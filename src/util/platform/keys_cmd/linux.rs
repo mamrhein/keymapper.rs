@@ -11,16 +11,16 @@
 
 use std::time::Duration;
 
-use evdev::{Device, EventType};
+use evdev::EventType;
 
-use crate::platform::Key;
+use crate::platform::{Key, find_keyboard_device};
 
 /// Probe for key presses by reading from an evdev keyboard device.
 pub fn probe() {
     println!("Press keys to see their names and codes.");
     println!("Press Control+Escape to exit.\n");
 
-    let mut device = find_keyboard().unwrap_or_else(|e| {
+    let mut device = find_keyboard_device().unwrap_or_else(|e| {
         eprintln!("Failed to open keyboard device: {e}");
         std::process::exit(1);
     });
@@ -75,28 +75,4 @@ pub fn probe() {
             }
         }
     }
-}
-
-/// Find a suitable keyboard device for probing.
-fn find_keyboard() -> Result<Device, Box<dyn std::error::Error>> {
-    // Try common keyboard device paths.
-    let candidates = [
-        "/dev/input/event0",
-        "/dev/input/event1",
-        "/dev/input/event2",
-        "/dev/input/event3",
-        "/dev/input/event4",
-        "/dev/input/event5",
-    ];
-
-    for path in &candidates {
-        if let Ok(device) = Device::open(path) {
-            // Check that the device supports keyboard events.
-            if device.supported_events().contains(EventType::KEY) {
-                return Ok(device);
-            }
-        }
-    }
-
-    Err("No keyboard device found in /dev/input/event*".into())
 }

@@ -15,9 +15,9 @@ mod macos;
 mod windows;
 
 // Only the public API surface is re-exported.  Internal helpers (signal
-// handlers, static flags, device discovery) stay private to the platform
-// module.
-
+// handlers, static flags) stay private to the platform module.
+#[cfg(target_os = "linux")]
+pub(crate) use linux::find_keyboard_device;
 #[cfg(target_os = "linux")]
 pub use linux::{Key, start_mapping};
 #[cfg(target_os = "macos")]
