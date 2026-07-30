@@ -796,30 +796,70 @@ fn emit_key_event(
     device: &mut uinput::Device,
     native_key: &NativeKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut pressed_modifiers: Vec<u16> = Vec::new();
+    // Track all pressed codes so they can be released on failure.
+    let mut pressed: Vec<u16> = Vec::new();
 
+    // Helper to release any keys that were successfully pressed.
+    let cleanup = |dev: &mut uinput::Device, codes: &[u16]| {
+        for code in codes.iter().rev() {
+            if let Err(e) = dev.write(EventType::KEY.0 as _, *code as _, 0) {
+                eprintln!("warning: failed to release key {code}: {e}");
+            }
+            let _ = dev.synchronize();
+            thread::sleep(Duration::from_millis(1));
+        }
+    };
+
+    // Press modifiers.
     for bit in 0..8 {
         if (native_key.modifiers >> bit) & 1 == 1
             && let Some(code) = modifier_bit_to_code(bit)
         {
-            device.write(EventType::KEY.0 as _, code as _, 1)?;
-            pressed_modifiers.push(code);
-            device.synchronize()?;
+            if let Err(e) = device.write(EventType::KEY.0 as _, code as _, 1) {
+                cleanup(device, &pressed);
+                return Err(e.into());
+            }
+            pressed.push(code);
+            if let Err(e) = device.synchronize() {
+                cleanup(device, &pressed);
+                return Err(e.into());
+            }
             thread::sleep(Duration::from_millis(1));
         }
     }
 
-    device.write(EventType::KEY.0 as _, native_key.base as _, 1)?;
-    device.synchronize()?;
+    // Press and release the base key.
+    if let Err(e) = device.write(EventType::KEY.0 as _, native_key.base as _, 1) {
+        cleanup(device, &pressed);
+        return Err(e.into());
+    }
+    pressed.push(native_key.base);
+    if let Err(e) = device.synchronize() {
+        cleanup(device, &pressed);
+        return Err(e.into());
+    }
     thread::sleep(Duration::from_millis(1));
 
-    device.write(EventType::KEY.0 as _, native_key.base as _, 0)?;
-    device.synchronize()?;
+    if let Err(e) = device.write(EventType::KEY.0 as _, native_key.base as _, 0)
+    {
+        cleanup(device, &pressed);
+        return Err(e.into());
+    }
+    pressed.pop();
+    if let Err(e) = device.synchronize() {
+        cleanup(device, &pressed);
+        return Err(e.into());
+    }
     thread::sleep(Duration::from_millis(1));
 
-    for code in pressed_modifiers.into_iter().rev() {
-        device.write(EventType::KEY.0 as _, code as _, 0)?;
-        device.synchronize()?;
+    // Release modifiers in reverse order.
+    for code in pressed.into_iter().rev() {
+        if let Err(e) = device.write(EventType::KEY.0 as _, code as _, 0) {
+            return Err(e.into());
+        }
+        if let Err(e) = device.synchronize() {
+            return Err(e.into());
+        }
         thread::sleep(Duration::from_millis(1));
     }
 
