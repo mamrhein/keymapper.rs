@@ -12,6 +12,6 @@ pub mod daemon;
 pub mod platform;
 pub mod util;
 
-// Re-export the platform-specific Key type so downstream code (and tests)
+// Re-export the platform-agnostic Key type so downstream code (and tests)
 // can refer to it via the crate root.
-pub use platform::Key;
+pub use common::Key;

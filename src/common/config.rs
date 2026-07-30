@@ -10,10 +10,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-// Re-export the platform-specific Key type so that downstream modules
-// (mapping_cache, state, hot_reload) and tests import it from this
-// module.
-pub use crate::platform::Key;
+use super::key::Key;
 
 /// A key event: modifiers held together with a base key press.
 ///

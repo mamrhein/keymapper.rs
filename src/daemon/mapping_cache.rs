@@ -11,7 +11,7 @@ use std::{fs, path::Path};
 
 use indexmap::IndexMap;
 
-use crate::common::config::{AppConfig, Key};
+use crate::{common::config::AppConfig, platform::Key};
 
 // ---------------------------------------------------------------------------
 // Modifier bitmask layout (u8): specific key bits only.
@@ -114,7 +114,9 @@ impl RuntimeLookupCache {
                 // Expand modifier variants for "either side" semantics.
                 let variants = expand_modifier_bits(&trigger.modifiers);
 
-                let trigger_base = trigger.base.as_native();
+                let trigger_base = Key::from_common(trigger.base)
+                    .expect("key not supported on this platform")
+                    .as_native();
 
                 for mod_bits in variants {
                     let rule = CompiledRule {
@@ -151,7 +153,9 @@ fn compile_outputs(
         .iter()
         .map(|event| NativeKey {
             modifiers: compile_modifier_bits(&event.modifiers),
-            base: event.base.as_native(),
+            base: Key::from_common(event.base)
+                .expect("key not supported on this platform")
+                .as_native(),
         })
         .collect()
 }
@@ -160,11 +164,13 @@ fn compile_outputs(
 ///
 /// Each modifier contributes its own specific bit (left vs right is
 /// preserved).
-fn compile_modifier_bits(keys: &[Key]) -> u8 {
+fn compile_modifier_bits(keys: &[crate::common::Key]) -> u8 {
     let mut bits: u8 = 0;
     for key in keys {
-        if let Some(bit) = key.as_modifier_bit() {
-            bits |= 1 << bit;
+        if let Some(platform_key) = Key::from_common(*key) {
+            if let Some(bit) = platform_key.as_modifier_bit() {
+                bits |= 1 << bit;
+            }
         }
     }
     bits
@@ -178,7 +184,7 @@ fn compile_modifier_bits(keys: &[Key]) -> u8 {
 ///
 /// Returns a list of bitmasks, one per variant.  A bare key (no modifiers)
 /// produces a single entry: `vec![0]`.
-fn expand_modifier_bits(modifiers: &[Key]) -> Vec<u8> {
+fn expand_modifier_bits(modifiers: &[crate::common::Key]) -> Vec<u8> {
     if modifiers.is_empty() {
         return vec![0];
     }
@@ -187,13 +193,14 @@ fn expand_modifier_bits(modifiers: &[Key]) -> Vec<u8> {
     let choices: Vec<Vec<u8>> = modifiers
         .iter()
         .map(|key| {
-            if let Some(positions) = key.as_modifier_positions() {
-                positions
-            } else {
-                // Non-modifier in modifier position — should not happen,
-                // but treat as no contribution.
-                vec![0]
+            if let Some(platform_key) = Key::from_common(*key) {
+                if let Some(positions) = platform_key.as_modifier_positions() {
+                    return positions;
+                }
             }
+            // Non-modifier in modifier position -- should not happen,
+            // but treat as no contribution.
+            vec![0]
         })
         .collect();
 
@@ -219,6 +226,7 @@ fn expand_modifier_bits(modifiers: &[Key]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Key as CommonKey;
 
     // Bit positions per the header comment:
     // bit 0: left control,   bit 1: right control
@@ -239,7 +247,7 @@ mod tests {
     #[test]
     fn expand_single_generic_modifier() {
         // LeftControl maps to modifier group [0, 1], so "either side" matches.
-        let result = expand_modifier_bits(&[Key::LeftControl]);
+        let result = expand_modifier_bits(&[CommonKey::LeftControl]);
         assert_eq!(result, vec![1 << 0, 1 << 1]);
     }
 
@@ -247,14 +255,17 @@ mod tests {
     fn expand_single_specific_modifier() {
         // RightControl also maps to group [0, 1] — the enum variant does not
         // narrow matching; narrowing only affects output emission.
-        let result = expand_modifier_bits(&[Key::RightControl]);
+        let result = expand_modifier_bits(&[CommonKey::RightControl]);
         assert_eq!(result, vec![1 << 0, 1 << 1]);
     }
 
     #[test]
     fn expand_two_modifiers() {
         // Ctrl + Shift → cartesian product of {0,1} × {2,3}.
-        let result = expand_modifier_bits(&[Key::LeftControl, Key::LeftShift]);
+        let result = expand_modifier_bits(&[
+            CommonKey::LeftControl,
+            CommonKey::LeftShift,
+        ]);
         assert_eq!(
             result,
             vec![
@@ -270,9 +281,9 @@ mod tests {
     fn expand_three_modifiers() {
         // Ctrl + Shift + Alt → 2×2×2 = 8 variants.
         let result = expand_modifier_bits(&[
-            Key::LeftControl,
-            Key::LeftShift,
-            Key::LeftAlt,
+            CommonKey::LeftControl,
+            CommonKey::LeftShift,
+            CommonKey::LeftAlt,
         ]);
         assert_eq!(result.len(), 8);
     }
@@ -282,7 +293,7 @@ mod tests {
         // Non-modifier keys return None from as_modifier_positions, falling
         // back to vec![0].  In the cartesian product this means bit 0 is
         // set — a quirk of the fallback path.
-        let result = expand_modifier_bits(&[Key::A]);
+        let result = expand_modifier_bits(&[CommonKey::A]);
         assert_eq!(result, vec![1 << 0]);
     }
 
@@ -297,20 +308,23 @@ mod tests {
 
     #[test]
     fn compile_modifier_bits_single() {
-        assert_eq!(compile_modifier_bits(&[Key::LeftControl]), 1 << 0);
-        assert_eq!(compile_modifier_bits(&[Key::RightControl]), 1 << 1);
-        assert_eq!(compile_modifier_bits(&[Key::LeftShift]), 1 << 2);
-        assert_eq!(compile_modifier_bits(&[Key::RightShift]), 1 << 3);
-        assert_eq!(compile_modifier_bits(&[Key::LeftAlt]), 1 << 4);
-        assert_eq!(compile_modifier_bits(&[Key::RightAlt]), 1 << 5);
-        assert_eq!(compile_modifier_bits(&[Key::LeftCommand]), 1 << 6);
-        assert_eq!(compile_modifier_bits(&[Key::RightCommand]), 1 << 7);
+        assert_eq!(compile_modifier_bits(&[CommonKey::LeftControl]), 1 << 0);
+        assert_eq!(compile_modifier_bits(&[CommonKey::RightControl]), 1 << 1);
+        assert_eq!(compile_modifier_bits(&[CommonKey::LeftShift]), 1 << 2);
+        assert_eq!(compile_modifier_bits(&[CommonKey::RightShift]), 1 << 3);
+        assert_eq!(compile_modifier_bits(&[CommonKey::LeftAlt]), 1 << 4);
+        assert_eq!(compile_modifier_bits(&[CommonKey::RightAlt]), 1 << 5);
+        assert_eq!(compile_modifier_bits(&[CommonKey::LeftCommand]), 1 << 6);
+        assert_eq!(compile_modifier_bits(&[CommonKey::RightCommand]), 1 << 7);
     }
 
     #[test]
     fn compile_modifier_bits_multiple() {
         assert_eq!(
-            compile_modifier_bits(&[Key::LeftControl, Key::LeftShift]),
+            compile_modifier_bits(&[
+                CommonKey::LeftControl,
+                CommonKey::LeftShift
+            ]),
             (1 << 0) | (1 << 2)
         );
     }
@@ -318,7 +332,7 @@ mod tests {
     #[test]
     fn compile_modifier_bits_non_modifier_ignored() {
         // Non-modifiers don't contribute a bit.
-        assert_eq!(compile_modifier_bits(&[Key::A]), 0);
+        assert_eq!(compile_modifier_bits(&[CommonKey::A]), 0);
     }
 
     // -----------------------------------------------------------------------

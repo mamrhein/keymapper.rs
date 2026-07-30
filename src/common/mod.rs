@@ -7,9 +7,13 @@
 // $Source$
 // $Revision$
 
-//! Shared configuration parsing, path resolution, and modifier definitions.
+//! Shared configuration parsing, path resolution, modifier definitions, and
+//! platform-agnostic key identities.
 
 pub mod config;
 pub mod config_path;
+pub mod key;
 pub(crate) mod key_names;
 pub(crate) mod modifier;
+
+pub use key::Key;
