@@ -9,7 +9,9 @@
 
 //! macOS implementation of `keymapper keys probe`.
 
-use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopCommonModes};
+use objc2_core_foundation::{
+    CFMachPort, CFRunLoop, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventTapLocation,
     CGEventTapOptions, CGEventTapPlacement, CGEventType, CGKeyCode,
@@ -57,9 +59,12 @@ pub fn probe() {
     println!("Press keys to see their names and codes.");
     println!("Press Control+Escape to exit.\n");
 
-    // Poll the run loop until Control+Escape triggers loop termination.
+    // Poll the run loop in default mode until Control+Escape triggers loop
+    // termination. `kCFRunLoopCommonModes` is a pseudo-mode that cannot be
+    // passed to CFRunLoopRunInMode; `kCFRunLoopDefaultMode` is a member of the
+    // common modes set and receives the tap events.
     loop {
-        CFRunLoop::run_in_mode(unsafe { kCFRunLoopCommonModes }, 0.5, true);
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
 
         // Check for shutdown signal set by the callback.
         if should_exit() {

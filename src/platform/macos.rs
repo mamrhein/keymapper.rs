@@ -19,6 +19,7 @@ use std::{
 
 use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, kCFRunLoopCommonModes,
+    kCFRunLoopDefaultMode,
 };
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventSource, CGEventSourceStateID,
@@ -976,8 +977,12 @@ pub fn start_mapping(
         context_ptr,
     };
 
+    // Poll the run loop in default mode until shutdown is signaled.
+    // `kCFRunLoopCommonModes` is a pseudo-mode that cannot be passed to
+    // CFRunLoopRunInMode; `kCFRunLoopDefaultMode` is a member of the common
+    // modes set and receives the tap events.
     while !shutdown.load(Ordering::Acquire) {
-        CFRunLoop::run_in_mode(unsafe { kCFRunLoopCommonModes }, 0.5, true);
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
     }
 
     println!("Shutdown signal received. Cleaning up...");
