@@ -72,7 +72,7 @@ enum ServerCommands {
 enum KeysCommands {
     /// Print all key names recognised in the configuration file.
     ///
-    /// These are the canonical names (sorted alphabetically) that can be used
+    /// These are the canonical names grouped by category that can be used
     /// as triggers and outputs in key-mapping rules.
     List,
 
