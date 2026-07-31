@@ -17,13 +17,13 @@ use crate::platform::{Key, find_keyboard_device};
 
 /// Probe for key presses by reading from an evdev keyboard device.
 pub fn probe() {
-    println!("Press keys to see their names and codes.");
-    println!("Press Control+Escape to exit.\n");
-
     let mut device = find_keyboard_device().unwrap_or_else(|e| {
         eprintln!("Failed to open keyboard device: {e}");
         std::process::exit(1);
     });
+
+    println!("Press keys to see their names and codes.");
+    println!("Press Control+Escape to exit.\n");
 
     // Don't grab — we just want to observe, not intercept.
     let mut ctrl_pressed = false;

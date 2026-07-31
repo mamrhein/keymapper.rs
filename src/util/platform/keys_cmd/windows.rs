@@ -38,9 +38,6 @@ static HOOK_HANDLE: parking_lot::Mutex<isize> = parking_lot::Mutex::new(0);
 
 /// Probe for key presses using a WH_KEYBOARD_LL hook.
 pub fn probe() {
-    println!("Press keys to see their names and codes.");
-    println!("Press Control+Escape to exit.\n");
-
     let h_instance: HINSTANCE =
         unsafe { GetModuleHandleW(std::ptr::null::<u16>()) };
 
@@ -59,6 +56,9 @@ pub fn probe() {
     }
 
     *HOOK_HANDLE.lock() = handle as isize;
+
+    println!("Press keys to see their names and codes.");
+    println!("Press Control+Escape to exit.\n");
 
     // Run the message loop.
     unsafe {

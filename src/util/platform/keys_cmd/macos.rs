@@ -19,9 +19,6 @@ use crate::platform::Key;
 
 /// Probe for key presses using a CGEventTap.
 pub fn probe() {
-    println!("Press keys to see their names and codes.");
-    println!("Press Control+Escape to exit.\n");
-
     let mask: u64 =
         (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::KeyUp.0);
 
@@ -56,6 +53,9 @@ pub fn probe() {
         .add_source(Some(&run_loop_source), unsafe { kCFRunLoopCommonModes });
 
     CGEvent::tap_enable(&tap, true);
+
+    println!("Press keys to see their names and codes.");
+    println!("Press Control+Escape to exit.\n");
 
     // Poll the run loop until Control+Escape triggers loop termination.
     loop {
