@@ -142,6 +142,7 @@ pub enum Key {
 }
 
 impl Key {
+    #[inline(always)]
     pub const fn as_native(self) -> u16 {
         self as u16
     }
@@ -1041,7 +1042,7 @@ pub fn start_mapping(
 
                         let guard = lookup.read();
                         let active_outputs = guard
-                            .for_app(&**guard.active_app(), code, lookup_modifiers)
+                            .for_app(guard.active_app(), code, lookup_modifiers)
                             .or_else(|| guard.global(code, lookup_modifiers))
                             .map(|v| v.to_vec());
                         drop(guard);
