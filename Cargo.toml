@@ -33,7 +33,7 @@ fs-err = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-signal-hook = "0.3"
+signal-hook = "0.4"
 
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
