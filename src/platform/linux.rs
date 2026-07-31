@@ -776,9 +776,7 @@ fn keycode_to_modifier_bit(code: u16) -> Option<u8> {
 
 /// Map a modifier bit position back to the native evdev keycode for emission.
 fn modifier_bit_to_code(bit: u8) -> Option<u16> {
-    let Some(role) = ModifierRole::try_from_bit(bit) else {
-        return None;
-    };
+    let role = ModifierRole::try_from_bit(bit)?;
     let key = match role {
         ModifierRole::LeftControl => Key::LeftControl,
         ModifierRole::RightControl => Key::RightControl,
