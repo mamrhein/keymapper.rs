@@ -23,10 +23,7 @@ pub fn probe() {
     });
 
     println!("Press keys to see their names and codes.");
-    println!("Press Control+Escape to exit.\n");
-
-    // Don't grab — we just want to observe, not intercept.
-    let mut ctrl_pressed = false;
+    println!("Press Control+C to exit.\n");
 
     loop {
         match device.fetch_events() {
@@ -36,21 +33,6 @@ pub fn probe() {
                         let code = event.code();
                         let value = event.value();
                         let is_key_down = value == 1;
-
-                        // Track Ctrl state for exit detection.
-                        if code == Key::LeftControl.as_native()
-                            || code == Key::RightControl.as_native()
-                        {
-                            ctrl_pressed = is_key_down;
-                        }
-
-                        // Check for Ctrl+Escape exit condition.
-                        if is_key_down
-                            && code == Key::Escape.as_native()
-                            && ctrl_pressed
-                        {
-                            return;
-                        }
 
                         // Print only on key down.
                         if is_key_down {
