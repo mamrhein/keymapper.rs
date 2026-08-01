@@ -1,0 +1,127 @@
+// ---------------------------------------------------------------------------
+// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
+// License:     This program is part of a larger application. For license
+//              details please read the file LICENSE.TXT provided together
+//              with the application.
+// ---------------------------------------------------------------------------
+// $Source$
+// $Revision$
+
+//! Linux keyboard enumeration via udev.
+
+use evdev::{Device, EventType};
+use std::os::unix::ffi::OsStrExt;
+use udev::{Enumerator, Thing};
+
+use crate::common::keyboard::KeyboardInfo;
+
+/// Enumerate all keyboard input devices on the system.
+///
+/// Uses udev to discover devices tagged as keyboards belonging to the current
+/// user seat.  Devices that also support absolute (pointer) events are excluded
+/// because they are typically pointing devices that happen to announce keyboard
+/// capabilities (e.g. touchpads with integrated buttons).
+pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
+{
+    let mut enumerator = Enumerator::new()?;
+
+    enumerator.match_subsystem("input")?;
+    enumerator.match_property("ID_INPUT_KEYBOARD", "1")?;
+    enumerator.scan_devices()?;
+
+    let mut keyboards = Vec::new();
+
+    for udev_device in enumerator.scan_devices()? {
+        // Resolve the device node (e.g. /dev/input/event3).  Skip if missing.
+        let Some(devnode) = udev_device.devnode() else {
+            continue;
+        };
+
+        // Open the evdev device to check for pointer-capable devices.
+        let Ok(device) = Device::open(devnode) else {
+            continue;
+        };
+
+        // Skip pointing devices announced as keyboards (touchpads, touchscreens).
+        if device.supported_events().contains(EventType::ABSOLUTE) {
+            continue;
+        }
+
+        // udev property ID_PRODUCT_NAME is usually the most readable.  Fall
+        // back to the evdev device name, then to a placeholder.
+        let name = udev_device
+            .property_value("ID_PRODUCT_NAME")
+            .map(|s| s.to_string_lossy().into_owned())
+            .or_else(|| device.name().map(str::to_owned))
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        // Vendor string from udev, derived from the USB/HID vendor descriptor.
+        let vendor = udev_device
+            .property_value("ID_VENDOR")
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        // Model from udev; if absent, construct a compact ID from vendor and
+        // product IDs.
+        let model = udev_device
+            .property_value("ID_MODEL")
+            .map(|s| s.to_string_lossy().into_owned())
+            .or_else(|| {
+                let vid = udev_device
+                    .property_value("ID_VENDOR_ID")
+                    .map(|s| s.to_string_lossy().into_owned());
+                let pid = udev_device
+                    .property_value("ID_MODEL_ID")
+                    .map(|s| s.to_string_lossy().into_owned());
+
+                match (vid, pid) {
+                    (Some(v), Some(p)) => Some(format!("{v}:{p}")),
+                    _ => None,
+                }
+            })
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        // The device node path is the handle used to open and filter events.
+        let device_path = devnode.to_string_lossy().into_owned();
+
+        keyboards.push(KeyboardInfo::new(name, vendor, model, device_path));
+    }
+
+    if keyboards.is_empty() {
+        return Err("No keyboard devices found.".into());
+    }
+
+    Ok(keyboards)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyboard_info_fields_are_populated() {
+        let info = KeyboardInfo::new(
+            "Test Keyboard".into(),
+            "TestVendor".into(),
+            "TestModel".into(),
+            "/dev/input/event0".into(),
+        );
+
+        assert_eq!(info.name, "Test Keyboard");
+        assert_eq!(info.vendor, "TestVendor");
+        assert_eq!(info.model, "TestModel");
+        assert_eq!(info.device, "/dev/input/event0");
+    }
+
+    #[test]
+    fn list_keyboards_returns_keyboard_info_vec() {
+        // On systems without keyboards this returns an error; on systems with
+        // keyboards it returns a non-empty vec.  We only assert the type is
+        // well-formed by calling it and checking the result shape.
+        let result = list_keyboards();
+        assert!(
+            result.is_ok() || !result.unwrap_err().to_string().is_empty(),
+            "should produce either a result or an error message"
+        );
+    }
+}

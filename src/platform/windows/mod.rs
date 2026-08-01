@@ -8,7 +8,10 @@
 // $Revision$
 
 mod key;
+mod keyboard;
 mod mapping;
 
 pub use key::Key;
+pub use keyboard::list_keyboards;
 pub use mapping::{reset_for_tests, start_mapping};
+x

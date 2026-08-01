@@ -187,8 +187,7 @@ fn determine_seat() -> String {
 /// This uses `udevrs` to enumerate devices tagged for the seat and filtered to
 /// keyboards.  If udev enumeration fails or returns no candidates it falls back
 /// to the legacy approach of scanning `/dev/input/event*`.
-pub fn find_keyboard_device()
--> Result<Device, Box<dyn std::error::Error>> {
+pub fn find_keyboard_device() -> Result<Device, Box<dyn std::error::Error>> {
     let seat = determine_seat();
 
     // Try seat-aware udev enumeration first.

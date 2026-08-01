@@ -19,8 +19,9 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::find_keyboard_device;
 #[cfg(target_os = "linux")]
-pub use linux::{Key, start_mapping};
+pub use linux::{Key, list_keyboards, start_mapping};
 #[cfg(target_os = "macos")]
-pub use macos::{Key, start_mapping};
+pub use macos::{Key, list_keyboards, start_mapping};
 #[cfg(target_os = "windows")]
-pub use windows::{Key, start_mapping};
+pub use windows::{Key, list_keyboards, start_mapping};
+x

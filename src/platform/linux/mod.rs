@@ -8,7 +8,9 @@
 // $Revision$
 
 mod key;
+mod keyboard;
 mod mapping;
 
 pub use key::Key;
+pub use keyboard::list_keyboards;
 pub use mapping::{find_keyboard_device, start_mapping};
