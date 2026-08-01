@@ -10,8 +10,7 @@
 //! Linux keyboard enumeration via udev.
 
 use evdev::{Device, EventType};
-use std::os::unix::ffi::OsStrExt;
-use udev::{Enumerator, Thing};
+use udev::Enumerator;
 
 use crate::common::keyboard::KeyboardInfo;
 
