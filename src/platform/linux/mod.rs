@@ -10,5 +10,5 @@
 mod key;
 mod mapping;
 
-pub(crate) use key::Key;
+pub use key::Key;
 pub use mapping::{find_keyboard_device, start_mapping};
