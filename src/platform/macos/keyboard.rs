@@ -114,6 +114,12 @@ fn parse_ioreg_output(output: &str) -> Vec<KeyboardInfo> {
             // Parse property lines.
             if let Some((key, value)) = parse_property_line(trimmed) {
                 match key {
+                    "Product" => {
+                        // Override the device-class name with the actual product name.
+                        if !value.is_empty() {
+                            kb.name = value.clone();
+                        }
+                    }
                     "Vendor ID" => {
                         if let Some(vid) = parse_hex_u32(&value) {
                             kb.vendor = vendor_id_to_name(vid);
@@ -276,6 +282,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_ioreg_product_overrides_name() {
+        let output = "+-o Keyboard  <class IOHIDKeyboardDevice, id 0x100000200>\n\
+            |   \"Product\" = \"Magic Keyboard\"\n\
+            |   \"Vendor ID\" = 0x05ac\n\
+            |   \"Product ID\" = 0xa25a\n\
+            |   \"Location ID\" = 0x00120000";
+        let result = parse_ioreg_output(output);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "Magic Keyboard");
+        assert_eq!(result[0].vendor, "Apple");
+        assert_eq!(result[0].model, "0x05ac:0xa25a");
+        assert_eq!(result[0].device, "0x00120000");
+    }
+
+    #[test]
+    fn parse_ioreg_multiple_devices() {
+        let output = "+-o Keyboard  <class IOHIDKeyboardDevice, id 0x100000200>\n\
+            |   \"Product\" = \"Magic Keyboard\"\n\
+            |   \"Vendor ID\" = 0x05ac\n\
+            +-o Keyboard  <class IOHIDKeyboardDevice, id 0x100000300>\n\
+            |   \"Product\" = \"Logitech K845\"\n\
+            |   \"Vendor ID\" = 0x046d";
+        let result = parse_ioreg_output(output);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "Magic Keyboard");
+        assert_eq!(result[0].vendor, "Apple");
+        assert_eq!(result[1].name, "Logitech K845");
+        assert_eq!(result[1].vendor, "Logitech");
+    }
+
+    #[test]
     fn list_keyboards_returns_keyboard_info_vec() {
         let result = list_keyboards();
         assert!(
@@ -284,4 +321,3 @@ mod tests {
         );
     }
 }
-x

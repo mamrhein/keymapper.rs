@@ -14,4 +14,3 @@ mod mapping;
 pub use key::Key;
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;
-x

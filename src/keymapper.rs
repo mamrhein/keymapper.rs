@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use keymapper::{
     common::config::{AppConfig, KeyEvent, RuleGroup},
-    util::platform::{appnames_cmd, keys_cmd, server_cmd},
+    util::platform::{appnames_cmd, keyboard_cmd, keys_cmd, server_cmd},
 };
 
 /// CLI utility for managing the keymapperd configuration.
@@ -39,6 +39,13 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+
+    /// List all connected keyboard devices.
+    ///
+    /// Shows the name, vendor, model, and device identifier for each detected
+    /// keyboard.  The device identifier can be used to filter key events for
+    /// per-device mapping rules.
+    Keyboards,
 
     /// Key introspection tools.
     Keys {
@@ -145,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             KeysCommands::List => cmd_keys_list()?,
             KeysCommands::Probe => cmd_keys_probe(),
         },
+        Commands::Keyboards => cmd_keyboards(),
         Commands::Server { command } => match command {
             ServerCommands::Status => cmd_server_status()?,
             ServerCommands::Start => cmd_server_start()?,
@@ -418,4 +426,8 @@ fn cmd_keys_list() -> Result<(), Box<dyn std::error::Error>> {
 
 fn cmd_keys_probe() {
     keys_cmd::probe();
+}
+
+fn cmd_keyboards() {
+    keyboard_cmd::list();
 }

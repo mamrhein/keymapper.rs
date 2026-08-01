@@ -24,4 +24,3 @@ pub use linux::{Key, list_keyboards, start_mapping};
 pub use macos::{Key, list_keyboards, start_mapping};
 #[cfg(target_os = "windows")]
 pub use windows::{Key, list_keyboards, start_mapping};
-x

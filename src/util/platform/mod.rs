@@ -10,5 +10,6 @@
 //! Platform-specific implementations of CLI commands.
 
 pub mod appnames_cmd;
+pub mod keyboard_cmd;
 pub mod keys_cmd;
 pub mod server_cmd;
