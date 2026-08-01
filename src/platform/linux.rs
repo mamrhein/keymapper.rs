@@ -24,8 +24,8 @@ use signal_hook::flag::register;
 use udev::Enumerator;
 
 use crate::{
-    common::modifier::ModifierRole, daemon::mapping_cache::NativeKey,
-    daemon::state::Lookup,
+    common::modifier::ModifierRole,
+    daemon::{mapping_cache::NativeKey, state::Lookup},
 };
 
 // ---------------------------------------------------------------------------
@@ -748,7 +748,7 @@ impl<'de> Deserialize<'de> for Key {
         let s = String::deserialize(deserializer)?;
         Self::try_from_str(&s).ok_or_else(|| {
             serde::de::Error::custom(
-                crate::common::key_names::unknown_key_error(&s),
+                crate::common::key::unknown_key_error(&s),
             )
         })
     }

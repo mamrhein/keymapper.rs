@@ -514,8 +514,16 @@ impl<'de> Deserialize<'de> for Key {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Self::try_from_str(&s).ok_or_else(|| {
-            serde::de::Error::custom(super::key_names::unknown_key_error(&s))
-        })
+        Self::try_from_str(&s)
+            .ok_or_else(|| serde::de::Error::custom(unknown_key_error(&s)))
     }
+}
+
+/// Returns a user-friendly error message for an unrecognised key name.
+pub(crate) fn unknown_key_error(s: &str) -> String {
+    format!(
+        "Unknown key name '{}'. Use names like CapsLock, LeftCtrl, A, F1, 1, \
+         Minus, Equal, BracketLeft, etc.",
+        s
+    )
 }

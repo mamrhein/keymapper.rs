@@ -10,7 +10,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use super::key::Key;
+use super::{Key, unknown_key_error};
 
 /// A key event: modifiers held together with a base key press.
 ///
@@ -99,8 +99,7 @@ fn parse_key(token: &str) -> Result<Key, String> {
         return Err("empty key token in event string".to_string());
     }
 
-    Key::try_from_str(trimmed)
-        .ok_or_else(|| super::key_names::unknown_key_error(trimmed))
+    Key::try_from_str(trimmed).ok_or_else(|| unknown_key_error(trimmed))
 }
 
 // ---------------------------------------------------------------------------

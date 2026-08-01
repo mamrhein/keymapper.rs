@@ -13,7 +13,7 @@
 pub mod config;
 pub mod config_path;
 pub mod key;
-pub(crate) mod key_names;
 pub(crate) mod modifier;
 
 pub use key::Key;
+pub(crate) use key::unknown_key_error;

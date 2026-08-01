@@ -783,9 +783,7 @@ impl<'de> Deserialize<'de> for Key {
     {
         let s = String::deserialize(deserializer)?;
         Self::try_from_str(&s).ok_or_else(|| {
-            serde::de::Error::custom(
-                crate::common::key_names::unknown_key_error(&s),
-            )
+            serde::de::Error::custom(crate::common::key::unknown_key_error(&s))
         })
     }
 }
