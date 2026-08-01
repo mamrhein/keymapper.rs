@@ -7,152 +7,140 @@
 // $Source$
 // $Revision$
 
-use std::{sync::Arc, thread, time::Duration};
-
-use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use windows_sys::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
-    UI::{
-        Input::KeyboardAndMouse::{
-            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-        },
-        WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSG,
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-            WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-        },
-    },
-};
 
-/// Type aliases for hook types not re-exported in windows-sys 0.61.
-#[allow(clippy::upper_case_acronyms)]
-type HHOOK = *mut std::ffi::c_void;
-
-use crate::{
-    common::modifier::ModifierRole,
-    daemon::{mapping_cache::NativeKey, state::Lookup},
-};
+use crate::common::modifier::ModifierRole;
 
 // ---------------------------------------------------------------------------
-// Platform-specific Key enum — discriminants ARE the VK_* codes
+// Platform-specific Key enum — discriminants ARE the CGKeyCode values
 // ---------------------------------------------------------------------------
 
-/// Windows virtual-key code for a physical key on a US ANSI keyboard.
+/// macOS virtual keycode for a physical key on a US ANSI keyboard.
+///
+/// Discriminant values come from `<HIToolbox/Events.h>` (`kVK_*` constants).
+/// `key as u16` yields the native CGKeyCode — no translation needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum Key {
-    LeftControl = 0xA2,  // VK_LCONTROL
-    RightControl = 0xA3, // VK_RCONTROL
-    LeftShift = 0xA0,    // VK_LSHIFT
-    RightShift = 0xA1,   // VK_RSHIFT
-    LeftAlt = 0xA4,      // VK_LMENU
-    RightAlt = 0xA5,     // VK_RMENU
-    LeftCommand = 0x5B,  // VK_LWIN
-    RightCommand = 0x5C, // VK_RWIN
-    CapsLock = 0x14,     // VK_CAPITAL
-    Tab = 0x09,          // VK_TAB
-    Space = 0x20,        // VK_SPACE
-    Return = 0x0D,       // VK_RETURN
-    Backspace = 0x08,    // VK_BACK
-    Delete = 0x2E,       // VK_DELETE
-    Escape = 0x1B,       // VK_ESCAPE
-    UpArrow = 0x26,      // VK_UP
-    DownArrow = 0x28,    // VK_DOWN
-    LeftArrow = 0x25,    // VK_LEFT
-    RightArrow = 0x27,   // VK_RIGHT
-    PageUp = 0x21,       // VK_PRIOR
-    PageDown = 0x22,     // VK_NEXT
-    Home = 0x23,         // VK_HOME
-    End = 0x24,          // VK_END
-    F1 = 0x70,
-    F2 = 0x71,
-    F3 = 0x72,
-    F4 = 0x73,
-    F5 = 0x74,
-    F6 = 0x75,
-    F7 = 0x76,
-    F8 = 0x77,
-    F9 = 0x78,
-    F10 = 0x79,
-    F11 = 0x7A,
-    F12 = 0x7B,
-    A = 0x41,
-    B = 0x42,
-    C = 0x43,
-    D = 0x44,
-    E = 0x45,
-    F = 0x46,
-    G = 0x47,
-    H = 0x48,
-    I = 0x49,
-    J = 0x4A,
-    K = 0x4B,
-    L = 0x4C,
-    M = 0x4D,
-    N = 0x4E,
-    O = 0x4F,
-    P = 0x50,
-    Q = 0x51,
-    R = 0x52,
-    S = 0x53,
-    T = 0x54,
-    U = 0x55,
-    V = 0x56,
-    W = 0x57,
-    X = 0x58,
-    Y = 0x59,
-    Z = 0x5A,
-    Number1 = 0x31,
-    Number2 = 0x32,
-    Number3 = 0x33,
-    Number4 = 0x34,
-    Number5 = 0x35,
-    Number6 = 0x36,
-    Number7 = 0x37,
-    Number8 = 0x38,
-    Number9 = 0x39,
-    Number0 = 0x30,
+    // --- Modifiers ---
+    LeftControl = 59,  // kVK_Control
+    RightControl = 62, // kVK_RightControl
+    LeftShift = 56,    // kVK_Shift
+    RightShift = 60,   // kVK_RightShift
+    LeftAlt = 58,      // kVK_Option
+    RightAlt = 61,     // kVK_RightOption
+    LeftCommand = 55,  // kVK_Command
+    RightCommand = 54, // kVK_RightCommand
+    CapsLock = 57,     // kVK_CapsLock
+    // --- Editor / misc ---
+    Tab = 48,       // kVK_Tab
+    Space = 49,     // kVK_Space
+    Return = 36,    // kVK_Return
+    Backspace = 51, // kVK_Delete
+    Delete = 117,   // kVK_ForwardDelete
+    Escape = 53,    // kVK_Escape
+    // --- Navigation ---
+    UpArrow = 126,    // kVK_UpArrow
+    DownArrow = 125,  // kVK_DownArrow
+    LeftArrow = 123,  // kVK_LeftArrow
+    RightArrow = 124, // kVK_RightArrow
+    PageUp = 116,     // kVK_PageUp
+    PageDown = 121,   // kVK_PageDown
+    Home = 115,       // kVK_Home
+    End = 119,        // kVK_End
+    // --- Function keys ---
+    F1 = 122,  // kVK_F1
+    F2 = 120,  // kVK_F2
+    F3 = 99,   // kVK_F3
+    F4 = 118,  // kVK_F4
+    F5 = 96,   // kVK_F5
+    F6 = 97,   // kVK_F6
+    F7 = 98,   // kVK_F7
+    F8 = 100,  // kVK_F8
+    F9 = 101,  // kVK_F9
+    F10 = 109, // kVK_F10
+    F11 = 103, // kVK_F11
+    F12 = 111, // kVK_F12
+    // --- Letters ---
+    A = 0,  // kVK_ANSI_A
+    B = 11, // kVK_ANSI_B
+    C = 8,  // kVK_ANSI_C
+    D = 2,  // kVK_ANSI_D
+    E = 14, // kVK_ANSI_E
+    F = 3,  // kVK_ANSI_F
+    G = 5,  // kVK_ANSI_G
+    H = 4,  // kVK_ANSI_H
+    I = 34, // kVK_ANSI_I
+    J = 38, // kVK_ANSI_J
+    K = 40, // kVK_ANSI_K
+    L = 37, // kVK_ANSI_L
+    M = 46, // kVK_ANSI_M
+    N = 45, // kVK_ANSI_N
+    O = 31, // kVK_ANSI_O
+    P = 35, // kVK_ANSI_P
+    Q = 12, // kVK_ANSI_Q
+    R = 15, // kVK_ANSI_R
+    S = 1,  // kVK_ANSI_S
+    T = 17, // kVK_ANSI_T
+    U = 32, // kVK_ANSI_U
+    V = 9,  // kVK_ANSI_V
+    W = 13, // kVK_ANSI_W
+    X = 7,  // kVK_ANSI_X
+    Y = 16, // kVK_ANSI_Y
+    Z = 6,  // kVK_ANSI_Z
+    // --- Numbers ---
+    Number1 = 18, // kVK_ANSI_1
+    Number2 = 19, // kVK_ANSI_2
+    Number3 = 20, // kVK_ANSI_3
+    Number4 = 21, // kVK_ANSI_4
+    Number5 = 23, // kVK_ANSI_5
+    Number6 = 22, // kVK_ANSI_6
+    Number7 = 26, // kVK_ANSI_7
+    Number8 = 28, // kVK_ANSI_8
+    Number9 = 25, // kVK_ANSI_9
+    Number0 = 29, // kVK_ANSI_0
     // --- Numpad ---
-    Numpad0 = 0x60,        // VK_NUMPAD0
-    Numpad1 = 0x61,        // VK_NUMPAD1
-    Numpad2 = 0x62,        // VK_NUMPAD2
-    Numpad3 = 0x63,        // VK_NUMPAD3
-    Numpad4 = 0x64,        // VK_NUMPAD4
-    Numpad5 = 0x65,        // VK_NUMPAD5
-    Numpad6 = 0x66,        // VK_NUMPAD6
-    Numpad7 = 0x67,        // VK_NUMPAD7
-    Numpad8 = 0x68,        // VK_NUMPAD8
-    Numpad9 = 0x69,        // VK_NUMPAD9
-    NumpadDecimal = 0x6E,  // VK_DECIMAL
-    NumpadMultiply = 0x6A, // VK_MULTIPLY
-    NumpadPlus = 0x6B,     // VK_ADD
-    NumpadDivide = 0x6F,   // VK_DIVIDE
-    NumpadEnter = 0x92,    // VK_RETURN (extended)
-    NumpadMinus = 0x6D,    // VK_SUBTRACT
+    Numpad0 = 82,        // kVK_ANSI_Keypad0
+    Numpad1 = 83,        // kVK_ANSI_Keypad1
+    Numpad2 = 84,        // kVK_ANSI_Keypad2
+    Numpad3 = 85,        // kVK_ANSI_Keypad3
+    Numpad4 = 86,        // kVK_ANSI_Keypad4
+    Numpad5 = 87,        // kVK_ANSI_Keypad5
+    Numpad6 = 88,        // kVK_ANSI_Keypad6
+    Numpad7 = 89,        // kVK_ANSI_Keypad7
+    Numpad8 = 91,        // kVK_ANSI_Keypad8
+    Numpad9 = 92,        // kVK_ANSI_Keypad9
+    NumpadDecimal = 65,  // kVK_ANSI_KeypadDecimal
+    NumpadMultiply = 75, // kVK_ANSI_KeypadMultiply
+    NumpadPlus = 69,     // kVK_ANSI_KeypadPlus
+    NumpadClear = 71,    // kVK_ANSI_KeypadClear
+    NumpadDivide = 73,   // kVK_ANSI_KeypadDivide
+    NumpadEnter = 76,    // kVK_ANSI_KeypadEnter
+    NumpadMinus = 78,    // kVK_ANSI_KeypadMinus
+    NumpadEqual = 90,    // kVK_ANSI_KeypadEqual
     // --- Punctuation / symbols ---
-    Minus = 0xBD,        // VK_OEM_MINUS
-    Equal = 0xBB,        // VK_OEM_PLUS
-    BracketLeft = 0xDB,  // VK_OEM_4
-    BracketRight = 0xDD, // VK_OEM_6
-    Backslash = 0xDC,    // VK_OEM_5
-    Semicolon = 0xBA,    // VK_OEM_1
-    Quote = 0xDE,        // VK_OEM_7
-    Comma = 0xBC,        // VK_OEM_COMMA
-    Period = 0xBE,       // VK_OEM_PERIOD
-    Slash = 0xBF,        // VK_OEM_2
-    Grave = 0xC0,        // VK_OEM_3
-    IsoExtra = 0xE2,     // VK_OEM_102 (between Shift and Z on ISO)
-    IsoHash = 0xDF,      // VK_OEM_8
+    Minus = 27,        // kVK_ANSI_Minus
+    Equal = 24,        // kVK_ANSI_Equal
+    BracketLeft = 33,  // kVK_ANSI_LeftBracket
+    BracketRight = 30, // kVK_ANSI_RightBracket
+    Backslash = 42,    // kVK_ANSI_Backslash
+    Semicolon = 41,    // kVK_ANSI_Semicolon
+    Quote = 39,        // kVK_ANSI_Quote
+    Comma = 43,        // kVK_ANSI_Comma
+    Period = 47,       // kVK_ANSI_Period
+    Slash = 44,        // kVK_ANSI_Slash
+    Grave = 50,        // kVK_ANSI_Grave
+    IsoExtra = 10,     // kVK_ISO_Section (between Shift and Z on ISO)
 }
 
 impl Key {
-    pub const fn as_native(self) -> VIRTUAL_KEY {
-        self as VIRTUAL_KEY
+    /// Convert to the native CGKeyCode.  Zero-cost — the discriminant IS the
+    /// code.
+    pub const fn as_native(self) -> u16 {
+        self as u16
     }
 
+    /// Return the modifier bit **position** (0–7) for this key.
     pub const fn as_modifier_bit(self) -> Option<u8> {
         let role = match self {
             Self::LeftControl => ModifierRole::LeftControl,
@@ -168,6 +156,10 @@ impl Key {
         Some(role.bit())
     }
 
+    /// Return the possible modifier bit positions for this key.
+    ///
+    /// Modifier keys return both left and right positions, enabling
+    /// "either side" matching.  Non-modifier keys return `None`.
     pub fn as_modifier_positions(self) -> Option<Vec<u8>> {
         let role = match self {
             Self::LeftControl => ModifierRole::LeftControl,
@@ -184,10 +176,9 @@ impl Key {
         Some(vec![a, b])
     }
 
-    /// Convert a platform-agnostic common `Key` to the Windows-native variant.
+    /// Convert a platform-agnostic common `Key` to the macOS-native variant.
     ///
-    /// Returns `None` for keys not supported on Windows
-    /// (`NumpadClear`, `NumpadEqual`).
+    /// Returns `None` for keys not supported on macOS (`IsoHash`).
     pub const fn from_common(key: crate::common::Key) -> Option<Self> {
         Some(match key {
             crate::common::Key::LeftControl => Self::LeftControl,
@@ -289,12 +280,13 @@ impl Key {
             crate::common::Key::Slash => Self::Slash,
             crate::common::Key::Grave => Self::Grave,
             crate::common::Key::IsoExtra => Self::IsoExtra,
-            crate::common::Key::IsoHash => Self::IsoHash,
-            crate::common::Key::NumpadClear => return None,
-            crate::common::Key::NumpadEqual => return None,
+            crate::common::Key::NumpadClear => Self::NumpadClear,
+            crate::common::Key::NumpadEqual => Self::NumpadEqual,
+            crate::common::Key::IsoHash => return None,
         })
     }
 
+    /// Return the canonical config-name for this key.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LeftControl => "LeftControl",
@@ -382,9 +374,11 @@ impl Key {
             Self::NumpadDecimal => "NumpadDecimal",
             Self::NumpadMultiply => "NumpadMultiply",
             Self::NumpadPlus => "NumpadPlus",
+            Self::NumpadClear => "NumpadClear",
             Self::NumpadDivide => "NumpadDivide",
             Self::NumpadEnter => "NumpadEnter",
             Self::NumpadMinus => "NumpadMinus",
+            Self::NumpadEqual => "NumpadEqual",
             // Punctuation / symbols
             Self::Minus => "Minus",
             Self::Equal => "Equal",
@@ -398,12 +392,11 @@ impl Key {
             Self::Slash => "Slash",
             Self::Grave => "Grave",
             Self::IsoExtra => "IsoExtra",
-            Self::IsoHash => "IsoHash",
         }
     }
 
     /// All defined key variants.
-    pub const ALL: [Self; 100] = [
+    pub const ALL: [Self; 101] = [
         // Modifiers
         Self::LeftControl,
         Self::RightControl,
@@ -495,10 +488,12 @@ impl Key {
         Self::NumpadDecimal,
         Self::NumpadMultiply,
         Self::NumpadPlus,
+        Self::NumpadClear,
         Self::NumpadDivide,
         Self::NumpadEnter,
         Self::NumpadMinus,
-        // Punctuation / symbols
+        Self::NumpadEqual,
+        // Punctuation
         Self::Minus,
         Self::Equal,
         Self::BracketLeft,
@@ -511,134 +506,140 @@ impl Key {
         Self::Slash,
         Self::Grave,
         Self::IsoExtra,
-        Self::IsoHash,
     ];
 
-    /// Convert a native virtual-key code back to a Key variant.
+    /// Convert a native CGKeyCode back to a Key variant.
     ///
     /// Returns `None` for codes that are not defined in this enum.
     pub const fn from_native(code: u16) -> Option<Self> {
         match code {
-            0xA2 => Some(Self::LeftControl),
-            0xA3 => Some(Self::RightControl),
-            0xA0 => Some(Self::LeftShift),
-            0xA1 => Some(Self::RightShift),
-            0xA4 => Some(Self::LeftAlt),
-            0xA5 => Some(Self::RightAlt),
-            0x5B => Some(Self::LeftCommand),
-            0x5C => Some(Self::RightCommand),
-            0x14 => Some(Self::CapsLock),
-            0x09 => Some(Self::Tab),
-            0x20 => Some(Self::Space),
-            0x0D => Some(Self::Return),
-            0x08 => Some(Self::Backspace),
-            0x2E => Some(Self::Delete),
-            0x1B => Some(Self::Escape),
-            0x26 => Some(Self::UpArrow),
-            0x28 => Some(Self::DownArrow),
-            0x25 => Some(Self::LeftArrow),
-            0x27 => Some(Self::RightArrow),
-            0x21 => Some(Self::PageUp),
-            0x22 => Some(Self::PageDown),
-            0x23 => Some(Self::Home),
-            0x24 => Some(Self::End),
-            0x70 => Some(Self::F1),
-            0x71 => Some(Self::F2),
-            0x72 => Some(Self::F3),
-            0x73 => Some(Self::F4),
-            0x74 => Some(Self::F5),
-            0x75 => Some(Self::F6),
-            0x76 => Some(Self::F7),
-            0x77 => Some(Self::F8),
-            0x78 => Some(Self::F9),
-            0x79 => Some(Self::F10),
-            0x7A => Some(Self::F11),
-            0x7B => Some(Self::F12),
-            0x41 => Some(Self::A),
-            0x42 => Some(Self::B),
-            0x43 => Some(Self::C),
-            0x44 => Some(Self::D),
-            0x45 => Some(Self::E),
-            0x46 => Some(Self::F),
-            0x47 => Some(Self::G),
-            0x48 => Some(Self::H),
-            0x49 => Some(Self::I),
-            0x4A => Some(Self::J),
-            0x4B => Some(Self::K),
-            0x4C => Some(Self::L),
-            0x4D => Some(Self::M),
-            0x4E => Some(Self::N),
-            0x4F => Some(Self::O),
-            0x50 => Some(Self::P),
-            0x51 => Some(Self::Q),
-            0x52 => Some(Self::R),
-            0x53 => Some(Self::S),
-            0x54 => Some(Self::T),
-            0x55 => Some(Self::U),
-            0x56 => Some(Self::V),
-            0x57 => Some(Self::W),
-            0x58 => Some(Self::X),
-            0x59 => Some(Self::Y),
-            0x5A => Some(Self::Z),
-            0x31 => Some(Self::Number1),
-            0x32 => Some(Self::Number2),
-            0x33 => Some(Self::Number3),
-            0x34 => Some(Self::Number4),
-            0x35 => Some(Self::Number5),
-            0x36 => Some(Self::Number6),
-            0x37 => Some(Self::Number7),
-            0x38 => Some(Self::Number8),
-            0x39 => Some(Self::Number9),
-            0x30 => Some(Self::Number0),
-            0x60 => Some(Self::Numpad0),
-            0x61 => Some(Self::Numpad1),
-            0x62 => Some(Self::Numpad2),
-            0x63 => Some(Self::Numpad3),
-            0x64 => Some(Self::Numpad4),
-            0x65 => Some(Self::Numpad5),
-            0x66 => Some(Self::Numpad6),
-            0x67 => Some(Self::Numpad7),
-            0x68 => Some(Self::Numpad8),
-            0x69 => Some(Self::Numpad9),
-            0x6E => Some(Self::NumpadDecimal),
-            0x6A => Some(Self::NumpadMultiply),
-            0x6B => Some(Self::NumpadPlus),
-            0x6F => Some(Self::NumpadDivide),
-            0x92 => Some(Self::NumpadEnter),
-            0x6D => Some(Self::NumpadMinus),
-            0xBD => Some(Self::Minus),
-            0xBB => Some(Self::Equal),
-            0xDB => Some(Self::BracketLeft),
-            0xDD => Some(Self::BracketRight),
-            0xDC => Some(Self::Backslash),
-            0xBA => Some(Self::Semicolon),
-            0xDE => Some(Self::Quote),
-            0xBC => Some(Self::Comma),
-            0xBE => Some(Self::Period),
-            0xBF => Some(Self::Slash),
-            0xC0 => Some(Self::Grave),
-            0xE2 => Some(Self::IsoExtra),
-            0xDF => Some(Self::IsoHash),
+            59 => Some(Self::LeftControl),
+            62 => Some(Self::RightControl),
+            56 => Some(Self::LeftShift),
+            60 => Some(Self::RightShift),
+            58 => Some(Self::LeftAlt),
+            61 => Some(Self::RightAlt),
+            55 => Some(Self::LeftCommand),
+            54 => Some(Self::RightCommand),
+            57 => Some(Self::CapsLock),
+            48 => Some(Self::Tab),
+            49 => Some(Self::Space),
+            36 => Some(Self::Return),
+            51 => Some(Self::Backspace),
+            117 => Some(Self::Delete),
+            53 => Some(Self::Escape),
+            126 => Some(Self::UpArrow),
+            125 => Some(Self::DownArrow),
+            123 => Some(Self::LeftArrow),
+            124 => Some(Self::RightArrow),
+            116 => Some(Self::PageUp),
+            121 => Some(Self::PageDown),
+            115 => Some(Self::Home),
+            119 => Some(Self::End),
+            122 => Some(Self::F1),
+            120 => Some(Self::F2),
+            99 => Some(Self::F3),
+            118 => Some(Self::F4),
+            96 => Some(Self::F5),
+            97 => Some(Self::F6),
+            98 => Some(Self::F7),
+            100 => Some(Self::F8),
+            101 => Some(Self::F9),
+            109 => Some(Self::F10),
+            103 => Some(Self::F11),
+            111 => Some(Self::F12),
+            0 => Some(Self::A),
+            11 => Some(Self::B),
+            8 => Some(Self::C),
+            2 => Some(Self::D),
+            14 => Some(Self::E),
+            3 => Some(Self::F),
+            5 => Some(Self::G),
+            4 => Some(Self::H),
+            34 => Some(Self::I),
+            38 => Some(Self::J),
+            40 => Some(Self::K),
+            37 => Some(Self::L),
+            46 => Some(Self::M),
+            45 => Some(Self::N),
+            31 => Some(Self::O),
+            35 => Some(Self::P),
+            12 => Some(Self::Q),
+            15 => Some(Self::R),
+            1 => Some(Self::S),
+            17 => Some(Self::T),
+            32 => Some(Self::U),
+            9 => Some(Self::V),
+            13 => Some(Self::W),
+            7 => Some(Self::X),
+            16 => Some(Self::Y),
+            6 => Some(Self::Z),
+            18 => Some(Self::Number1),
+            19 => Some(Self::Number2),
+            20 => Some(Self::Number3),
+            21 => Some(Self::Number4),
+            23 => Some(Self::Number5),
+            22 => Some(Self::Number6),
+            26 => Some(Self::Number7),
+            28 => Some(Self::Number8),
+            25 => Some(Self::Number9),
+            29 => Some(Self::Number0),
+            82 => Some(Self::Numpad0),
+            83 => Some(Self::Numpad1),
+            84 => Some(Self::Numpad2),
+            85 => Some(Self::Numpad3),
+            86 => Some(Self::Numpad4),
+            87 => Some(Self::Numpad5),
+            88 => Some(Self::Numpad6),
+            89 => Some(Self::Numpad7),
+            91 => Some(Self::Numpad8),
+            92 => Some(Self::Numpad9),
+            65 => Some(Self::NumpadDecimal),
+            75 => Some(Self::NumpadMultiply),
+            69 => Some(Self::NumpadPlus),
+            71 => Some(Self::NumpadClear),
+            73 => Some(Self::NumpadDivide),
+            76 => Some(Self::NumpadEnter),
+            78 => Some(Self::NumpadMinus),
+            90 => Some(Self::NumpadEqual),
+            27 => Some(Self::Minus),
+            24 => Some(Self::Equal),
+            33 => Some(Self::BracketLeft),
+            30 => Some(Self::BracketRight),
+            42 => Some(Self::Backslash),
+            41 => Some(Self::Semicolon),
+            39 => Some(Self::Quote),
+            43 => Some(Self::Comma),
+            47 => Some(Self::Period),
+            44 => Some(Self::Slash),
+            50 => Some(Self::Grave),
+            10 => Some(Self::IsoExtra),
             _ => None,
         }
     }
 
+    /// Parse a TitleCase key name into a Key variant.
+    ///
+    /// Case-sensitive matching.  Generic modifier names (`Ctrl`, `Shift`,
+    /// `Alt`, `Command`) resolve to left-side defaults.  Explicit names
+    /// (`LeftControl`, `RightAlt`) are preserved.
     pub fn try_from_str(name: &str) -> Option<Self> {
         match name {
+            // Generic modifiers — resolve to left-side defaults
             "Ctrl" => Some(Self::LeftControl),
             "Shift" => Some(Self::LeftShift),
             "Alt" | "Option" => Some(Self::LeftAlt),
-            "Command" | "Cmd" | "Super" | "Win" => Some(Self::LeftCommand),
+            "Command" | "Cmd" | "Super" => Some(Self::LeftCommand),
+            // Specific modifiers
             "LeftControl" | "LeftCtrl" => Some(Self::LeftControl),
             "RightControl" | "RightCtrl" => Some(Self::RightControl),
             "LeftShift" => Some(Self::LeftShift),
             "RightShift" => Some(Self::RightShift),
             "LeftAlt" | "LeftOption" => Some(Self::LeftAlt),
             "RightAlt" | "RightOption" => Some(Self::RightAlt),
-            "LeftCommand" | "LeftCmd" | "LeftWin" => Some(Self::LeftCommand),
-            "RightCommand" | "RightCmd" | "RightWin" => {
-                Some(Self::RightCommand)
-            }
+            "LeftCommand" | "LeftCmd" => Some(Self::LeftCommand),
+            "RightCommand" | "RightCmd" => Some(Self::RightCommand),
+            // Non-modifier keys
             "CapsLock" | "Caps" => Some(Self::CapsLock),
             "Tab" => Some(Self::Tab),
             "Space" => Some(Self::Space),
@@ -714,11 +715,13 @@ impl Key {
             "Numpad8" => Some(Self::Numpad8),
             "Numpad9" => Some(Self::Numpad9),
             "NumpadDecimal" => Some(Self::NumpadDecimal),
-            "NumpadMultiply" => Some(Self::NumpadMultiply),
-            "NumpadPlus" => Some(Self::NumpadPlus),
-            "NumpadDivide" => Some(Self::NumpadDivide),
-            "NumpadEnter" => Some(Self::NumpadEnter),
-            "NumpadMinus" => Some(Self::NumpadMinus),
+            "NumpadMultiply" | "KP_Multiply" => Some(Self::NumpadMultiply),
+            "NumpadPlus" | "KP_Add" => Some(Self::NumpadPlus),
+            "NumpadClear" => Some(Self::NumpadClear),
+            "NumpadDivide" | "KP_Divide" => Some(Self::NumpadDivide),
+            "NumpadEnter" | "KP_Enter" => Some(Self::NumpadEnter),
+            "NumpadMinus" | "KP_Subtract" => Some(Self::NumpadMinus),
+            "NumpadEqual" => Some(Self::NumpadEqual),
             // Punctuation / symbols
             "Minus" => Some(Self::Minus),
             "Equal" => Some(Self::Equal),
@@ -731,8 +734,7 @@ impl Key {
             "Period" => Some(Self::Period),
             "Slash" => Some(Self::Slash),
             "Grave" => Some(Self::Grave),
-            "IsoExtra" => Some(Self::IsoExtra),
-            "IsoHash" => Some(Self::IsoHash),
+            "IsoExtra" | "NonUSBackslash" => Some(Self::IsoExtra),
             _ => None,
         }
     }
@@ -757,252 +759,4 @@ impl<'de> Deserialize<'de> for Key {
             serde::de::Error::custom(crate::common::key::unknown_key_error(&s))
         })
     }
-}
-
-// ---------------------------------------------------------------------------
-// Modifier handling
-// ---------------------------------------------------------------------------
-
-fn extract_modifier_bits() -> u8 {
-    let mut bits: u8 = 0;
-    if unsafe { GetAsyncKeyState(Key::LeftControl.as_native()) } < 0 {
-        bits |= ModifierRole::LeftControl.mask();
-    }
-    if unsafe { GetAsyncKeyState(Key::RightControl.as_native()) } < 0 {
-        bits |= ModifierRole::RightControl.mask();
-    }
-    if unsafe { GetAsyncKeyState(Key::LeftShift.as_native()) } < 0 {
-        bits |= ModifierRole::LeftShift.mask();
-    }
-    if unsafe { GetAsyncKeyState(Key::RightShift.as_native()) } < 0 {
-        bits |= ModifierRole::RightShift.mask();
-    }
-    if unsafe { GetAsyncKeyState(Key::LeftAlt.as_native()) } < 0 {
-        bits |= ModifierRole::LeftAlt.mask();
-    }
-    if unsafe { GetAsyncKeyState(Key::RightAlt.as_native()) } < 0 {
-        bits |= ModifierRole::RightAlt.mask();
-    }
-    if unsafe { GetAsyncKeyState(Key::LeftCommand.as_native()) } < 0 {
-        bits |= ModifierRole::LeftCommand.mask();
-    }
-    if unsafe { GetAsyncKeyState(Key::RightCommand.as_native()) } < 0 {
-        bits |= ModifierRole::RightCommand.mask();
-    }
-    bits
-}
-
-/// Map a modifier bit position back to the native VIRTUAL_KEY for emission.
-fn modifier_bit_to_vk(bit: u8) -> Option<VIRTUAL_KEY> {
-    let Some(role) = ModifierRole::try_from_bit(bit) else {
-        return None;
-    };
-    let key = match role {
-        ModifierRole::LeftControl => Key::LeftControl,
-        ModifierRole::RightControl => Key::RightControl,
-        ModifierRole::LeftShift => Key::LeftShift,
-        ModifierRole::RightShift => Key::RightShift,
-        ModifierRole::LeftAlt => Key::LeftAlt,
-        ModifierRole::RightAlt => Key::RightAlt,
-        ModifierRole::LeftCommand => Key::LeftCommand,
-        ModifierRole::RightCommand => Key::RightCommand,
-    };
-    Some(key.as_native())
-}
-
-fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
-    matches!(
-        vk,
-        0xA3 | 0xA5 | 0x21 | 0x22 | 0x23 | 0x25
-            ..=0x28 | 0x2D | 0x2E | 0x6F | 0x92
-    )
-}
-
-fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
-    let mut flags = if is_key_up { KEYEVENTF_KEYUP } else { 0 };
-    if is_extended_key(vk) {
-        flags |= KEYEVENTF_EXTENDEDKEY;
-    }
-
-    let input = INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    unsafe {
-        SendInput(
-            1,
-            std::ptr::addr_of!(input),
-            std::mem::size_of::<INPUT>() as i32,
-        );
-    }
-}
-
-fn emit_key_event(native_key: &NativeKey) {
-    let mut pressed_modifiers: Vec<VIRTUAL_KEY> = Vec::new();
-
-    for bit in 0..8 {
-        if (native_key.modifiers >> bit) & 1 == 1
-            && let Some(vk) = modifier_bit_to_vk(bit)
-        {
-            simulate_key_event(vk, false);
-            pressed_modifiers.push(vk);
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    simulate_key_event(native_key.base as VIRTUAL_KEY, false);
-    thread::sleep(Duration::from_millis(1));
-
-    simulate_key_event(native_key.base as VIRTUAL_KEY, true);
-    thread::sleep(Duration::from_millis(1));
-
-    for vk in pressed_modifiers.into_iter().rev() {
-        simulate_key_event(vk, true);
-        thread::sleep(Duration::from_millis(1));
-    }
-}
-
-/// Map a raw VIRTUAL_KEY to its modifier bit position via the shared
-/// `ModifierRole` type.
-fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
-    let role = match vk {
-        0xA2 => ModifierRole::LeftControl,
-        0xA3 => ModifierRole::RightControl,
-        0xA0 => ModifierRole::LeftShift,
-        0xA1 => ModifierRole::RightShift,
-        0xA4 => ModifierRole::LeftAlt,
-        0xA5 => ModifierRole::RightAlt,
-        0x5B => ModifierRole::LeftCommand,
-        0x5C => ModifierRole::RightCommand,
-        _ => return None,
-    };
-    Some(role.bit())
-}
-
-// ---------------------------------------------------------------------------
-// Low-level keyboard hook
-// ---------------------------------------------------------------------------
-
-static SHARED_LOOKUP: parking_lot::Mutex<Option<Arc<RwLock<dyn Lookup>>>> =
-    parking_lot::Mutex::new(None);
-static HOOK_HANDLE: parking_lot::Mutex<isize> = parking_lot::Mutex::new(0);
-
-fn set_shared_lookup(lookup: Arc<RwLock<dyn Lookup>>) {
-    *SHARED_LOOKUP.lock() = Some(lookup);
-}
-
-fn get_shared_lookup() -> Option<Arc<RwLock<dyn Lookup>>> {
-    SHARED_LOOKUP.lock().clone()
-}
-
-fn set_hook_handle(handle: HHOOK) {
-    *HOOK_HANDLE.lock() = handle as isize;
-}
-
-fn hook_handle() -> HHOOK {
-    *HOOK_HANDLE.lock() as _
-}
-
-/// Clears hook callback state so tests can run in isolation.
-///
-/// Windows `WH_KEYBOARD_LL` requires module-level statics because the hook
-/// callback cannot capture user data. This function resets both statics to
-/// their initial state.
-#[cfg(test)]
-pub fn reset_for_tests() {
-    *SHARED_LOOKUP.lock() = None;
-    *HOOK_HANDLE.lock() = 0;
-}
-
-pub fn start_mapping(
-    lookup: Arc<RwLock<dyn Lookup>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    set_shared_lookup(lookup);
-
-    let h_instance: HINSTANCE =
-        unsafe { GetModuleHandleW(std::ptr::null::<u16>()) };
-
-    let handle: HHOOK = unsafe {
-        SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(low_level_keyboard_proc),
-            h_instance,
-            0,
-        )
-    };
-
-    if handle.is_null() {
-        return Err("Failed to install global keyboard hook".into());
-    }
-    set_hook_handle(handle);
-    println!("Windows low-level hook listening.");
-
-    unsafe {
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
-        UnhookWindowsHookEx(hook_handle());
-    }
-
-    Ok(())
-}
-
-extern "system" fn low_level_keyboard_proc(
-    code: i32,
-    w_param: WPARAM,
-    l_param: LPARAM,
-) -> LRESULT {
-    if code < 0 {
-        return unsafe {
-            CallNextHookEx(hook_handle(), code, w_param, l_param)
-        };
-    }
-
-    let Some(lookup) = get_shared_lookup() else {
-        return unsafe {
-            CallNextHookEx(hook_handle(), code, w_param, l_param)
-        };
-    };
-
-    let kbd_struct = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
-    let vk_code = kbd_struct.vkCode as VIRTUAL_KEY;
-
-    let is_key_down =
-        w_param as u32 == WM_KEYDOWN || w_param as u32 == WM_SYSKEYDOWN;
-
-    // Clear the current key's modifier bit from the polled state so that
-    // bare-modifier triggers (e.g. "LeftControl: A") match correctly against
-    // the concurrent modifier set.
-    let mut pressed_modifiers = extract_modifier_bits();
-    if let Some(bit) = vk_to_modifier_bit(vk_code) {
-        pressed_modifiers &= !(1 << bit);
-    }
-
-    let guard = lookup.read();
-    let active_outputs = guard
-        .for_app(&**guard.active_app(), vk_code, pressed_modifiers)
-        .or_else(|| guard.global(vk_code, pressed_modifiers))
-        .map(|v| v.to_vec());
-    drop(guard);
-
-    if let Some(outputs) = active_outputs {
-        // Emit mapped outputs and swallow the original event.  This applies
-        // to modifier keys as well: if a bare modifier is mapped, its outputs
-        // are emitted and the original key is NOT passed to the next hook.
-        if is_key_down {
-            for native_key in &outputs {
-                emit_key_event(native_key);
-            }
-        }
-        return 1; // Swallow the original key
-    }
-
-    unsafe { CallNextHookEx(hook_handle(), code, w_param, l_param) }
 }
