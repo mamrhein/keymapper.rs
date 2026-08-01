@@ -38,7 +38,7 @@ signal-hook = "0.4"
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
-udevrs = "0.5"
+udev = "0.9"
 uinput = "0.1"
 xcb = "1.7" # window enumeration for `keymapper appnames`
 

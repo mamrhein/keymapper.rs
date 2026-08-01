@@ -21,6 +21,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::flag::register;
+use udev::Enumerator;
 
 use crate::{
     common::modifier::ModifierRole, daemon::mapping_cache::NativeKey,
@@ -868,6 +869,8 @@ fn emit_key_event(
 // evdev event loop
 // ---------------------------------------------------------------------------
 
+const DEFAULT_SEAT: &str = "seat0";
+
 /// Determine the seat of the current user session.
 ///
 /// Strategy (first match wins):
@@ -898,7 +901,7 @@ fn determine_seat() -> String {
     }
 
     // Default fallback.
-    "seat0".to_string()
+    DEFAULT_SEAT.to_string()
 }
 
 /// Find the first keyboard input device that belongs to the current user seat.
@@ -915,7 +918,7 @@ pub(crate) fn find_keyboard_device()
         Ok(device) => Ok(device),
         Err(e) => {
             eprintln!(
-                "warning: udev keyboard discovery failed ({e}), falling back to \
+                "Warning: udev keyboard discovery failed ({e}), falling back to \
                  /dev/input scan"
             );
             find_keyboard_device_fallback()
@@ -927,44 +930,31 @@ pub(crate) fn find_keyboard_device()
 fn find_keyboard_device_udev(
     seat: &str,
 ) -> Result<Device, Box<dyn std::error::Error>> {
-    use std::sync::Arc;
+    let mut enumerator = Enumerator::new()?;
 
-    let udev = Arc::new(udevrs::Udev::new());
-    let mut enumerate = udevrs::UdevEnumerate::new(Arc::clone(&udev));
+    enumerator.match_subsystem("input")?;
+    enumerator.match_property("ID_INPUT_KEYBOARD", "1")?;
+    enumerator.scan_devices()?;
 
-    enumerate.add_match_subsystem("input")?;
-    enumerate.add_match_property("ID_INPUT_KEYBOARD", "1")?;
-    enumerate.scan_devices()?;
-
-    for syspath_entry in enumerate.devices() {
-        let sys = syspath_entry.syspath();
-        let Ok(udev_device) =
-            udevrs::UdevDevice::new_from_syspath(Arc::clone(&udev), sys)
-        else {
-            continue;
-        };
-
+    for udev_device in enumerator.scan_devices()? {
+        // Note: Only seats other than 'seat0' are tagged with 'ID_SEAT'.
+        let dev_seat =udev_device.property_value("ID_SEAT")
+            .map(|s| s.to_string_lossy())
+            .unwrap_or(DEFAULT_SEAT.into());
         // Skip devices that do not belong to the target seat.
-        if let Some(dev_seat) = udev_device.get_property_value("ID_SEAT")
-            && dev_seat != seat
-        {
-            continue;
-        }
-
-        // Resolve the device node (e.g. /dev/input/event3).
-        let devnode = udev_device.devnode();
-        if devnode.is_empty() {
-            continue;
-        }
-
-        if let Ok(device) = Device::open(devnode)
-            && device.supported_events().contains(EventType::KEY)
+        if dev_seat == seat
+            // Resolve the device node (e.g. /dev/input/event3).
+            && let Some(devnode) = udev_device.devnode()
+            // Get evdev::Device
+            && let Ok(device) = Device::open(devnode)
+            // Skip pointing devices announced as keyboards
+            && !device.supported_events().contains(EventType::ABSOLUTE)
         {
             return Ok(device);
         }
     }
 
-    Err(format!("no keyboard device found for seat {seat}").into())
+    Err(format!("No keyboard device found for seat {seat}").into())
 }
 
 /// Fallback: scan `/dev/input/event*` and return the first keyboard-capable device.
