@@ -11,7 +11,10 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use keymapper::{
-    common::config::{AppConfig, KeyEvent, RuleGroup},
+    common::{
+        config::{AppConfig, KeyEvent, RuleGroup},
+        keyboard::KeyboardSpecifier,
+    },
     util::platform::{appnames_cmd, keyboard_cmd, keys_cmd, server_cmd},
 };
 
@@ -129,6 +132,21 @@ enum ConfigCommands {
         /// Comma-separated app names to scope this rule.
         #[arg(short, long)]
         apps: Option<Vec<String>>,
+
+        /// Keyboard specifier(s) for this group, as key=value pairs.
+        ///
+        /// Multiple specifiers can be passed by repeating the flag.  Within
+        /// a single value, key=value pairs are separated by commas.
+        /// E.g. `--keyboard "name=Magic Keyboard,vendor=Apple"`
+        #[arg(long)]
+        keyboard: Option<Vec<String>>,
+
+        /// Set global keyboard filter(s).  Same syntax as `--keyboard`.
+        ///
+        /// When present, only events from matching keyboards are processed
+        /// at all.
+        #[arg(long)]
+        keyboards_global: Option<Vec<String>>,
     },
 }
 
@@ -146,7 +164,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output,
                 group,
                 apps,
-            } => cmd_config_add(&trigger, &output, &group, apps)?,
+                keyboard,
+                keyboards_global,
+            } => cmd_config_add(
+                &trigger,
+                &output,
+                &group,
+                apps,
+                keyboard,
+                keyboards_global,
+            )?,
         },
         Commands::Keys { command } => match command {
             KeysCommands::List => cmd_keys_list()?,
@@ -306,17 +333,99 @@ fn cmd_config_create(
     Ok(())
 }
 
+/// Parse a keyboard specifier string into a `KeyboardSpecifier`.
+///
+/// The expected format is comma-separated key=value pairs, e.g.
+/// `"name=Magic Keyboard,vendor=Apple"`.  Valid keys are `name`, `vendor`,
+/// `model`, and `port`.
+fn parse_keyboard_spec(s: &str) -> Result<KeyboardSpecifier, String> {
+    let mut spec = KeyboardSpecifier {
+        name: None,
+        vendor: None,
+        model: None,
+        port: None,
+    };
+
+    if s.is_empty() {
+        return Err("keyboard specifier is empty".to_string());
+    }
+
+    for part in s.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        let (key, value) = part.split_once('=').ok_or_else(|| {
+            format!(
+                "invalid keyboard specifier part '{}': expected key=value \
+                 format (valid keys: name, vendor, model, port)",
+                part
+            )
+        })?;
+
+        let key = key.trim();
+        let value = value.trim().to_string();
+
+        match key {
+            "name" => spec.name = Some(value),
+            "vendor" => spec.vendor = Some(value),
+            "model" => spec.model = Some(value),
+            "port" => spec.port = Some(value),
+            _ => {
+                return Err(format!(
+                    "unknown keyboard specifier field '{}': valid keys are \
+                     name, vendor, model, port",
+                    key
+                ));
+            }
+        }
+    }
+
+    if spec.is_empty() {
+        return Err("keyboard specifier must have at least one field (name, \
+                    vendor, model, or port)"
+            .to_string());
+    }
+
+    Ok(spec)
+}
+
+/// Parse a list of keyboard specifier strings into `Vec<KeyboardSpecifier>`.
+fn parse_keyboard_specs(
+    args: Option<Vec<String>>,
+) -> Result<Option<Vec<KeyboardSpecifier>>, String> {
+    match args {
+        Some(args) if !args.is_empty() => {
+            let specs = args
+                .into_iter()
+                .map(|s| parse_keyboard_spec(&s))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Some(specs))
+        }
+        Some(_) | None => Ok(None),
+    }
+}
+
 fn cmd_config_add(
     trigger_str: &str,
     output_str: &str,
     group_name: &str,
     apps: Option<Vec<String>>,
+    keyboard_args: Option<Vec<String>>,
+    keyboards_global_args: Option<Vec<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Parse the trigger and output.
     let trigger = KeyEvent::parse(trigger_str)
         .map_err(|e| format!("invalid trigger '{}': {e}", trigger_str))?;
     let output = KeyEvent::parse(output_str)
         .map_err(|e| format!("invalid output '{}': {e}", output_str))?;
+
+    // Parse keyboard specifiers.
+    let group_keyboards = parse_keyboard_specs(keyboard_args)
+        .map_err(|e| format!("invalid --keyboard: {e}"))?;
+    let global_keyboards = parse_keyboard_specs(keyboards_global_args)
+        .map_err(|e| format!("invalid --keyboards-global: {e}"))?;
 
     // Find an existing config file.
     let path = keymapper::common::config_path::find_config_path().ok_or_else(
@@ -335,6 +444,11 @@ fn cmd_config_add(
     let mut config = AppConfig::load_from_str(&contents)
         .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
 
+    // Apply global keyboard filter if provided.
+    if let Some(gk) = global_keyboards {
+        config.keyboards = Some(gk);
+    }
+
     // Find or create the target group.
     let mut group = config
         .groups
@@ -345,7 +459,7 @@ fn cmd_config_add(
         config.groups.push(RuleGroup {
             name: Some(group_name.to_string()),
             apps: apps.clone().unwrap_or_default(),
-            keyboards: Vec::new(),
+            keyboards: group_keyboards.clone().unwrap_or_default(),
             mappings: Default::default(),
         });
         group = Some(config.groups.last_mut().unwrap());
@@ -357,6 +471,14 @@ fn cmd_config_add(
         && g.apps.is_empty()
     {
         g.apps = apps.clone();
+    }
+
+    // If --keyboard was given, apply it to the group (only if creating new or
+    // the group has no keyboards yet).
+    if let (Some(g), Some(kb)) = (&mut group, &group_keyboards)
+        && g.keyboards.is_empty()
+    {
+        g.keyboards = kb.clone();
     }
 
     // Add the mapping.
@@ -431,4 +553,85 @@ fn cmd_keys_probe() {
 
 fn cmd_keyboards() {
     keyboard_cmd::list();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_keyboard_spec_name_only() {
+        let spec = parse_keyboard_spec("name=Magic Keyboard").unwrap();
+        assert_eq!(spec.name, Some("Magic Keyboard".to_string()));
+        assert!(spec.vendor.is_none());
+    }
+
+    #[test]
+    fn parse_keyboard_spec_multiple_fields() {
+        let spec =
+            parse_keyboard_spec("name=Magic Keyboard,vendor=Apple").unwrap();
+        assert_eq!(spec.name, Some("Magic Keyboard".to_string()));
+        assert_eq!(spec.vendor, Some("Apple".to_string()));
+    }
+
+    #[test]
+    fn parse_keyboard_spec_all_fields() {
+        let spec = parse_keyboard_spec(
+            "name=Magic Keyboard,vendor=Apple,model=0x05ac,port=USB",
+        )
+        .unwrap();
+        assert_eq!(spec.name, Some("Magic Keyboard".to_string()));
+        assert_eq!(spec.vendor, Some("Apple".to_string()));
+        assert_eq!(spec.model, Some("0x05ac".to_string()));
+        assert_eq!(spec.port, Some("USB".to_string()));
+    }
+
+    #[test]
+    fn parse_keyboard_spec_trims_whitespace() {
+        let spec = parse_keyboard_spec("  name = Magic Keyboard ").unwrap();
+        assert_eq!(spec.name, Some("Magic Keyboard".to_string()));
+    }
+
+    #[test]
+    fn parse_keyboard_spec_empty_input() {
+        let err = parse_keyboard_spec("").unwrap_err();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn parse_keyboard_spec_invalid_format() {
+        let err = parse_keyboard_spec("nosign").unwrap_err();
+        assert!(err.contains("key=value"));
+    }
+
+    #[test]
+    fn parse_keyboard_spec_unknown_field() {
+        let err = parse_keyboard_spec("foobar=hello").unwrap_err();
+        assert!(err.contains("unknown"));
+    }
+
+    #[test]
+    fn parse_keyboard_specs_none_input() {
+        let result = parse_keyboard_specs(None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_keyboard_specs_empty_list() {
+        let result = parse_keyboard_specs(Some(vec![])).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_keyboard_specs_valid_list() {
+        let result = parse_keyboard_specs(Some(vec![
+            "name=Keyboard1".to_string(),
+            "vendor=Logitech".to_string(),
+        ]))
+        .unwrap();
+        let specs = result.unwrap();
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[0].name, Some("Keyboard1".to_string()));
+        assert_eq!(specs[1].vendor, Some("Logitech".to_string()));
+    }
 }
