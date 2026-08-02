@@ -7,7 +7,9 @@
 // $Source$
 // $Revision$
 
-//! Platform-agnostic keyboard device metadata.
+//! Platform-agnostic keyboard device metadata and filtering specifiers.
+
+use serde::{Deserialize, Serialize};
 
 /// Metadata for a single detected keyboard device.
 #[derive(Debug, Clone)]
@@ -46,5 +48,226 @@ impl KeyboardInfo {
             device,
             port,
         }
+    }
+}
+
+/// A partial keyboard identifier used in configuration to filter events by
+/// device.
+///
+/// Any combination of `name`, `vendor`, `model`, and `port` can be provided.
+/// A specifier matches a keyboard when **all** provided fields match.  Fields
+/// comparison is case-insensitive to tolerate vendor name variations.
+///
+/// Multiple specifiers in a list form an OR set — matching any one is
+/// sufficient.  An empty specifier (all fields `None`) is invalid and should
+/// be rejected at configuration validation time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyboardSpecifier {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+}
+
+impl KeyboardSpecifier {
+    /// Returns `true` when no fields are set.  Such a specifier is
+    /// meaningless and should be rejected during configuration validation.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.vendor.is_none()
+            && self.model.is_none()
+            && self.port.is_none()
+    }
+
+    /// Returns `true` when at least one provided field matches the
+    /// corresponding field on the keyboard.  All set fields must match.
+    pub fn matches(&self, info: &KeyboardInfo) -> bool {
+        if let Some(ref n) = self.name
+            && !str_matches_ignore_case(n, &info.name)
+        {
+            return false;
+        }
+        if let Some(ref v) = self.vendor
+            && !str_matches_ignore_case(v, &info.vendor)
+        {
+            return false;
+        }
+        if let Some(ref m) = self.model
+            && !str_matches_ignore_case(m, &info.model)
+        {
+            return false;
+        }
+        if let Some(ref p) = self.port {
+            match &info.port {
+                Some(device_port) => {
+                    if !str_matches_ignore_case(p, device_port) {
+                        return false;
+                    }
+                }
+                None => {
+                    // The device has no port info; a port filter cannot match.
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Case-insensitive string comparison used for keyboard field matching.
+fn str_matches_ignore_case(pattern: &str, value: &str) -> bool {
+    pattern.eq_ignore_ascii_case(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_keyboard(
+        name: &str,
+        vendor: &str,
+        model: &str,
+        device: &str,
+        port: Option<&str>,
+    ) -> KeyboardInfo {
+        KeyboardInfo::new(
+            name.to_string(),
+            vendor.to_string(),
+            model.to_string(),
+            device.to_string(),
+            port.map(str::to_string),
+        )
+    }
+
+    #[test]
+    fn is_empty_with_no_fields() {
+        let spec = KeyboardSpecifier {
+            name: None,
+            vendor: None,
+            model: None,
+            port: None,
+        };
+        assert!(spec.is_empty());
+    }
+
+    #[test]
+    fn is_empty_with_any_field_set() {
+        let spec = KeyboardSpecifier {
+            name: Some("test".to_string()),
+            vendor: None,
+            model: None,
+            port: None,
+        };
+        assert!(!spec.is_empty());
+    }
+
+    #[test]
+    fn matches_all_fields() {
+        let spec = KeyboardSpecifier {
+            name: Some("Magic Keyboard".to_string()),
+            vendor: Some("Apple".to_string()),
+            model: Some("0x05ac:0xa25a".to_string()),
+            port: Some("USB".to_string()),
+        };
+        let kb = build_keyboard(
+            "Magic Keyboard",
+            "Apple",
+            "0x05ac:0xa25a",
+            "0x00120000",
+            Some("USB"),
+        );
+        assert!(spec.matches(&kb));
+    }
+
+    #[test]
+    fn matches_partial_fields() {
+        let spec = KeyboardSpecifier {
+            name: Some("magic keyboard".to_string()),
+            vendor: None,
+            model: None,
+            port: None,
+        };
+        let kb = build_keyboard(
+            "Magic Keyboard",
+            "Apple",
+            "0x05ac:0xa25a",
+            "0x00120000",
+            Some("USB"),
+        );
+        assert!(spec.matches(&kb));
+    }
+
+    #[test]
+    fn matches_case_insensitive() {
+        let spec = KeyboardSpecifier {
+            name: None,
+            vendor: Some("apple".to_string()),
+            model: None,
+            port: None,
+        };
+        let kb = build_keyboard(
+            "Magic Keyboard",
+            "Apple",
+            "0x05ac:0xa25a",
+            "0x00120000",
+            Some("USB"),
+        );
+        assert!(spec.matches(&kb));
+    }
+
+    #[test]
+    fn does_not_mismatch_name() {
+        let spec = KeyboardSpecifier {
+            name: Some("Logitech K845".to_string()),
+            vendor: None,
+            model: None,
+            port: None,
+        };
+        let kb = build_keyboard("Magic Keyboard", "Apple", "x", "dev", None);
+        assert!(!spec.matches(&kb));
+    }
+
+    #[test]
+    fn port_filter_no_match_when_device_has_none() {
+        // A port filter cannot match when the device has no port info.
+        let spec = KeyboardSpecifier {
+            name: None,
+            vendor: None,
+            model: None,
+            port: Some("USB".to_string()),
+        };
+        let kb = build_keyboard("Test", "Vendor", "Model", "dev", None);
+        assert!(!spec.matches(&kb));
+    }
+
+    #[test]
+    fn port_filter_matches_when_device_has_port() {
+        let spec = KeyboardSpecifier {
+            name: None,
+            vendor: None,
+            model: None,
+            port: Some("usb".to_string()),
+        };
+        let kb = build_keyboard("Test", "Vendor", "Model", "dev", Some("USB"));
+        assert!(spec.matches(&kb));
+    }
+
+    #[test]
+    fn serialize_roundtrip() {
+        let spec = KeyboardSpecifier {
+            name: Some("Magic Keyboard".to_string()),
+            vendor: Some("Apple".to_string()),
+            model: None,
+            port: Some("Bluetooth".to_string()),
+        };
+
+        let yaml = serde_yaml::to_string(&spec).unwrap();
+        let deserialized: KeyboardSpecifier =
+            serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(spec, deserialized);
     }
 }

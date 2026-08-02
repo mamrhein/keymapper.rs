@@ -18,4 +18,4 @@ pub(crate) mod modifier;
 
 pub use key::Key;
 pub(crate) use key::unknown_key_error;
-pub use keyboard::KeyboardInfo;
+pub use keyboard::{KeyboardInfo, KeyboardSpecifier};

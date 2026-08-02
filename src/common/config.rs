@@ -10,7 +10,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use super::{Key, unknown_key_error};
+use super::{Key, KeyboardSpecifier, unknown_key_error};
 
 /// A key event: modifiers held together with a base key press.
 ///
@@ -239,9 +239,11 @@ fn trigger_to_string(event: &KeyEvent) -> String {
 // RuleGroup -- app-scoped collection of mappings
 // ---------------------------------------------------------------------------
 
-/// A named group of key mappings, optionally scoped to specific applications.
+/// A named group of key mappings, optionally scoped to specific applications
+/// and keyboards.
 ///
 /// When `apps` is empty the group applies globally (all applications).
+/// When `keyboards` is empty the group applies to all keyboards.
 /// Groups are evaluated in definition order; the first group whose app
 /// scope matches is used.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +256,11 @@ pub struct RuleGroup {
     /// means the group applies globally.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<String>,
+
+    /// Keyboard filter.  When non-empty the rules in this group only apply to
+    /// events from matching keyboards.  An empty list means all keyboards.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyboards: Vec<KeyboardSpecifier>,
 
     /// Ordered event-to-events mappings.  The first matching rule wins.
     #[serde(default, skip_serializing_if = "MappingTable::is_empty")]
@@ -269,8 +276,16 @@ pub struct RuleGroup {
 /// The document is a sequence of rule groups.  Groups are evaluated in
 /// definition order; within each group, mappings are evaluated in
 /// definition order.  The first matching rule wins.
+///
+/// When `keyboards` is set at the root level, only key events from matching
+/// keyboards are processed.  Omitted or empty means all keyboards.
 #[derive(Debug, Clone, Default)]
 pub struct AppConfig {
+    /// Global keyboard filter.  When `Some` and non-empty, only events from
+    /// matching keyboards are processed at all.  `None` or empty means all
+    /// keyboards.
+    pub keyboards: Option<Vec<KeyboardSpecifier>>,
+
     pub groups: Vec<RuleGroup>,
 }
 
@@ -287,7 +302,8 @@ impl<'de> de::Visitor<'de> for AppConfigVisitor {
         formatter: &mut std::fmt::Formatter,
     ) -> std::fmt::Result {
         formatter.write_str(
-            "a sequence of rule groups or a mapping with a 'groups' key",
+            "a sequence of rule groups or a mapping with 'groups' and/or \
+             'keyboards' keys",
         )
     }
 
@@ -299,22 +315,35 @@ impl<'de> de::Visitor<'de> for AppConfigVisitor {
         while let Some(group) = access.next_element::<RuleGroup>()? {
             groups.push(group);
         }
-        Ok(AppConfig { groups })
+        Ok(AppConfig {
+            keyboards: None,
+            groups,
+        })
     }
 
     fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
     where
         M: de::MapAccess<'de>,
     {
+        let mut keyboards: Option<Vec<KeyboardSpecifier>> = None;
         let mut groups = Vec::<RuleGroup>::new();
         while let Some(key) = access.next_key::<String>()? {
-            if key == "groups" {
-                groups = access.next_value()?;
-            } else {
-                return Err(de::Error::unknown_field(&key, &["groups"]));
+            match key.as_str() {
+                "groups" => {
+                    groups = access.next_value()?;
+                }
+                "keyboards" => {
+                    keyboards = access.next_value()?;
+                }
+                other => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &["groups", "keyboards"],
+                    ));
+                }
             }
         }
-        Ok(AppConfig { groups })
+        Ok(AppConfig { keyboards, groups })
     }
 }
 
@@ -332,7 +361,19 @@ impl Serialize for AppConfig {
     where
         S: serde::Serializer,
     {
-        self.groups.serialize(serializer)
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(None)?;
+        // Only serialize keyboards if it is set and non-empty.
+        if let Some(ref kbs) = self.keyboards
+            && !kbs.is_empty()
+        {
+            map.serialize_entry("keyboards", kbs)?;
+        }
+        // When there are no groups and no keyboards, serialize an empty
+        // sequence to match the primary format.
+        map.serialize_entry("groups", &self.groups)?;
+        map.end()
     }
 }
 
@@ -348,6 +389,19 @@ impl AppConfig {
 
         if self.groups.is_empty() {
             diagnostics.push("no rule groups defined".to_string());
+        }
+
+        // Validate global keyboard specifiers.
+        if let Some(ref kbs) = self.keyboards {
+            for (i, spec) in kbs.iter().enumerate() {
+                if spec.is_empty() {
+                    diagnostics.push(format!(
+                        "global keyboard specifier at index {i} has no \
+                         fields set (at least one of name, vendor, model, or \
+                         port is required)"
+                    ));
+                }
+            }
         }
 
         // Collect all (trigger_key, group_index, group_name) entries to
@@ -366,6 +420,18 @@ impl AppConfig {
 
             if group.mappings.is_empty() {
                 diagnostics.push(format!("'{}' has no mappings", label));
+            }
+
+            // Validate per-group keyboard specifiers.
+            for (i, spec) in group.keyboards.iter().enumerate() {
+                if spec.is_empty() {
+                    diagnostics.push(format!(
+                        "'{}': keyboard specifier at index {i} has no fields \
+                         set (at least one of name, vendor, model, or port \
+                         is required)",
+                        label
+                    ));
+                }
             }
 
             for (trigger, outputs) in group.mappings.iter() {
@@ -398,7 +464,7 @@ impl AppConfig {
             }
         }
 
-        // Circular pairs: A→B and B→A (both single-output rules).
+        // Circular pairs: A\u2192B and B\u2192A (both single-output rules).
         // Check per-group to avoid mappings in other groups overwriting
         // entries that form a circular pair within this group.
         let mut reported_pairs: Vec<(KeyEvent, KeyEvent)> = Vec::new();
@@ -419,7 +485,7 @@ impl AppConfig {
                 if let Some(back) = single_map.get(output)
                     && back == trigger
                 {
-                    // Avoid reporting both A→B and B→A.
+                    // Avoid reporting both A\u2192B and B\u2192A.
                     let pair = if trigger < output {
                         (trigger.clone(), output.clone())
                     } else {
@@ -457,6 +523,7 @@ mod tests {
     fn parse_empty_config() {
         let config = AppConfig::load_from_str("groups: []").unwrap();
         assert!(config.groups.is_empty());
+        assert!(config.keyboards.is_none());
     }
 
     #[test]
@@ -804,7 +871,7 @@ mod tests {
 
     #[test]
     fn error_unknown_top_level_field() {
-        // When using map form, only "groups" is accepted.
+        // When using map form, only "groups" and "keyboards" are accepted.
         let yaml = r#"
 unknown_field:
   - mappings:
@@ -936,5 +1003,202 @@ unknown_field:
                 .any(|i| i.contains("appears in multiple groups"))
         );
         assert!(issues.iter().any(|i| i.contains("circular pair")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Keyboard filter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_global_keyboards() {
+        let yaml = r#"
+keyboards:
+  - name: "Magic Keyboard"
+    vendor: "Apple"
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        assert!(config.keyboards.is_some());
+        let kbs = config.keyboards.as_ref().unwrap();
+        assert_eq!(kbs.len(), 1);
+        assert_eq!(kbs[0].name.as_deref(), Some("Magic Keyboard"));
+        assert_eq!(kbs[0].vendor.as_deref(), Some("Apple"));
+        assert!(config.groups[0].keyboards.is_empty());
+    }
+
+    #[test]
+    fn parse_group_keyboards() {
+        let yaml = r#"
+- name: "external kb rules"
+  keyboards:
+    - vendor: "Logitech"
+    - port: "Bluetooth"
+  mappings:
+    CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        assert!(config.keyboards.is_none());
+        assert_eq!(config.groups[0].keyboards.len(), 2);
+        assert_eq!(
+            config.groups[0].keyboards[0].vendor.as_deref(),
+            Some("Logitech")
+        );
+        assert_eq!(
+            config.groups[0].keyboards[1].port.as_deref(),
+            Some("Bluetooth")
+        );
+    }
+
+    #[test]
+    fn parse_global_and_group_keyboards() {
+        let yaml = r#"
+keyboards:
+  - vendor: "Apple"
+groups:
+  - name: "global rules"
+    mappings:
+      Ctrl+H: LeftArrow
+  - name: "logitech specific"
+    keyboards:
+      - vendor: "Logitech"
+    mappings:
+      CapsLock: Escape
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        assert!(config.keyboards.is_some());
+        assert_eq!(config.groups.len(), 2);
+        assert!(config.groups[0].keyboards.is_empty());
+        assert_eq!(config.groups[1].keyboards.len(), 1);
+    }
+
+    #[test]
+    fn parse_sequence_form_ignores_keyboards() {
+        // When using bare sequence form, keyboards is not available.
+        let yaml = r#"
+- mappings:
+    CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        assert!(config.keyboards.is_none());
+        assert_eq!(config.groups.len(), 1);
+    }
+
+    #[test]
+    fn serialize_roundtrip_with_global_keyboards() {
+        let yaml = r#"
+keyboards:
+  - name: "Magic Keyboard"
+    vendor: "Apple"
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        let config2 = AppConfig::load_from_str(&serialized).unwrap();
+        assert_eq!(config.keyboards, config2.keyboards);
+    }
+
+    #[test]
+    fn serialize_roundtrip_with_group_keyboards() {
+        let yaml = r#"
+groups:
+  - name: "test"
+    keyboards:
+      - vendor: "Logitech"
+        port: "USB"
+    mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        let config2 = AppConfig::load_from_str(&serialized).unwrap();
+        assert_eq!(config.groups[0].keyboards, config2.groups[0].keyboards);
+    }
+
+    #[test]
+    fn serialize_empty_keyboards_omitted() {
+        // When there are no keyboards, the serialized output should not
+        // contain a keyboards key.
+        let yaml = r#"
+- mappings:
+    CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(!serialized.contains("keyboards"));
+    }
+
+    #[test]
+    fn check_rejects_empty_global_keyboard_spec() {
+        let yaml = r#"
+keyboards:
+  - {}
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("global keyboard specifier")),
+            "should reject empty global keyboard specifier"
+        );
+    }
+
+    #[test]
+    fn check_rejects_empty_group_keyboard_spec() {
+        let yaml = r#"
+- name: "test"
+  keyboards:
+    - {}
+  mappings:
+    CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        assert!(
+            issues.iter().any(|i| i.contains("keyboard specifier")),
+            "should reject empty group keyboard specifier"
+        );
+    }
+
+    #[test]
+    fn check_valid_keyboard_spec_is_clean() {
+        let yaml = r#"
+keyboards:
+  - vendor: "Apple"
+groups:
+  - name: "test"
+    keyboards:
+      - name: "Magic Keyboard"
+    mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let issues = config.check();
+        // Should only have the no-mappings issue absent (there IS a mapping).
+        assert!(!issues.iter().any(|i| i.contains("keyboard specifier")));
+    }
+
+    #[test]
+    fn error_unknown_top_level_field_includes_keyboards() {
+        let yaml = r#"
+foo: bar
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let result = AppConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        let err_str = format!("{}", result.unwrap_err());
+        assert!(
+            err_str.contains("keyboards"),
+            "error should list 'keyboards' as a known field"
+        );
     }
 }

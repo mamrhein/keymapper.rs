@@ -345,6 +345,7 @@ fn cmd_config_add(
         config.groups.push(RuleGroup {
             name: Some(group_name.to_string()),
             apps: apps.clone().unwrap_or_default(),
+            keyboards: Vec::new(),
             mappings: Default::default(),
         });
         group = Some(config.groups.last_mut().unwrap());
