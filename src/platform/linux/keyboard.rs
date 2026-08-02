@@ -84,7 +84,20 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         // The device node path is the handle used to open and filter events.
         let device_path = devnode.to_string_lossy().into_owned();
 
-        keyboards.push(KeyboardInfo::new(name, vendor, model, device_path));
+        // Transport type from udev: "usb", "bluetooth", "virtual", etc.
+        let port = udev_device
+            .property_value("ID_BUS")
+            .map(|s| {
+                let bus = s.to_string_lossy();
+                match bus.as_ref() {
+                    "usb" => "USB".to_string(),
+                    "bluetooth" => "Bluetooth".to_string(),
+                    "virtual" => "Virtual".to_string(),
+                    other => other.to_string(),
+                }
+            });
+
+        keyboards.push(KeyboardInfo::new(name, vendor, model, device_path, port));
     }
 
     if keyboards.is_empty() {
@@ -105,12 +118,14 @@ mod tests {
             "TestVendor".into(),
             "TestModel".into(),
             "/dev/input/event0".into(),
+            Some("USB".to_string()),
         );
 
         assert_eq!(info.name, "Test Keyboard");
         assert_eq!(info.vendor, "TestVendor");
         assert_eq!(info.model, "TestModel");
         assert_eq!(info.device, "/dev/input/event0");
+        assert_eq!(info.port, Some("USB".to_string()));
     }
 
     #[test]

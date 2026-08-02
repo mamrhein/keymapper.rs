@@ -23,6 +23,11 @@ pub struct KeyboardInfo {
 
     /// Platform-specific device identifier usable to filter key events.
     pub device: String,
+
+    /// Transport / port type indicating how the device is connected (e.g.
+    /// "USB", "Bluetooth", "Internal").  `None` when the platform cannot
+    /// determine or expose this information.
+    pub port: Option<String>,
 }
 
 impl KeyboardInfo {
@@ -32,12 +37,14 @@ impl KeyboardInfo {
         vendor: String,
         model: String,
         device: String,
+        port: Option<String>,
     ) -> Self {
         Self {
             name,
             vendor,
             model,
             device,
+            port,
         }
     }
 }

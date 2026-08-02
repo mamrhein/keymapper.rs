@@ -109,6 +109,7 @@ fn parse_ioreg_output(output: &str) -> Vec<KeyboardInfo> {
                 "<unknown>".to_string(),
                 "<unknown>".to_string(),
                 "system".to_string(),
+                None,
             ));
         } else if let Some(ref mut kb) = current {
             // Parse property lines.
@@ -137,9 +138,13 @@ fn parse_ioreg_output(output: &str) -> Vec<KeyboardInfo> {
                             kb.device = format!("0x{:08x}", loc);
                         }
                     }
-                    "Transport" if kb.device == "system" => {
-                        // Use transport as prefix for device string.
-                        kb.device = format!("{}:{}", key.to_lowercase(), kb.device);
+                    "Transport" => {
+                        // Record the transport type.  Also use it as prefix
+                        // for device string when device is still the default.
+                        kb.port = Some(value.clone());
+                        if kb.device == "system" {
+                            kb.device = format!("{}:{}", value.to_lowercase(), kb.device);
+                        }
                     }
                     _ => {}
                 }
@@ -186,6 +191,7 @@ fn fallback_keyboards() -> Vec<KeyboardInfo> {
         "Apple".into(),
         "built-in".into(),
         "system".into(), // intercept all keyboards globally
+        Some("Internal".to_string()),
     )]
 }
 
@@ -226,12 +232,14 @@ mod tests {
             "Apple".into(),
             "0x05ac:0xa25a".into(),
             "0x00120000".into(),
+            Some("USB".to_string()),
         );
 
         assert_eq!(info.name, "Magic Keyboard");
         assert_eq!(info.vendor, "Apple");
         assert_eq!(info.model, "0x05ac:0xa25a");
         assert_eq!(info.device, "0x00120000");
+        assert_eq!(info.port, Some("USB".to_string()));
     }
 
     #[test]

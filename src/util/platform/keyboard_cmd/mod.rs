@@ -8,7 +8,7 @@
 // $Revision:
 
 //! Keyboard device listing command.  Prints a table of all detected keyboards
-//! with name, vendor, model, and device identifier.
+//! with name, vendor, model, port type, and device identifier.
 
 use crate::platform::list_keyboards;
 
@@ -31,6 +31,7 @@ pub fn list() {
     let name_width = width_for_column("NAME", &keyboards.iter().map(|k| k.name.as_str()).collect::<Vec<_>>());
     let vendor_width = width_for_column("VENDOR", &keyboards.iter().map(|k| k.vendor.as_str()).collect::<Vec<_>>());
     let model_width = width_for_column("MODEL", &keyboards.iter().map(|k| k.model.as_str()).collect::<Vec<_>>());
+    let port_width = width_for_column("PORT", &keyboards.iter().map(|k| k.port.as_deref().unwrap_or("")).collect::<Vec<_>>());
     let device_width = width_for_column("DEVICE", &keyboards.iter().map(|k| k.device.as_str()).collect::<Vec<_>>());
 
     // Print header.
@@ -40,16 +41,19 @@ pub fn list() {
     print!("  ");
     print_padded("MODEL", model_width);
     print!("  ");
+    print_padded("PORT", port_width);
+    print!("  ");
     println!("DEVICE");
 
     // Print separator.
     let sep = format!(
-        "{}  {}  {}  {}",
-        "─".repeat(name_width),
-        "─".repeat(vendor_width),
-        "─".repeat(model_width),
+        "{}  {}  {}  {}  {}",
+        "\u{2500}".repeat(name_width),
+        "\u{2500}".repeat(vendor_width),
+        "\u{2500}".repeat(model_width),
+        "\u{2500}".repeat(port_width),
         // DEVICE column extends to the end of line.
-        "─".repeat(device_width.max(10)),
+        "\u{2500}".repeat(device_width.max(10)),
     );
     println!("{sep}");
 
@@ -60,6 +64,9 @@ pub fn list() {
         print_padded(&kb.vendor, vendor_width);
         print!("  ");
         print_padded(&kb.model, model_width);
+        print!("  ");
+        let port_str = kb.port.as_deref().unwrap_or("");
+        print_padded(port_str, port_width);
         print!("  ");
         println!("{}", kb.device);
     }
@@ -121,11 +128,13 @@ mod tests {
             "Vendor".into(),
             "Model".into(),
             "device0".into(),
+            Some("USB".to_string()),
         );
 
         assert_eq!(kb.name, "Test");
         assert_eq!(kb.vendor, "Vendor");
         assert_eq!(kb.model, "Model");
         assert_eq!(kb.device, "device0");
+        assert_eq!(kb.port, Some("USB".to_string()));
     }
 }

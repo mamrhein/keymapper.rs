@@ -443,11 +443,29 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
                 .or(Some(hid_serial.clone()))
                 .unwrap_or_else(|| hid_product);
 
+            // Derive transport type from the hardware ID prefix.
+            let port = hardware_id.clone().and_then(|hw_id| {
+                hw_id.split('\n').next().and_then(|first_id| {
+                    if first_id.starts_with("USB") {
+                        Some("USB".to_string())
+                    } else if first_id.starts_with("BTHENUM")
+                        || first_id.starts_with("BTHLEDEV")
+                    {
+                        Some("Bluetooth".to_string())
+                    } else if first_id.starts_with("ACPI") {
+                        Some("Internal".to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
+
             keyboards.push(KeyboardInfo::new(
                 name,
                 vendor,
                 model,
                 interface_path_str,
+                port,
             ));
         }
 
@@ -483,12 +501,14 @@ mod tests {
             "Microsoft".into(),
             "HID\\VID_045E+PID_07FF".into(),
             "\\\\?\\hid#vid_045e+pid_07ff".into(),
+            Some("USB".to_string()),
         );
 
         assert_eq!(info.name, "Microsoft Keyboard");
         assert_eq!(info.vendor, "Microsoft");
         assert_eq!(info.model, "HID\\VID_045E+PID_07FF");
         assert_eq!(info.device, "\\\\?\\hid#vid_045e+pid_07ff");
+        assert_eq!(info.port, Some("USB".to_string()));
     }
 
     #[test]

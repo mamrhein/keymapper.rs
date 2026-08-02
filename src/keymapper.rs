@@ -42,9 +42,9 @@ enum Commands {
 
     /// List all connected keyboard devices.
     ///
-    /// Shows the name, vendor, model, and device identifier for each detected
-    /// keyboard.  The device identifier can be used to filter key events for
-    /// per-device mapping rules.
+    /// Shows the name, vendor, model, port type, and device identifier for
+    /// each detected keyboard.  The device identifier can be used to
+    /// filter key events for per-device mapping rules.
     Keyboards,
 
     /// Key introspection tools.
