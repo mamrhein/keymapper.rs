@@ -34,6 +34,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config_path,
         )?;
 
+    // Discover connected keyboards to populate the device registry.
+    // Used for keyboard filtering at runtime.
+    let keyboards = keymapper::platform::list_keyboards().unwrap_or_default();
+
     // Coerce to dyn MutableLookup at creation time.  The daemon-internal code
     // (watcher, tracker) can call mutation methods via MutableLookup.  A
     // pointer cast produces a dyn Lookup Arc for platform code, which only
@@ -42,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
             initial_cache,
             String::from("unknown"),
+            keyboards,
         )));
 
     // Start hot-reloader thread

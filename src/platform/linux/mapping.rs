@@ -18,16 +18,17 @@ use std::{
 
 use evdev::{Device, EventType, KeyCode};
 use parking_lot::RwLock;
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
-use signal_hook::flag::register;
+use signal_hook::{
+    consts::signal::{SIGINT, SIGTERM},
+    flag::register,
+};
 use udev::Enumerator;
 
+use super::key::Key;
 use crate::{
     common::modifier::ModifierRole,
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
-
-use super::key::Key;
 
 // ---------------------------------------------------------------------------
 // Modifier handling
@@ -153,7 +154,8 @@ const DEFAULT_SEAT: &str = "seat0";
 ///
 /// Strategy (first match wins):
 /// 1. `XDG_SEAT` environment variable.
-/// 2. Parse the session file under `/run/systemd/sessions/<id>` and read the `SEAT=` line.
+/// 2. Parse the session file under `/run/systemd/sessions/<id>` and read the
+///    `SEAT=` line.
 /// 3. Fallback to `seat0`.
 fn determine_seat() -> String {
     // Check the environment first.
@@ -185,9 +187,10 @@ fn determine_seat() -> String {
 /// Find the first keyboard input device that belongs to the current user seat.
 ///
 /// This uses `udevrs` to enumerate devices tagged for the seat and filtered to
-/// keyboards.  If udev enumeration fails or returns no candidates it falls back
-/// to the legacy approach of scanning `/dev/input/event*`.
-pub fn find_keyboard_device() -> Result<Device, Box<dyn std::error::Error>> {
+/// keyboards.  If udev enumeration fails or returns no candidates it falls
+/// back to the legacy approach of scanning `/dev/input/event*`.
+pub fn find_keyboard_device()
+-> Result<(Device, String), Box<dyn std::error::Error>> {
     let seat = determine_seat();
 
     // Try seat-aware udev enumeration first.
@@ -195,8 +198,8 @@ pub fn find_keyboard_device() -> Result<Device, Box<dyn std::error::Error>> {
         Ok(device) => Ok(device),
         Err(e) => {
             eprintln!(
-                "Warning: udev keyboard discovery failed ({e}), falling back to \
-                 /dev/input scan"
+                "Warning: udev keyboard discovery failed ({e}), falling back \
+                 to /dev/input scan"
             );
             find_keyboard_device_fallback()
         }
@@ -206,7 +209,7 @@ pub fn find_keyboard_device() -> Result<Device, Box<dyn std::error::Error>> {
 /// Find a keyboard device for `seat` using udev.
 fn find_keyboard_device_udev(
     seat: &str,
-) -> Result<Device, Box<dyn std::error::Error>> {
+) -> Result<(Device, String), Box<dyn std::error::Error>> {
     let mut enumerator = Enumerator::new()?;
 
     enumerator.match_subsystem("input")?;
@@ -228,16 +231,17 @@ fn find_keyboard_device_udev(
             // Skip pointing devices announced as keyboards
             && !device.supported_events().contains(EventType::ABSOLUTE)
         {
-            return Ok(device);
+            return Ok((device, devnode.to_string_lossy().to_string()));
         }
     }
 
     Err(format!("No keyboard device found for seat {seat}").into())
 }
 
-/// Fallback: scan `/dev/input/event*` and return the first keyboard-capable device.
-fn find_keyboard_device_fallback() -> Result<Device, Box<dyn std::error::Error>>
-{
+/// Fallback: scan `/dev/input/event*` and return the first keyboard-capable
+/// device.
+fn find_keyboard_device_fallback()
+-> Result<(Device, String), Box<dyn std::error::Error>> {
     use std::{fs, path::Path};
 
     let input_path = Path::new("/dev/input");
@@ -253,19 +257,17 @@ fn find_keyboard_device_fallback() -> Result<Device, Box<dyn std::error::Error>>
                 .supported_keys()
                 .is_some_and(|keys| keys.contains(KeyCode::KEY_ENTER))
         {
-            return Ok(device);
+            return Ok((device, path.to_string_lossy().to_string()));
         }
     }
 
-    Err("No keyboard device found. Try: sudo usermod -aG input \
-                    $USER"
-        .into())
+    Err("No keyboard device found. Try: sudo usermod -aG input $USER".into())
 }
 
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut raw_device = find_keyboard_device()?;
+    let (mut raw_device, device_path) = find_keyboard_device()?;
     raw_device.grab()?;
 
     let mut virtual_device = uinput::default()?
@@ -312,8 +314,15 @@ pub fn start_mapping(
                                 guard.active_app(),
                                 code,
                                 lookup_modifiers,
+                                Some(&device_path),
                             )
-                            .or_else(|| guard.global(code, lookup_modifiers))
+                            .or_else(|| {
+                                guard.global(
+                                    code,
+                                    lookup_modifiers,
+                                    Some(&device_path),
+                                )
+                            })
                             .map(|v| v.to_vec());
                         drop(guard);
 
