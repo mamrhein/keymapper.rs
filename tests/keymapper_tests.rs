@@ -696,6 +696,153 @@ fn config_add_with_apps() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn config_add_with_keyboard() {
+    let dir = write_config_dir("add_keyboard", "groups: []");
+
+    let output = Command::new(bin_path())
+        .args([
+            "config",
+            "add",
+            "--group",
+            "apple_kb",
+            "--keyboard",
+            "name=Magic Keyboard,vendor=Apple",
+            "CapsLock",
+            "LeftControl",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run keymapper");
+
+    assert!(
+        output.status.success(),
+        "keymapper exited with {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let contents = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+    assert!(contents.contains("Magic Keyboard"));
+    assert!(contents.contains("Apple"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn config_add_with_keyboards_global() {
+    let dir = write_config_dir("add_kb_global", "groups: []");
+
+    let output = Command::new(bin_path())
+        .args([
+            "config",
+            "add",
+            "--keyboards-global",
+            "port=USB",
+            "CapsLock",
+            "LeftControl",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run keymapper");
+
+    assert!(
+        output.status.success(),
+        "keymapper exited with {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let contents = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+    assert!(contents.contains("keyboards:"));
+    assert!(contents.contains("port: USB"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn config_add_with_multiple_keyboards() {
+    let dir = write_config_dir("add_multi_kb", "groups: []");
+
+    let output = Command::new(bin_path())
+        .args([
+            "config",
+            "add",
+            "--group",
+            "multi_kb",
+            "--keyboard",
+            "name=Magic Keyboard",
+            "--keyboard",
+            "vendor=Logitech",
+            "CapsLock",
+            "LeftControl",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run keymapper");
+
+    assert!(
+        output.status.success(),
+        "keymapper exited with {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let contents = std::fs::read_to_string(dir.join("config.yaml")).unwrap();
+    assert!(contents.contains("Magic Keyboard"));
+    assert!(contents.contains("Logitech"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn config_add_invalid_keyboard_fails() {
+    let dir = write_config_dir("add_bad_kb", "groups: []");
+
+    let output = Command::new(bin_path())
+        .args([
+            "config",
+            "add",
+            "--keyboard",
+            "invalid_format_no_equals",
+            "CapsLock",
+            "LeftControl",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run keymapper");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("invalid --keyboard"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn config_add_keyboard_unknown_field_fails() {
+    let dir = write_config_dir("add_kb_unknown_field", "groups: []");
+
+    let output = Command::new(bin_path())
+        .args([
+            "config",
+            "add",
+            "--keyboard",
+            "unknown=field",
+            "CapsLock",
+            "LeftControl",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("failed to run keymapper");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ---------------------------------------------------------------------------
 // server status / start subcommands
 // ---------------------------------------------------------------------------
