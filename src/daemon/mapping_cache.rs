@@ -11,7 +11,10 @@ use std::{fs, path::Path};
 
 use indexmap::IndexMap;
 
-use crate::{common::config::AppConfig, platform::Key};
+use crate::{
+    common::{config::AppConfig, keyboard::KeyboardSpecifier},
+    platform::Key,
+};
 
 // ---------------------------------------------------------------------------
 // Modifier bitmask layout (u8): specific key bits only.
@@ -46,6 +49,10 @@ pub struct CompiledRule {
     pub modifiers: u8,
     /// Output events to emit when this rule matches.
     pub outputs: Vec<NativeKey>,
+    /// Per-rule keyboard filter. `None` means the rule matches all
+    /// keyboards; when set, only events from matching keyboards trigger
+    /// this rule.
+    pub keyboards: Option<Vec<KeyboardSpecifier>>,
 }
 
 /// Compiled key-mapping cache optimised for fast runtime lookups.
@@ -60,6 +67,8 @@ pub struct RuntimeLookupCache {
     process_rules: IndexMap<String, Vec<CompiledRule>>,
     /// Global rules: list of compiled rules.
     global_rules: Vec<CompiledRule>,
+    /// Global keyboard filter. `None` means all keyboards pass.
+    global_keyboards: Option<Vec<KeyboardSpecifier>>,
 }
 
 impl RuntimeLookupCache {
@@ -72,6 +81,10 @@ impl RuntimeLookupCache {
 
     pub(crate) fn global_rules(&self) -> &Vec<CompiledRule> {
         &self.global_rules
+    }
+
+    pub(crate) fn global_keyboards(&self) -> Option<&Vec<KeyboardSpecifier>> {
+        self.global_keyboards.as_ref()
     }
 }
 
@@ -99,6 +112,14 @@ impl RuntimeLookupCache {
             IndexMap::new();
         let mut global_rules: Vec<CompiledRule> = Vec::new();
 
+        // Extract the global keyboard filter.  Treat empty lists as no
+        // filter to match the config semantics.
+        let global_keyboards = app_config
+            .keyboards
+            .as_ref()
+            .filter(|kbs| !kbs.is_empty())
+            .cloned();
+
         // Iterate groups in definition order.  First-match-wins is
         // guaranteed by preserving insertion order.
         for group in &app_config.groups {
@@ -107,6 +128,14 @@ impl RuntimeLookupCache {
             }
 
             let apps: Vec<String> = group.apps.clone();
+
+            // Capture the per-group keyboard filter.  An empty list means
+            // no restriction, consistent with config semantics.
+            let group_keyboards = if group.keyboards.is_empty() {
+                None
+            } else {
+                Some(group.keyboards.clone())
+            };
 
             for (trigger, outputs) in group.mappings.iter() {
                 let native_outputs = compile_outputs(outputs);
@@ -123,6 +152,7 @@ impl RuntimeLookupCache {
                         base: trigger_base,
                         modifiers: mod_bits,
                         outputs: native_outputs.clone(),
+                        keyboards: group_keyboards.clone(),
                     };
 
                     if apps.is_empty() {
@@ -141,6 +171,7 @@ impl RuntimeLookupCache {
         RuntimeLookupCache {
             process_rules,
             global_rules,
+            global_keyboards,
         }
     }
 }
@@ -566,5 +597,167 @@ mod tests {
             cache.global_rules()[1].outputs[0].base,
             Key::RightControl.as_native()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // keyboard filter compilation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compile_global_keyboard_filter() {
+        let yaml = r#"
+keyboards:
+  - name: "Magic Keyboard"
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        // Global filter is stored.
+        let kbs = cache.global_keyboards();
+        assert!(kbs.is_some());
+        let kbs = kbs.unwrap();
+        assert_eq!(kbs.len(), 1);
+        assert_eq!(kbs[0].name.as_deref(), Some("Magic Keyboard"));
+    }
+
+    #[test]
+    fn compile_no_global_keyboard_filter_when_omitted() {
+        let yaml = r#"
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        // No global filter.
+        assert!(cache.global_keyboards().is_none());
+    }
+
+    #[test]
+    fn compile_no_global_keyboard_filter_when_empty() {
+        let yaml = r#"
+keyboards: []
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        // Empty list is treated as no filter.
+        assert!(cache.global_keyboards().is_none());
+    }
+
+    #[test]
+    fn compile_per_group_keyboard_filter() {
+        let yaml = r#"
+groups:
+  - name: "magic only"
+    keyboards:
+      - name: "Magic Keyboard"
+        vendor: "Apple"
+    mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        // The compiled rule carries the group's keyboard filter.
+        assert_eq!(cache.global_rules().len(), 1);
+        let rule = &cache.global_rules()[0];
+        assert!(rule.keyboards.is_some());
+        let kbs = rule.keyboards.as_ref().unwrap();
+        assert_eq!(kbs.len(), 1);
+        assert_eq!(kbs[0].name.as_deref(), Some("Magic Keyboard"));
+        assert_eq!(kbs[0].vendor.as_deref(), Some("Apple"));
+    }
+
+    #[test]
+    fn compile_no_per_rule_filter_when_group_has_none() {
+        let yaml = r#"
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        // No per-rule filter when the group has no keyboards.
+        let rule = &cache.global_rules()[0];
+        assert!(rule.keyboards.is_none());
+    }
+
+    #[test]
+    fn compile_keyboard_filter_expands_with_modifiers() {
+        // "Ctrl+A" expands to two rules; both inherit the same keyboard
+        // filter from the group.
+        let yaml = r#"
+groups:
+  - keyboards:
+      - vendor: "Logitech"
+    mappings:
+      Ctrl+A: F1
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        assert_eq!(cache.global_rules().len(), 2);
+        for rule in cache.global_rules() {
+            assert!(rule.keyboards.is_some());
+            let kbs = rule.keyboards.as_ref().unwrap();
+            assert_eq!(kbs[0].vendor.as_deref(), Some("Logitech"));
+        }
+    }
+
+    #[test]
+    fn compile_app_scoped_rule_inherits_group_keyboards() {
+        let yaml = r#"
+groups:
+  - name: "app rules"
+    apps: [MyApp]
+    keyboards:
+      - name: "Magic Keyboard"
+    mappings:
+      Ctrl+H: LeftArrow
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        let rules = cache.process_rules("MyApp").expect("MyApp rules");
+        assert!(!rules.is_empty());
+        for rule in rules {
+            assert!(rule.keyboards.is_some());
+            let kbs = rule.keyboards.as_ref().unwrap();
+            assert_eq!(kbs[0].name.as_deref(), Some("Magic Keyboard"));
+        }
+    }
+
+    #[test]
+    fn compile_global_and_per_group_filters_independently() {
+        let yaml = r#"
+keyboards:
+  - vendor: "Apple"
+groups:
+  - name: "magic only"
+    keyboards:
+      - name: "Magic Keyboard"
+    mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+
+        // Both global and per-rule filters are independently stored.
+        let gk = cache.global_keyboards();
+        assert!(gk.is_some());
+        assert_eq!(gk.as_ref().unwrap()[0].vendor.as_deref(), Some("Apple"));
+
+        let rk = cache.global_rules()[0].keyboards.as_ref();
+        assert!(rk.is_some());
+        assert_eq!(rk.unwrap()[0].name.as_deref(), Some("Magic Keyboard"));
     }
 }
