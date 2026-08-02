@@ -84,19 +84,23 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         let device_path = devnode.to_string_lossy().into_owned();
 
         // Transport type from udev: "usb", "bluetooth", "virtual", etc.
-        let port = udev_device
-            .property_value("ID_BUS")
-            .map(|s| {
-                let bus = s.to_string_lossy();
-                match bus.as_ref() {
-                    "usb" => "USB".to_string(),
-                    "bluetooth" => "Bluetooth".to_string(),
-                    "virtual" => "Virtual".to_string(),
-                    other => other.to_string(),
-                }
-            });
+        let port = udev_device.property_value("ID_BUS").map(|s| {
+            let bus = s.to_string_lossy();
+            match bus.as_ref() {
+                "usb" => "USB".to_string(),
+                "bluetooth" => "Bluetooth".to_string(),
+                "virtual" => "Virtual".to_string(),
+                other => other.to_string(),
+            }
+        });
 
-        keyboards.push(KeyboardInfo::new(name, vendor, model, device_path, port));
+        keyboards.push(KeyboardInfo::new(
+            name,
+            vendor,
+            model,
+            device_path,
+            port,
+        ));
     }
 
     if keyboards.is_empty() {

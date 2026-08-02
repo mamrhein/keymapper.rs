@@ -143,7 +143,11 @@ fn parse_ioreg_output(output: &str) -> Vec<KeyboardInfo> {
                         // for device string when device is still the default.
                         kb.port = Some(value.clone());
                         if kb.device == "system" {
-                            kb.device = format!("{}:{}", value.to_lowercase(), kb.device);
+                            kb.device = format!(
+                                "{}:{}",
+                                value.to_lowercase(),
+                                kb.device
+                            );
                         }
                     }
                     _ => {}

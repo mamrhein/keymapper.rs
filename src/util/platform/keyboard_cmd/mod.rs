@@ -28,11 +28,41 @@ pub fn list() {
     }
 
     // Calculate column widths.
-    let name_width = width_for_column("NAME", &keyboards.iter().map(|k| k.name.as_str()).collect::<Vec<_>>());
-    let vendor_width = width_for_column("VENDOR", &keyboards.iter().map(|k| k.vendor.as_str()).collect::<Vec<_>>());
-    let model_width = width_for_column("MODEL", &keyboards.iter().map(|k| k.model.as_str()).collect::<Vec<_>>());
-    let port_width = width_for_column("PORT", &keyboards.iter().map(|k| k.port.as_deref().unwrap_or("")).collect::<Vec<_>>());
-    let device_width = width_for_column("DEVICE", &keyboards.iter().map(|k| k.device.as_str()).collect::<Vec<_>>());
+    let name_width = width_for_column(
+        "NAME",
+        &keyboards
+            .iter()
+            .map(|k| k.name.as_str())
+            .collect::<Vec<_>>(),
+    );
+    let vendor_width = width_for_column(
+        "VENDOR",
+        &keyboards
+            .iter()
+            .map(|k| k.vendor.as_str())
+            .collect::<Vec<_>>(),
+    );
+    let model_width = width_for_column(
+        "MODEL",
+        &keyboards
+            .iter()
+            .map(|k| k.model.as_str())
+            .collect::<Vec<_>>(),
+    );
+    let port_width = width_for_column(
+        "PORT",
+        &keyboards
+            .iter()
+            .map(|k| k.port.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>(),
+    );
+    let device_width = width_for_column(
+        "DEVICE",
+        &keyboards
+            .iter()
+            .map(|k| k.device.as_str())
+            .collect::<Vec<_>>(),
+    );
 
     // Print header.
     print_padded("NAME", name_width);
