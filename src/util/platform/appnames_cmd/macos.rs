@@ -7,35 +7,20 @@
 // $Source$
 // $Revision$
 
-#![allow(non_upper_case_globals)]
-
 //! Lists visible application names using CoreGraphics.
 //!
 //! The returned `app_name` is the value of `kCGWindowOwnerName` from
 //! `CGWindowListCopyWindowInfo`, which is exactly what `active-win-pos-rs`
 //! returns for the active window on macOS.
 
-use std::ffi::c_void;
+use std::{ffi::c_void, ptr::NonNull};
 
-use core_foundation::{
-    array::CFArrayGetTypeID,
-    base::{CFGetTypeID, CFRelease, TCFType},
-    dictionary::CFDictionaryGetTypeID,
-    number::CFNumberGetTypeID,
-    string::{CFString, CFStringGetTypeID},
+use objc2_core_foundation::{
+    CFDictionary, CFNumber, CFRetained, CFString, CFType,
 };
-use core_graphics::display::{
-    CFArrayRef, CFDictionaryGetValueIfPresent, CFDictionaryRef,
-    CGWindowListCopyWindowInfo,
+use objc2_core_graphics::{
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
 };
-
-// CoreGraphics window list option constants.  These used to be re-exported
-// from core_graphics::display but are now private in core-graphics 0.25.
-// Defined locally to match the macOS CoreGraphics API.
-pub(crate) type CGWindowListOption = u32;
-const kCGNullWindowID: u32 = 0;
-const kCGWindowListOptionOnScreenOnly: CGWindowListOption = 1 << 0;
-const kCGWindowListExcludeDesktopElements: CGWindowListOption = 1 << 4;
 
 /// Internal record used for deduplication.
 struct WindowInfo {
@@ -43,168 +28,113 @@ struct WindowInfo {
     app_name: String,
 }
 
-/// CoreFoundation number type constants and FFI.
-#[allow(non_upper_case_globals)]
-mod cf_number {
-    use std::ffi::c_void;
+/// Try to extract a numeric value for `key` from a dictionary.
+fn get_number(dict: &CFDictionary, key: &str) -> Option<i64> {
+    let cf_key = CFString::from_str(key);
 
-    use core_foundation::number::CFNumberType;
+    let value = get_value_from_dict(dict, &cf_key)?;
 
-    // SInt32 and SInt64 are the types used by CG window info.
-    pub const kCFNumberSInt32Type: CFNumberType = 3;
-    pub const kCFNumberSInt64Type: CFNumberType = 4;
+    // Downcast to CFNumber.
+    let cf_number = value.downcast::<CFNumber>().ok()?;
 
-    unsafe extern "C" {
-        #[link_name = "CFNumberGetType"]
-        pub fn CFNumberGetType(num: *const c_void) -> CFNumberType;
-
-        #[link_name = "CFNumberGetValue"]
-        pub fn CFNumberGetValue(
-            num: *const c_void,
-            theType: CFNumberType,
-            valuePtr: *mut c_void,
-        ) -> bool;
+    // Try SInt64 first, then fall back to SInt32. These are the types
+    // used by CG window info dictionaries.
+    if let Some(val) = cf_number.as_i64() {
+        Some(val)
+    } else {
+        cf_number.as_i32().map(|val| val as i64)
     }
 }
 
-/// Try to extract a numeric value for `key` from a CFDictionaryRef.
-fn get_number(dict: CFDictionaryRef, key: &str) -> Option<i64> {
-    let cf_key = CFString::new(key);
+/// Try to extract a string value for `key` from a dictionary.
+fn get_string(dict: &CFDictionary, key: &str) -> Option<String> {
+    let cf_key = CFString::from_str(key);
 
-    unsafe {
-        let mut out_value: *const c_void = std::ptr::null();
-        let found = CFDictionaryGetValueIfPresent(
-            dict,
-            cf_key.as_concrete_TypeRef() as *const c_void,
-            &mut out_value,
-        );
+    let value = get_value_from_dict(dict, &cf_key)?;
 
-        if found == 0 || out_value.is_null() {
-            return None;
-        }
+    // Downcast to CFString.
+    let cf_string = value.downcast::<CFString>().ok()?;
 
-        // Check that it's a CFNumber.
-        if CFGetTypeID(out_value) != CFNumberGetTypeID() {
-            return None;
-        }
-
-        let num_type = cf_number::CFNumberGetType(out_value);
-
-        // Try SInt64 first.
-        if num_type == cf_number::kCFNumberSInt64Type {
-            let mut out: i64 = 0;
-            if cf_number::CFNumberGetValue(
-                out_value,
-                num_type,
-                &mut out as *mut _ as *mut c_void,
-            ) {
-                return Some(out);
-            }
-        }
-
-        // Try SInt32.
-        if num_type == cf_number::kCFNumberSInt32Type {
-            let mut out: i32 = 0;
-            if cf_number::CFNumberGetValue(
-                out_value,
-                num_type,
-                &mut out as *mut _ as *mut c_void,
-            ) {
-                return Some(out as i64);
-            }
-        }
-
+    let rust_str = cf_string.to_string();
+    if rust_str.is_empty() {
         None
+    } else {
+        Some(rust_str)
     }
 }
 
-/// Try to extract a string value for `key` from a CFDictionaryRef.
-fn get_string(dict: CFDictionaryRef, key: &str) -> Option<String> {
-    let cf_key = CFString::new(key);
-
+/// Get a value from a CFDictionary<Opaque, Opaque> as a CFRetained<CFType>.
+///
+/// Uses the raw-pointer `value_if_present` API because the generic `get()`
+/// requires typed dictionaries.
+fn get_value_from_dict(
+    dict: &CFDictionary,
+    key: &CFString,
+) -> Option<CFRetained<CFType>> {
     unsafe {
-        let mut out_value: *const c_void = std::ptr::null();
-        let found = CFDictionaryGetValueIfPresent(
-            dict,
-            cf_key.as_concrete_TypeRef() as *const c_void,
-            &mut out_value,
+        let mut out_ptr: *const c_void = std::ptr::null();
+        let found = dict.value_if_present(
+            key as *const CFString as *const c_void,
+            &mut out_ptr,
         );
 
-        if found == 0 || out_value.is_null() {
+        if !found || out_ptr.is_null() {
             return None;
         }
 
-        // Check that it's a CFString.
-        if CFGetTypeID(out_value) != CFStringGetTypeID() {
-            return None;
-        }
-
-        // Wrap the raw pointer to extract the string.  We use
-        // wrap_under_get_rule because we don't own a retain — the
-        // dictionary does.
-        let s = CFString::wrap_under_get_rule(out_value as *mut _);
-        let rust_str = s.to_string();
-
-        if rust_str.is_empty() {
-            None
-        } else {
-            Some(rust_str)
-        }
+        // The dictionary owns this pointer, so we retain it.
+        Some(CFRetained::retain(NonNull::new_unchecked(
+            out_ptr as *mut CFType,
+        )))
     }
 }
 
 /// Enumerate all on-screen windows and extract unique application names.
 pub fn list_app_names() -> Vec<String> {
-    unsafe {
-        let options: CGWindowListOption = kCGWindowListOptionOnScreenOnly
-            | kCGWindowListExcludeDesktopElements;
+    let options = CGWindowListOption::OptionOnScreenOnly
+        | CGWindowListOption::ExcludeDesktopElements;
 
-        let raw_array: CFArrayRef =
-            CGWindowListCopyWindowInfo(options, kCGNullWindowID);
-
-        if raw_array.is_null() {
-            return Vec::new();
-        }
-
-        // Verify it's actually a CFArray.
-        if CFGetTypeID(raw_array as *const c_void) != CFArrayGetTypeID() {
-            CFRelease(raw_array as *const c_void);
-            return Vec::new();
-        }
-
-        let result = list_from_array(raw_array);
-        CFRelease(raw_array as *const c_void);
-        result
-    }
-}
-
-/// Extract app names from a CFArrayRef of window dictionaries.
-fn list_from_array(raw_array: CFArrayRef) -> Vec<String> {
-    use core_foundation_sys::array::{
-        CFArrayGetCount, CFArrayGetValueAtIndex,
+    let Some(array) = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+    else {
+        return Vec::new();
     };
 
+    list_from_array(&array)
+}
+
+/// Extract app names from a CFArray of window dictionaries.
+fn list_from_array(
+    array: &CFRetained<objc2_core_foundation::CFArray>,
+) -> Vec<String> {
+    // Dereference to &CFArray for the FFI-style accessor functions.
+    let cf_array: &objc2_core_foundation::CFArray = array;
+
     unsafe {
-        let count = CFArrayGetCount(raw_array);
+        let count = cf_array.count();
 
         let mut seen: Vec<WindowInfo> = Vec::new();
 
         for i in 0..count {
-            let value_ptr = CFArrayGetValueAtIndex(raw_array, i);
+            let value_ptr = cf_array.value_at_index(i);
 
             if value_ptr.is_null() {
                 continue;
             }
 
-            let dict = value_ptr as CFDictionaryRef;
+            // The array owns this pointer, so we retain it.
+            let cf_type = CFRetained::retain(NonNull::new_unchecked(
+                value_ptr as *mut CFType,
+            ));
 
-            // Check it's a CFDictionary.
-            if CFGetTypeID(dict as *const c_void) != CFDictionaryGetTypeID() {
+            // Check that it's a CFDictionary.
+            if cf_type.downcast_ref::<CFDictionary>().is_none() {
                 continue;
             }
 
+            let dict = cf_type.downcast::<CFDictionary>().unwrap();
+
             // Get window owner PID — skip if missing or zero.
-            let Some(pid) = get_number(dict, "kCGWindowOwnerPID") else {
+            let Some(pid) = get_number(&dict, "kCGWindowOwnerPID") else {
                 continue;
             };
             if pid == 0 {
@@ -212,7 +142,8 @@ fn list_from_array(raw_array: CFArrayRef) -> Vec<String> {
             }
 
             // Get the application name — skip if missing or empty.
-            let Some(app_name) = get_string(dict, "kCGWindowOwnerName") else {
+            let Some(app_name) = get_string(&dict, "kCGWindowOwnerName")
+            else {
                 continue;
             };
 

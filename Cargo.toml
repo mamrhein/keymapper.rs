@@ -47,11 +47,8 @@ sysinfo = "0.39" # process enumeration for `keymapper appnames`
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
-objc2-core-graphics = "0.3"
-objc2-core-foundation = { version = "0.3", features = ["CFRunLoop"] }
-core-graphics = "0.25" # window enumeration for `keymapper appnames`
-core-foundation = "0.10" # CFDictionary parsing for `keymapper appnames`
-core-foundation-sys = "0.8" # raw CFArray/CFNumber FFI for `keymapper appnames`
+objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary"] }
 
 # Windows-specific system bindings
 [target.'cfg(target_os = "windows")'.dependencies]

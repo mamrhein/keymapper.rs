@@ -9,9 +9,9 @@
 
 //! Platform-specific implementations of CLI commands.
 
-#[cfg(target_os = "linux")]
-pub mod linux;
 pub mod appnames_cmd;
 pub mod keyboard_cmd;
 pub mod keys_cmd;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod server_cmd;
