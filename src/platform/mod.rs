@@ -21,6 +21,8 @@ pub(crate) use linux::find_keyboard_device;
 #[cfg(target_os = "linux")]
 pub use linux::{Key, list_keyboards, start_mapping};
 #[cfg(target_os = "macos")]
+pub(crate) use macos::get_active_app_name;
+#[cfg(target_os = "macos")]
 pub use macos::{Key, list_keyboards, start_mapping};
 #[cfg(target_os = "windows")]
 pub use windows::{Key, list_keyboards, start_mapping};
