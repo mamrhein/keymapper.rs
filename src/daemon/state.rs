@@ -44,30 +44,26 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
         keyboard_device_id: Option<&str>,
     ) -> Option<&[NativeKey]>;
 
-    /// Name of the currently foreground application.  Returns an
-    /// `Arc<str>` so callers can read without cloning.
-    fn active_app(&self) -> &Arc<str>;
+    /// Name of the currently foreground application.  Queries the platform
+    /// synchronously and returns the result as an `Arc<str>`.
+    fn active_app(&self) -> Arc<str>;
 }
 
 /// Mutable operations on the runtime state.  Only the daemon internal code
-/// (hot-reloader and app tracker) needs this; platform modules depend solely
-/// on the read-only [`Lookup`] trait.  External callers cannot implement this
-/// trait because [`RuntimeState`] has private fields.
+/// (hot-reloader) needs this; platform modules depend solely on the read-only
+/// [`Lookup`] trait.  External callers cannot implement this trait because
+/// [`RuntimeState`] has private fields.
 pub trait MutableLookup: Lookup {
-    /// Update the foreground application name (called behind a write lock).
-    fn set_active_app(&mut self, app: String);
-
     /// Replace the compiled lookup cache (called by hot-reloader behind
     /// a write lock).
     fn set_lookup_cache(&mut self, cache: RuntimeLookupCache);
 }
 
-/// Live runtime state shared between the config hot-reloader, the foreground-
-/// app tracker, and the platform-specific event tap.
+/// Live runtime state shared between the config hot-reloader and the
+/// platform-specific event tap.
 #[derive(Debug)]
 pub struct RuntimeState {
     lookup_cache: RuntimeLookupCache,
-    active_app: Arc<str>,
     /// Maps platform device identifiers to full keyboard metadata.  Populated
     /// at startup from the platform's keyboard discovery and used to resolve
     /// device IDs to [`KeyboardInfo`] for keyboard filtering.
@@ -77,12 +73,10 @@ pub struct RuntimeState {
 impl RuntimeState {
     pub fn new(
         cache: RuntimeLookupCache,
-        app: String,
         keyboards: Vec<KeyboardInfo>,
     ) -> Self {
         Self {
             lookup_cache: cache,
-            active_app: app.into(),
             keyboard_registry: keyboards
                 .into_iter()
                 .map(|kb| (kb.device.clone(), kb))
@@ -193,16 +187,12 @@ impl Lookup for RuntimeState {
         )
     }
 
-    fn active_app(&self) -> &Arc<str> {
-        &self.active_app
+    fn active_app(&self) -> Arc<str> {
+        crate::platform::get_active_app_name().into()
     }
 }
 
 impl MutableLookup for RuntimeState {
-    fn set_active_app(&mut self, app: String) {
-        self.active_app = app.into();
-    }
-
     fn set_lookup_cache(&mut self, cache: RuntimeLookupCache) {
         self.lookup_cache = cache;
     }
@@ -258,7 +248,7 @@ mod tests {
     fn build_state(yaml: &str, keyboards: Vec<KeyboardInfo>) -> RuntimeState {
         let config = AppConfig::load_from_str(yaml).unwrap();
         let cache = RuntimeLookupCache::compile_from_config(&config);
-        RuntimeState::new(cache, "unknown".to_string(), keyboards)
+        RuntimeState::new(cache, keyboards)
     }
 
     // -----------------------------------------------------------------------

@@ -15,9 +15,7 @@
 
 use x11rb::{
     connection::Connection,
-    protocol::xproto::{
-        AtomEnum, Connection as _, GetPropertyCookie, GetPropertyReply, Window,
-    },
+    protocol::xproto::{AtomEnum, Connection as _, GetPropertyCookie, Window},
     xapi::Atomic,
 };
 
@@ -34,22 +32,21 @@ pub fn get_active_app_name() -> String {
 
     // Step 1: Intern the _NET_ACTIVE_WINDOW atom.
     let net_active_atom = match intern_atom(&conn, b"_NET_ACTIVE_WINDOW") {
-        Ok(atom) => atom,
-        Err(_) => return "unknown".to_string(),
+        Ok(atom) if atom != 0 => atom,
+        _ => return "unknown".to_string(),
     };
 
     // Step 2: Query the root window for the active window ID.
     let active_window =
         match get_window_property_atom(&conn, root_window, net_active_atom) {
-            Ok(Some(wid)) => wid,
-            Ok(None) => return "unknown".to_string(),
-            Err(_) => return "unknown".to_string(),
+            Ok(Some(wid)) if wid != 0 => wid,
+            _ => return "unknown".to_string(),
         };
 
     // Step 3: Read _NET_WM_NAME (UTF-8) from the active window.
     let utf8_name_atom = match intern_atom(&conn, b"_NET_WM_NAME") {
-        Ok(atom) => atom,
-        Err(_) => return "unknown".to_string(),
+        Ok(atom) if atom != 0 => atom,
+        _ => return "unknown".to_string(),
     };
 
     if let Some(name) =
@@ -70,20 +67,16 @@ pub fn get_active_app_name() -> String {
     "unknown".to_string()
 }
 
-/// Intern an atom name, returning its XID.
+/// Intern an atom name, returning its XID (u32).
 fn intern_atom<C: Connection>(
     conn: &C,
     name: &[u8],
-) -> x11rb::utils::Remember {
+) -> Result<u32, x11rb::protocol::xerror::X11Error> {
     use x11rb::protocol::xproto::Connection as _;
 
-    match conn
-        .intern_atom(false, name)
-        .and_then(|c| conn.wait_for_reply(c))
-    {
-        Ok(reply) => reply.atom,
-        Err(_) => 0,
-    }
+    let cookie = conn.intern_atom(false, name)?;
+    let reply = conn.wait_for_reply(cookie)?;
+    Ok(reply.atom)
 }
 
 /// Query a window property that holds an ATOM value.
@@ -91,7 +84,7 @@ fn get_window_property_atom<C: Connection>(
     conn: &C,
     window: Window,
     property_atom: u32,
-) -> Result<Option<u32>, x11rb::protocol::xproto::GenericError>
+) -> Result<Option<u32>, x11rb::protocol::xerror::X11Error>
 where
     GetPropertyCookie: Atomic<C>,
 {
@@ -104,13 +97,12 @@ where
         AtomEnum::ATOM,
         0,
         1, // request 1 ATOM (4 bytes).
-    );
+    )?;
     let reply = conn.wait_for_reply(cookie)?;
 
     if reply.value_len > 0 {
         // The value is a sequence of 4-byte integers (ATOMs).
-        let atoms: Vec<u32> = reply.value32().into_iter().copied().collect();
-        Ok(atoms.first().copied())
+        Ok(reply.value32().first().copied())
     } else {
         Ok(None)
     }
@@ -129,14 +121,16 @@ where
 
     // Request up to 4096 32-bit chunks (16 KiB), more than enough for a
     // window title.
-    let cookie = conn.get_property(
-        false,
-        window,
-        property_atom,
-        AtomEnum::ANY_PROP_TYPE,
-        0,
-        4096,
-    );
+    let cookie = conn
+        .get_property(
+            false,
+            window,
+            property_atom,
+            AtomEnum::ANY_PROP_TYPE,
+            0,
+            4096,
+        )
+        .ok()?;
 
     let reply = conn.wait_for_reply(cookie).ok()?;
     if reply.value_len == 0 {
@@ -145,5 +139,5 @@ where
 
     // The property value is raw bytes.  _NET_WM_NAME is UTF-8; WM_NAME is
     // Latin-1, but we decode both as lossy UTF-8 for simplicity.
-    String::from_utf8_lossy(&reply.value).into_owned().into()
+    Some(String::from_utf8_lossy(&reply.value).into_owned())
 }

@@ -277,7 +277,7 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
 
     let guard = context.lookup.read();
     let active_outputs = guard
-        .for_app(guard.active_app(), native_key, lookup_modifiers, None)
+        .for_app(&guard.active_app(), native_key, lookup_modifiers, None)
         .or_else(|| guard.global(native_key, lookup_modifiers, None))
         .map(|v| v.to_vec());
     drop(guard);

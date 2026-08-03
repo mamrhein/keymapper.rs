@@ -12,7 +12,8 @@
 use windows_sys::Win32::{
     Foundation::{CloseHandle, FALSE, HWND},
     System::ProcessStatus::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     },
     UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
 };
@@ -36,9 +37,8 @@ pub fn get_active_app_name() -> String {
     }
 
     // Open the process with minimal permissions to query its image name.
-    let process = unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)
-    };
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
     if process.is_empty() {
         return "unknown".to_string();
     }

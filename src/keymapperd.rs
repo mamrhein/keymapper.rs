@@ -39,15 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keyboards = keymapper::platform::list_keyboards().unwrap_or_default();
 
     // Coerce to dyn MutableLookup at creation time.  The daemon-internal code
-    // (watcher, tracker) can call mutation methods via MutableLookup.  A
-    // pointer cast produces a dyn Lookup Arc for platform code, which only
-    // needs the read-only interface.  Both Arcs share the same allocation.
-    let state: Arc<RwLock<dyn MutableLookup>> =
-        Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
-            initial_cache,
-            String::from("unknown"),
-            keyboards,
-        )));
+    // (watcher) can call mutation methods via MutableLookup.  A pointer cast
+    // produces a dyn Lookup Arc for platform code, which only needs the
+    // read-only interface.  Both Arcs share the same allocation.
+    let state: Arc<RwLock<dyn MutableLookup>> = Arc::new(RwLock::new(
+        keymapper::daemon::state::RuntimeState::new(initial_cache, keyboards),
+    ));
 
     // Start hot-reloader thread
     let _watcher = keymapper::daemon::watcher::start_config_watcher(

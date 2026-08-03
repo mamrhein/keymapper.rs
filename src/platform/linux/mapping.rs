@@ -311,7 +311,7 @@ pub fn start_mapping(
                         let guard = lookup.read();
                         let active_outputs = guard
                             .for_app(
-                                guard.active_app(),
+                                &guard.active_app(),
                                 code,
                                 lookup_modifiers,
                                 Some(&device_path),

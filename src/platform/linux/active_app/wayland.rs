@@ -46,12 +46,7 @@ pub fn get_active_app_name() -> String {
 fn query_kde() -> String {
     #[cfg(feature = "wayland")]
     {
-        use zbus::blocking::{Connection, Proxy};
-
-        let conn = match Connection::session() {
-            Ok(c) => c,
-            Err(_) => return String::new(),
-        };
+        use zbus::blocking::Proxy;
 
         // KWin's Workspace3 interface exposes activeWindow() which returns
         // the PID of the active window.
@@ -84,12 +79,7 @@ fn query_kde() -> String {
 fn query_gnome() -> String {
     #[cfg(feature = "wayland")]
     {
-        use zbus::blocking::{Connection, Proxy};
-
-        let conn = match Connection::session() {
-            Ok(c) => c,
-            Err(_) => return String::new(),
-        };
+        use zbus::blocking::Proxy;
 
         // GNOME Shell exposes a read-only Eval interface that can run
         // JavaScript in the shell context.  We use it to query the
@@ -126,7 +116,7 @@ fn query_gnome() -> String {
 fn query_cosmic() -> String {
     #[cfg(feature = "wayland")]
     {
-        use zbus::blocking::Connection;
+        use zbus::blocking::{Connection, Proxy};
 
         let conn = match Connection::session() {
             Ok(c) => c,
@@ -134,17 +124,15 @@ fn query_cosmic() -> String {
         };
 
         // Check if COSMIC is running by checking for its D-Bus name.
-        if let Ok(names) = conn.list_names() {
-            if !names.iter().any(|n| n.contains("Cosmic")) {
-                return String::new();
-            }
-        } else {
+        let names = match conn.list_names() {
+            Ok(n) => n,
+            Err(_) => return String::new(),
+        };
+        if !names.iter().any(|n| n.contains("Cosmic")) {
             return String::new();
         }
 
         // Try the active window query via the portal interface.
-        use zbus::blocking::Proxy;
-
         let proxy = match Proxy::new(
             "com.system76.CosmicDesktop",
             "/org/freedesktop/Portal/v1",
@@ -216,23 +204,30 @@ fn query_wlroots_socket(socket: &str, request: &[u8]) -> String {
         return String::new();
     }
 
-    // The IPC response is length-prefixed: 4 bytes payload length + JSON.
-    if response.len() < 4 {
+    // The IPC response uses the same length-prefixed binary protocol as the
+    // request: 4-byte "sway" magic, 4-byte version, 4-byte payload length,
+    // then the JSON payload.
+    if response.len() < 12 {
+        return String::new();
+    }
+
+    // Verify the magic bytes.
+    if &response[0..4] != b"sway" {
         return String::new();
     }
 
     let payload_len = u32::from_le_bytes([
-        response[0],
-        response[1],
-        response[2],
-        response[3],
+        response[8],
+        response[9],
+        response[10],
+        response[11],
     ]) as usize;
 
-    if response.len() < 4 + payload_len {
+    if response.len() < 12 + payload_len {
         return String::new();
     }
 
-    let json = &response[4..4 + payload_len];
+    let json = &response[12..12 + payload_len];
     extract_json_string(std::str::from_utf8(json).ok()?, "app_id")
 }
 
