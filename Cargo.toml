@@ -40,7 +40,7 @@ signal-hook = "0.4"
 evdev = "0.13"
 udev = "0.9"
 uinput = "0.1"
-xcb = "1.7" # window enumeration for `keymapper appnames`
+sysinfo = "0.39" # process enumeration for `keymapper appnames`
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]

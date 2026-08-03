@@ -7,11 +7,6 @@
 // $Source$
 // $Revision$
 
-//! Platform-specific implementations of CLI commands.
+//! Linux-specific utilities for application identification.
 
-#[cfg(target_os = "linux")]
-pub mod linux;
-pub mod appnames_cmd;
-pub mod keyboard_cmd;
-pub mod keys_cmd;
-pub mod server_cmd;
+pub mod desktop;

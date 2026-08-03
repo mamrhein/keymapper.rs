@@ -9,147 +9,99 @@
 
 //! Lists visible application names on Linux.
 //!
-//! On X11 the `app_name` is derived from the `WM_CLASS` property (the class
-//! name, i.e., the second null-separated string).  This matches what
-//! `active-win-pos-rs` returns.
+//! Scans `/proc` for processes connected to a display server (via environment
+//! variables `WAYLAND_DISPLAY` or `DISPLAY`), resolves their executable name
+//! against `.desktop` files, and returns the resulting application ids.
 //!
-//! On Wayland there is no universal API to enumerate all clients, so a
-//! helpful message is printed instead.
+//! This approach is independent of the display server (X11, Wayland, etc.) and
+//! works uniformly across all compositors.
 
-use std::env;
+use std::fs;
 
-use xcb::XidNew;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
-/// Return true if the session appears to be Wayland rather than X11.
-fn is_wayland() -> bool {
-    env::var("WAYLAND_DISPLAY").is_ok() && env::var("DISPLAY").is_err()
+/// Check if a process is connected to a display server by inspecting its
+/// environment variables in `/proc/[pid]/environ`.
+fn is_gui_process(pid: Pid) -> bool {
+    let path = format!("/proc/{}/environ", pid.as_u32());
+    let Ok(data) = fs::read(&path) else {
+        return false;
+    };
+
+    // environ is null-separated KEY=VALUE pairs.  We check for the presence
+    // of display server environment variables by searching for the key prefix.
+    data.windows(18)
+        .any(|w| w == b"WAYLAND_DISPLAY=")
+        || data.windows(8).any(|w| w == b"DISPLAY=")
 }
 
-/// Enumerate visible windows via X11 and extract unique `WM_CLASS` values.
-fn list_via_x11() -> Vec<String> {
-    let Ok((conn, _screen_num)) = xcb::Connection::connect(None) else {
-        return Vec::new();
+/// Resolve the executable name for a process by reading the `/proc/[pid]/exe`
+/// symlink, falling back to `/proc/[pid]/cmdline` first token.
+fn resolve_exe_name(pid: Pid) -> Option<String> {
+    let pid_str = pid.as_u32().to_string();
+
+    // Try resolving the exe symlink — gives us the real binary path.
+    if let Some(stem) = fs::read_link(format!("/proc/{}/exe", pid_str))
+        .ok()
+        .and_then(|path| {
+            path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+        })
+    {
+        return Some(stem);
+    }
+
+    // Fall back to the first token of cmdline.
+    let Ok(cmdline) = fs::read(format!("/proc/{}/cmdline", pid_str)) else {
+        return None;
     };
 
-    let setup = conn.get_setup();
-    let Some(root_screen) = setup.roots().next() else {
-        return Vec::new();
-    };
-    let root_window = root_screen.root();
+    // cmdline is null-separated; first token is the executable.
+    if let Some(null_pos) = cmdline.iter().position(|&b| b == 0) {
+        let first = &cmdline[..null_pos];
+        return String::from_utf8_lossy(first)
+            .as_ref()
+            .rsplit('/')
+            .next()
+            .map(|s| s.to_string());
+    }
 
-    // Look up the `_NET_CLIENT_LIST` atom.
-    let client_list_cookie = conn.send_request(&xcb::x::InternAtom {
-        only_if_exists: false,
-        name: b"_NET_CLIENT_LIST",
-    });
-    let client_list_atom = match conn.wait_for_reply(client_list_cookie) {
-        Ok(reply) => reply.atom(),
-        Err(_) => return Vec::new(),
-    };
+    // No null byte — treat whole content as the executable path.
+    let cmd = String::from_utf8_lossy(&cmdline);
+    if !cmd.is_empty() {
+        return cmd.as_ref().rsplit('/').next().map(|s| s.to_string());
+    }
 
-    // Read the list of managed windows.
-    let prop_cookie = conn.send_request(&xcb::x::GetProperty {
-        delete: false,
-        window: root_window,
-        property: client_list_atom,
-        r#type: xcb::x::ATOM_WINDOW,
-        long_offset: 0,
-        long_length: 4096,
-    });
-    let prop_reply = match conn.wait_for_reply(prop_cookie) {
-        Ok(reply) => reply,
-        Err(_) => return Vec::new(),
-    };
+    None
+}
 
-    let windows: Vec<u32> = prop_reply.value::<u32>().to_vec();
+/// Return the sorted, deduplicated list of application ids for all GUI
+/// processes connected to a display server.
+///
+/// These are the `.desktop` file stems (e.g., `"org.mozilla.firefox"`) that
+/// should be used in the `apps` field of the keymapperd configuration.
+pub fn list_app_names() -> Vec<String> {
+    let mut system = System::new_all();
+    system.refresh_processes(ProcessesToUpdate::All, false);
 
-    // Look up the `WM_CLASS` atom.
-    let wm_class_cookie = conn.send_request(&xcb::x::InternAtom {
-        only_if_exists: false,
-        name: b"WM_CLASS",
-    });
-    let wm_class_atom = match conn.wait_for_reply(wm_class_cookie) {
-        Ok(reply) => reply.atom(),
-        Err(_) => return Vec::new(),
-    };
+    let mut app_ids: Vec<String> = Vec::new();
 
-    let mut classes: Vec<String> = Vec::new();
+    for process in system.processes().values() {
+        // Filter to GUI processes.
+        if !is_gui_process(process.pid()) {
+            continue;
+        }
 
-    for &window in &windows {
-        let prop_cookie = conn.send_request(&xcb::x::GetProperty {
-            delete: false,
-            window: xcb::x::Window::new(window),
-            property: wm_class_atom,
-            r#type: xcb::x::ATOM_STRING,
-            long_offset: 0,
-            long_length: 256,
-        });
-
-        let Ok(prop_reply) = conn.wait_for_reply(prop_cookie) else {
+        // Resolve the executable name and match against .desktop entries.
+        let Some(exe) = resolve_exe_name(process.pid()) else {
             continue;
         };
 
-        let raw = prop_reply.value();
-        if raw.is_empty() {
-            continue;
-        }
-
-        // WM_CLASS contains "instance\0class".  We want the class name
-        // (the part after the null byte).  If there is no null byte we
-        // fall back to using the whole string.
-        let class_name =
-            if let Some(null_pos) = raw.iter().position(|&b| b == 0) {
-                let after_null = &raw[null_pos + 1..];
-                strip_trailing_nuls(after_null)
-            } else {
-                // No null separator — use the first (and only) string,
-                // stripping any trailing nuls.
-                strip_trailing_nuls(raw)
-            };
-
-        if !class_name.is_empty() {
-            classes.push(class_name);
+        if let Some(app_id) = super::super::linux::desktop::resolve_app_id(&exe) {
+            app_ids.push(app_id);
         }
     }
 
-    classes.sort();
-    classes.dedup();
-    classes
-}
-
-/// Strip trailing null bytes from a byte slice and convert to a String.
-fn strip_trailing_nuls(bytes: &[u8]) -> String {
-    let trimmed = bytes.strip_suffix(&[0]);
-    let trimmed = match trimmed {
-        Some(t) => t,
-        None => bytes,
-    };
-    String::from_utf8_lossy(trimmed).into_owned()
-}
-
-/// Enumerate all visible application names.
-pub fn list_app_names() -> Vec<String> {
-    if is_wayland() {
-        // On Wayland there is no universal cross-compositor API to enumerate
-        // all clients.  Print a helpful hint instead of returning an empty
-        // list silently.
-        eprintln!(
-            "Running on Wayland — no universal window enumeration API \
-             available."
-        );
-        eprintln!("Use your compositor's tools to find app IDs:");
-        eprintln!(
-            "  Hyprland : hyprctl clients -j | jq -r \"[.[].class] | unique \
-             | .[]\""
-        );
-        eprintln!(
-            "  Sway     : swaymsg -t get_tree | jq -r \".. | \
-             select(.name?)?.app_id // empty\" | sort -u"
-        );
-        eprintln!("  KDE      : kdotool windows");
-        eprintln!();
-        return Vec::new();
-    }
-
-    list_via_x11()
+    app_ids.sort();
+    app_ids.dedup();
+    app_ids
 }
