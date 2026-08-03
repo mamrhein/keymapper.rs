@@ -41,12 +41,16 @@ evdev = "0.13"
 udev = "0.9"
 uinput = "0.1"
 sysinfo = "0.39" # process enumeration for `keymapper appnames`
+x11rb = { version = "0.13", features = ["allow-unsafe-code"], optional = true }
+wayland-client = { version = "0.31", optional = true }
+cosmic-client-toolkit = { version = "0.2", optional = true }
+zbus = { version = "4", features = ["blocking"], optional = true }
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-objc2-app-kit = { version = "0.3", features = ["NSApplication"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWorkspace"] }
 objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary"] }
 
@@ -64,3 +68,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_HumanInterfaceDevice",
 ] }
+
+[features]
+default = ["wayland"]
+x11 = ["dep:x11rb"]
+wayland = ["dep:wayland-client", "dep:cosmic-client-toolkit", "dep:zbus"]
