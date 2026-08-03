@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-use std::{sync::Arc, thread, time::Duration};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 
@@ -54,29 +54,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config_path,
         Arc::clone(&state),
     )?;
-
-    // Start tracking foreground windows natively
-    let tracker_state = Arc::clone(&state);
-    thread::spawn(move || {
-        println!("Native window tracking thread active.");
-        loop {
-            let current_focused_app =
-                match active_win_pos_rs::get_active_window() {
-                    Ok(window) => window.app_name,
-                    Err(_) => String::from("unknown"),
-                };
-
-            // Read-check -> conditional write-escalation.
-            if !current_focused_app.eq(&**tracker_state.read().active_app()) {
-                let mut write_guard = tracker_state.write();
-                if !current_focused_app.eq(&**write_guard.active_app()) {
-                    write_guard.set_active_app(current_focused_app);
-                }
-            }
-
-            thread::sleep(Duration::from_millis(100));
-        }
-    });
 
     println!("Cross-platform runtime engines fully synchronized.");
 

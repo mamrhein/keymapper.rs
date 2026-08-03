@@ -21,7 +21,6 @@ name = "keymapperd"
 path = "src/keymapperd.rs"
 
 [dependencies]
-active-win-pos-rs = "0.11" # active window tracking
 dirs = "6" # platform config directory resolution
 indexmap = { version = "2", features = ["serde"] }
 notify = "8" # cross-platform file watching
