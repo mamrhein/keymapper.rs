@@ -19,11 +19,13 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 /// Directories that contain system-wide and user `.desktop` files.
-const DESKTOP_DIRS: &[&str] = &["~/.local/share/applications", "/usr/share/applications"];
+const DESKTOP_DIRS: &[&str] =
+    &["~/.local/share/applications", "/usr/share/applications"];
 
 /// Cached map from executable name (e.g., `"firefox"`) to app id
 /// (e.g., `"org.mozilla.firefox"`).  Populated on first access.
-static DESKTOP_CACHE: LazyLock<HashMap<String, String>> = LazyLock::new(build_cache);
+static DESKTOP_CACHE: LazyLock<HashMap<String, String>> =
+    LazyLock::new(build_cache);
 
 /// Resolve a binary name to its `.desktop` app id.
 pub fn resolve_app_id(exe: &str) -> Option<String> {
@@ -77,10 +79,7 @@ fn expanded_dirs() -> Vec<PathBuf> {
 /// a visible application entry.
 fn parse_desktop_file(path: &Path) -> Option<(String, String)> {
     // app_id is the file stem (filename without .desktop).
-    let app_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())?
-        .to_string();
+    let app_id = path.file_stem().and_then(|s| s.to_str())?.to_string();
     if app_id.is_empty() {
         return None;
     }
@@ -153,9 +152,9 @@ fn parse_exec_value(value: &str) -> Option<String> {
     let tokens: Vec<String> = tokenize_exec(value);
 
     // Find the first token that is NOT a flag or %specifier.
-    let exe_token = tokens.iter().find(|t| {
-        !t.starts_with('-') && !t.starts_with('%')
-    })?;
+    let exe_token = tokens
+        .iter()
+        .find(|t| !t.starts_with('-') && !t.starts_with('%'))?;
 
     // Strip surrounding quotes from the token.
     let exe_token = exe_token.trim_matches('"');

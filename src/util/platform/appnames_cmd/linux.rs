@@ -30,8 +30,7 @@ fn is_gui_process(pid: Pid) -> bool {
 
     // environ is null-separated KEY=VALUE pairs.  We check for the presence
     // of display server environment variables by searching for the key prefix.
-    data.windows(18)
-        .any(|w| w == b"WAYLAND_DISPLAY=")
+    data.windows(18).any(|w| w == b"WAYLAND_DISPLAY=")
         || data.windows(8).any(|w| w == b"DISPLAY=")
 }
 
@@ -44,7 +43,9 @@ fn resolve_exe_name(pid: Pid) -> Option<String> {
     if let Some(stem) = fs::read_link(format!("/proc/{}/exe", pid_str))
         .ok()
         .and_then(|path| {
-            path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
         })
     {
         return Some(stem);
@@ -96,7 +97,9 @@ pub fn list_app_names() -> Vec<String> {
             continue;
         };
 
-        if let Some(app_id) = super::super::linux::desktop::resolve_app_id(&exe) {
+        if let Some(app_id) =
+            super::super::linux::desktop::resolve_app_id(&exe)
+        {
             app_ids.push(app_id);
         }
     }

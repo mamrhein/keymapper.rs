@@ -22,7 +22,11 @@ pub fn probe() {
         std::process::exit(1);
     });
 
-    println!("Probing {} ({})\n", device.name().unwrap_or("<unknown>"), path);
+    println!(
+        "Probing {} ({})\n",
+        device.name().unwrap_or("<unknown>"),
+        path
+    );
 
     println!("Press keys to see their names and codes.");
     println!("Press Control+C to exit.\n");
