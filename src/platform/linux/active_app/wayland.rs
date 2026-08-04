@@ -46,21 +46,26 @@ pub fn get_active_app_name() -> String {
 fn query_kde() -> String {
     #[cfg(feature = "wayland")]
     {
-        use zbus::blocking::Proxy;
+        use zbus::blocking::Connection;
 
-        // KWin's Workspace3 interface exposes activeWindow() which returns
-        // the PID of the active window.
-        let proxy = match Proxy::new(
-            "org.kde.KWin",
-            "/KWin",
-            Some("org.kde.kwin.Workspace3"),
-        ) {
-            Ok(p) => p,
+        let conn = match Connection::session() {
+            Ok(c) => c,
             Err(_) => return String::new(),
         };
 
-        let pid: i32 = match proxy.call("activeWindow", &()) {
-            Ok(v) => v,
+        // KWin's Workspace3 interface exposes activeWindow() which returns
+        // the PID of the active window.
+        let pid: i32 = match conn.call_method(
+            Some("org.kde.KWin"),
+            "/KWin",
+            Some("org.kde.kwin.Workspace3"),
+            "activeWindow",
+            &(),
+        ) {
+            Ok(reply) => match reply.body().deserialize() {
+                Ok(v) => v,
+                Err(_) => return String::new(),
+            },
             Err(_) => return String::new(),
         };
 
@@ -79,25 +84,30 @@ fn query_kde() -> String {
 fn query_gnome() -> String {
     #[cfg(feature = "wayland")]
     {
-        use zbus::blocking::Proxy;
+        use zbus::blocking::Connection;
+
+        let conn = match Connection::session() {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        };
 
         // GNOME Shell exposes a read-only Eval interface that can run
         // JavaScript in the shell context.  We use it to query the
         // focused window's wm_class (equivalent to X11 WM_CLASS).
-        let proxy = match Proxy::new(
-            "org.gnome.Shell",
-            "/org/gnome/Shell",
-            Some("org.gnome.Shell.Eval"),
-        ) {
-            Ok(p) => p,
-            Err(_) => return String::new(),
-        };
-
         let js = "global.display.focus_window && \
                   global.display.focus_window.get_wm_class() || ''";
 
-        let result: String = match proxy.call("Eval", &(js,)) {
-            Ok(v) => v,
+        let result: String = match conn.call_method(
+            Some("org.gnome.Shell"),
+            "/org/gnome/Shell",
+            Some("org.gnome.Shell.Eval"),
+            "Eval",
+            &(js,),
+        ) {
+            Ok(reply) => match reply.body().deserialize() {
+                Ok(v) => v,
+                Err(_) => return String::new(),
+            },
             Err(_) => return String::new(),
         };
 
@@ -116,34 +126,26 @@ fn query_gnome() -> String {
 fn query_cosmic() -> String {
     #[cfg(feature = "wayland")]
     {
-        use zbus::blocking::{Connection, Proxy};
+        use zbus::blocking::Connection;
 
         let conn = match Connection::session() {
             Ok(c) => c,
             Err(_) => return String::new(),
         };
 
-        // Check if COSMIC is running by checking for its D-Bus name.
-        let names = match conn.list_names() {
-            Ok(n) => n,
-            Err(_) => return String::new(),
-        };
-        if !names.iter().any(|n| n.contains("Cosmic")) {
-            return String::new();
-        }
-
-        // Try the active window query via the portal interface.
-        let proxy = match Proxy::new(
-            "com.system76.CosmicDesktop",
+        // Check if COSMIC is running by attempting to connect to its D-Bus
+        // service.
+        let app_id: String = match conn.call_method(
+            Some("com.system76.CosmicDesktop"),
             "/org/freedesktop/Portal/v1",
             Some("org.freedesktop.portal.Foreground"),
+            "ActiveWindow",
+            &(),
         ) {
-            Ok(p) => p,
-            Err(_) => return String::new(),
-        };
-
-        let app_id: String = match proxy.call("ActiveWindow", &()) {
-            Ok(v) => v,
+            Ok(reply) => match reply.body().deserialize() {
+                Ok(v) => v,
+                Err(_) => return String::new(),
+            },
             Err(_) => return String::new(),
         };
 
@@ -228,7 +230,10 @@ fn query_wlroots_socket(socket: &str, request: &[u8]) -> String {
     }
 
     let json = &response[12..12 + payload_len];
-    extract_json_string(std::str::from_utf8(json).ok()?, "app_id")
+    let Ok(json_str) = std::str::from_utf8(json) else {
+        return String::new();
+    };
+    extract_json_string(json_str, "app_id")
 }
 
 // ---------------------------------------------------------------------------
