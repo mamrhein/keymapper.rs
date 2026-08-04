@@ -14,9 +14,13 @@
 //! (falling back to `WM_NAME`) from that window.
 
 use x11rb::{
-    connection::Connection,
-    protocol::xproto::{AtomEnum, Connection as _, GetPropertyCookie, Window},
-    xapi::Atomic,
+    connection::{Connection, RequestConnection},
+    cookie::Cookie,
+    errors::ReplyError,
+    protocol::xproto::{
+        AtomEnum, ConnectionExt as _, GetPropertyReply, GetPropertyType,
+        Window,
+    },
 };
 
 /// Synchronously query the current foreground application name on X11.
@@ -68,28 +72,21 @@ pub fn get_active_app_name() -> String {
 }
 
 /// Intern an atom name, returning its XID (u32).
-fn intern_atom<C: Connection>(
+fn intern_atom<C: RequestConnection>(
     conn: &C,
     name: &[u8],
-) -> Result<u32, x11rb::protocol::xerror::X11Error> {
-    use x11rb::protocol::xproto::Connection as _;
-
+) -> Result<u32, ReplyError> {
     let cookie = conn.intern_atom(false, name)?;
-    let reply = conn.wait_for_reply(cookie)?;
+    let reply = cookie.reply()?;
     Ok(reply.atom)
 }
 
 /// Query a window property that holds an ATOM value.
-fn get_window_property_atom<C: Connection>(
+fn get_window_property_atom<C: RequestConnection>(
     conn: &C,
     window: Window,
     property_atom: u32,
-) -> Result<Option<u32>, x11rb::protocol::xerror::X11Error>
-where
-    GetPropertyCookie: Atomic<C>,
-{
-    use x11rb::protocol::xproto::Connection as _;
-
+) -> Result<Option<u32>, ReplyError> {
     let cookie = conn.get_property(
         false,
         window,
@@ -98,41 +95,36 @@ where
         0,
         1, // request 1 ATOM (4 bytes).
     )?;
-    let reply = conn.wait_for_reply(cookie)?;
+    let reply = cookie.reply()?;
 
     if reply.value_len > 0 {
         // The value is a sequence of 4-byte integers (ATOMs).
-        Ok(reply.value32().first().copied())
+        Ok(reply.value32().and_then(|mut iter| iter.next()))
     } else {
         Ok(None)
     }
 }
 
 /// Query a window property that holds raw bytes, interpreting them as UTF-8.
-fn get_window_property_string<C: Connection>(
+fn get_window_property_string<C: RequestConnection>(
     conn: &C,
     window: Window,
     property_atom: u32,
-) -> Option<String>
-where
-    GetPropertyCookie: Atomic<C>,
-{
-    use x11rb::protocol::xproto::Connection as _;
-
+) -> Option<String> {
     // Request up to 4096 32-bit chunks (16 KiB), more than enough for a
     // window title.
-    let cookie = conn
+    let cookie: Cookie<'_, C, GetPropertyReply> = conn
         .get_property(
             false,
             window,
             property_atom,
-            AtomEnum::ANY_PROP_TYPE,
+            GetPropertyType::ANY,
             0,
             4096,
         )
         .ok()?;
 
-    let reply = conn.wait_for_reply(cookie).ok()?;
+    let reply = cookie.reply().ok()?;
     if reply.value_len == 0 {
         return None;
     }
