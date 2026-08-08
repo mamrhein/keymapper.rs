@@ -10,4 +10,4 @@
 //! CLI utility commands for the keymapper tool.
 
 pub mod platform;
-pub(crate) mod sandbox;
+pub mod sandbox;
