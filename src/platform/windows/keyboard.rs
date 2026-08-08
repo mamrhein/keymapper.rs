@@ -50,6 +50,9 @@ const SPDRP_MFG: u32 = 13;
 /// SPDRP_HARDWAREID constant for hardware ID property.
 const SPDRP_HARDWAREID: u32 = 3;
 
+/// SPDRP_FRIENDLYNAME constant for friendly name property.
+const SPDRP_FRIENDLYNAME: u32 = 14;
+
 /// HID usage page for Generic Desktop.
 const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
 
@@ -132,8 +135,8 @@ fn parse_vid_pid(path: &str) -> Option<(u16, u16)> {
 /// Derives the transport/port type from hardware ID or device path.
 fn derive_port(hardware_id: &str, interface_path: &str) -> Option<String> {
     // Check hardware ID first.
-    if !hardware_id.is_empty() {
-        if let Some(first_id) = hardware_id.split('\n').next() {
+    if !hardware_id.is_empty()
+        && let Some(first_id) = hardware_id.split('\n').next() {
             let lower = first_id.to_lowercase();
             if lower.starts_with("usb") {
                 return Some("USB".to_string());
@@ -145,7 +148,6 @@ fn derive_port(hardware_id: &str, interface_path: &str) -> Option<String> {
                 return Some("Internal".to_string());
             }
         }
-    }
 
     // Fall back to checking the interface path.
     let path_lower = interface_path.to_lowercase();
@@ -622,11 +624,11 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             continue;
         }
 
-        // We already have `dev_desc` and `hw_id_raw` from earlier.
+        // Read friendly name (preferred for display) and manufacturer.
         let dev_name = if found_info {
-            get_device_property(_guard.0, &mut dev_info_data, SPDRP_DEVICEDESC)
+            get_device_property(_guard.0, &mut dev_info_data, SPDRP_FRIENDLYNAME).unwrap_or_default()
         } else {
-            None
+            String::new()
         };
 
         let manufacturer = if found_info {
@@ -647,14 +649,18 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             None => (String::new(), String::new(), String::new()),
         };
 
-        // Build the fields, preferring HID string attributes over registry,
-        // falling back to path-derived info for filtered devices.
+        // Build the fields, preferring HID string attributes first, then
+        // friendly name, then device description, falling back to path-derived
+        // info.
         let name = if !hid_product.is_empty() {
             hid_product.clone()
+        } else if !dev_name.is_empty() && !dev_desc.contains(r"\") {
+            // Use device name only if it looks like a real name
+            dev_name
         } else if !dev_desc.is_empty() && !dev_desc.contains(r"\") {
             // Use device description only if it looks like a real name
             // (hardware IDs contain backslashes).
-            dev_desc.clone()
+            dev_desc
         } else {
             // Construct a display name from the device path.
             parse_vid_pid(&interface_path_str)
@@ -663,19 +669,19 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         };
 
         let vendor = if hid_vendor.is_empty() {
-            manufacturer
+            manufacturer.clone()
                 .or_else(|| parse_vendor_from_path(&interface_path_str))
                 .unwrap_or_else(|| "<unknown>".to_string())
         } else {
-            hid_vendor.clone()
+            hid_vendor
         };
 
         let model = if !hw_id_raw.is_empty() {
             hw_id_raw.clone()
         } else if !hid_serial.is_empty() {
-            hid_serial.clone()
+            hid_serial
         } else if !hid_product.is_empty() {
-            hid_product.clone()
+            hid_product
         } else {
             // Derive model from VID:PID in the path.
             parse_vid_pid(&interface_path_str)
