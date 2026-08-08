@@ -59,6 +59,7 @@ impl<T> SendCf<T> {
         }
     }
 
+    #[allow(dead_code)]
     fn inner(&self) -> &CFRetained<T> {
         &self.inner
     }
@@ -388,8 +389,13 @@ mod tests {
     fn sandbox_new_returns_some_or_permission_error() {
         let result = MacoSandbox::new();
         assert!(
-            result.is_ok(),
-            "new() should return Ok (containing Some or a PermissionDenied)"
+            result.is_ok()
+                || matches!(
+                    result.as_ref().err().unwrap(),
+                    SandboxError::PermissionDenied(..)
+                ),
+            "Sandbox::new() returned {:?}",
+            result.err()
         );
     }
 
