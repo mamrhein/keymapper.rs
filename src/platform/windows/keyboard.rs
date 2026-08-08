@@ -14,7 +14,7 @@ use std::ptr;
 use windows_sys::Win32::{
     Devices::{
         DeviceAndDriverInstallation::{
-            DEVREGINFOCLASS, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+            DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
             SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
             SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList,
             SetupDiEnumDeviceInfo, SetupDiEnumDeviceInterfaces,
@@ -22,13 +22,12 @@ use windows_sys::Win32::{
             SetupDiGetDeviceRegistryPropertyW,
         },
         HumanInterfaceDevice::{
-            HIDD_ATTRIBUTES, HidD_GetAttributes, HidD_GetManufacturerString,
-            HidD_GetProductString, HidD_GetSerialNumberString, HidD_GetUsage,
-            HidD_GetUsagePage,
+            HidD_GetManufacturerString, HidD_GetProductString,
+            HidD_GetSerialNumberString,
         },
     },
     Foundation::{GetLastError, INVALID_HANDLE_VALUE},
-    System::WindowsAndMessaging::{
+    Storage::FileSystem::{
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     },
 };
@@ -39,11 +38,14 @@ use crate::common::keyboard::KeyboardInfo;
 // HID usage constants
 // ---------------------------------------------------------------------------
 
-/// HID usage page for generic desktop controls.
-const HID_USAGE_PAGE_GENERIC: u32 = 0x01;
+/// SPDRP_DEVICEDESC constant for device description property.
+const SPDRP_DEVICEDESC: u32 = 1;
 
-/// HID usage for a keyboard within the generic desktop page.
-const HID_USAGE_KEYBOARD: u32 = 0x06;
+/// SPDRP_MFG constant for manufacturer property.
+const SPDRP_MFG: u32 = 13;
+
+/// SPDRP_HARDWAREID constant for hardware ID property.
+const SPDRP_HARDWAREID: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Helper: convert a wide string buffer to a Rust String
@@ -63,10 +65,10 @@ fn wstring(buf: &[u16]) -> String {
 /// Used with `SetupDiGetClassDevsW` to enumerate all HID devices.
 const fn hid_class_guid() -> windows_sys::core::GUID {
     windows_sys::core::GUID {
-        Data1: 0x4D1E55B2,
-        Data2: 0xF16F,
-        Data3: 0x11CF,
-        Data4: [0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30],
+        data1: 0x4D1E55B2,
+        data2: 0xF16F,
+        data3: 0x11CF,
+        data4: [0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30],
     }
 }
 
@@ -75,7 +77,7 @@ const fn hid_class_guid() -> windows_sys::core::GUID {
 // ---------------------------------------------------------------------------
 
 /// Open a device handle for the given interface path string.
-fn open_hid_device(interface_path: &[u16]) -> Option<u64> {
+fn open_hid_device(interface_path: &[u16]) -> Option<*mut std::ffi::c_void> {
     let handle = unsafe {
         CreateFileW(
             interface_path.as_ptr(),
@@ -84,11 +86,11 @@ fn open_hid_device(interface_path: &[u16]) -> Option<u64> {
             ptr::null_mut(), // no security attributes
             OPEN_EXISTING,
             0, // no flags/attributes
-            0, // no template file
+            ptr::null_mut(), // no template file
         )
     };
 
-    if handle == INVALID_HANDLE_VALUE as u64 || handle == 0 {
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
         return None;
     }
 
@@ -103,7 +105,7 @@ fn open_hid_device(interface_path: &[u16]) -> Option<u64> {
 fn get_device_property(
     h_dev_info: isize,
     dev_info_data: &mut SP_DEVINFO_DATA,
-    property: DEVREGINFOCLASS,
+    property: u32,
 ) -> Option<String> {
     let mut required_size: u32 = 0;
 
@@ -149,33 +151,33 @@ fn get_device_property(
 // ---------------------------------------------------------------------------
 
 /// Read product, manufacturer, and serial from an open HID device handle.
-fn read_hid_strings(handle: u64) -> (String, String, String) {
+fn read_hid_strings(handle: *mut std::ffi::c_void) -> (String, String, String) {
     let mut product_buf = [0u16; 128];
     let mut vendor_buf = [0u16; 128];
     let mut serial_buf = [0u16; 128];
 
     let product = unsafe {
         HidD_GetProductString(
-            handle as isize,
-            product_buf.as_mut_ptr(),
+            handle,
+            product_buf.as_mut_ptr() as *mut std::ffi::c_void,
             product_buf.len() as u32,
-        ) != 0
+        )
     };
 
     let vendor = unsafe {
         HidD_GetManufacturerString(
-            handle as isize,
-            vendor_buf.as_mut_ptr(),
+            handle,
+            vendor_buf.as_mut_ptr() as *mut std::ffi::c_void,
             vendor_buf.len() as u32,
-        ) != 0
+        )
     };
 
     let serial = unsafe {
         HidD_GetSerialNumberString(
-            handle as isize,
-            serial_buf.as_mut_ptr(),
+            handle,
+            serial_buf.as_mut_ptr() as *mut std::ffi::c_void,
             serial_buf.len() as u32,
-        ) != 0
+        )
     };
 
     (
@@ -278,15 +280,13 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             continue;
         }
 
-        let mut detail_buf = vec![0u16; required_size as usize];
-        let mut detail_data = unsafe {
-            std::mem::transmute::<
-                &mut [u16],
-                &mut SP_DEVICE_INTERFACE_DETAIL_DATA_W,
-            >(&mut detail_buf)
-        };
-        detail_data.cbSize =
-            std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+        let mut detail_buf = vec![0u8; required_size as usize];
+        let detail_data: *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W =
+            detail_buf.as_mut_ptr() as *mut _;
+        unsafe {
+            (*detail_data).cbSize =
+                std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+        }
 
         let detail_ok = unsafe {
             SetupDiGetDeviceInterfaceDetailW(
@@ -306,16 +306,20 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 
         // Extract the interface path from the detail data.  The path starts at
         // `detail_data.DevicePath` which is a null-terminated wide string.  We
-        // skip the `cbSize` field (first 2 u16s = 4 bytes) to find the start
-        // of DevicePath.
+        // skip the `cbSize` field (4 bytes) to find the start of DevicePath.
         let path_offset =
-            std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() / 2;
+            std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
         if detail_buf.len() <= path_offset {
             device_index += 1;
             continue;
         }
 
-        let interface_path: Vec<u16> = detail_buf[path_offset..].to_vec();
+        // Convert the remaining bytes to u16 (wide chars).
+        let path_bytes = &detail_buf[path_offset..];
+        let interface_path: Vec<u16> = path_bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
+            .collect();
         let interface_path_str = wstring(&interface_path);
 
         // Open the device to query HID attributes.
@@ -327,147 +331,134 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             }
         };
 
-        // Check HID usage page and usage — only accept keyboards.
-        let mut usage_page: u32 = 0;
-        let mut usage: u32 = 0;
+        // Get the device info data for this interface so we can read
+        // registry properties.
+        let mut dev_info_data: SP_DEVINFO_DATA =
+            unsafe { std::mem::zeroed() };
+        dev_info_data.cbSize =
+            std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
 
-        let page_ok = unsafe {
-            HidD_GetUsagePage(handle as isize, &mut usage_page) != 0
-        };
-        let usage_ok =
-            unsafe { HidD_GetUsage(handle as isize, &mut usage) != 0 };
-
-        if page_ok
-            && usage_ok
-            && usage_page == HID_USAGE_PAGE_GENERIC
-            && usage == HID_USAGE_KEYBOARD
-        {
-            // Get the device info data for this interface so we can read
-            // registry properties.
-            let mut dev_info_data: SP_DEVINFO_DATA =
+        // Try to find the device info entry that corresponds to this
+        // interface by iterating.
+        let mut found_info = false;
+        let mut idx = 0u32;
+        loop {
+            let mut di_data: SP_DEVINFO_DATA =
                 unsafe { std::mem::zeroed() };
-            dev_info_data.cbSize =
-                std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+            di_data.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
 
-            // Try to find the device info entry that corresponds to this
-            // interface by iterating.
-            let mut found_info = false;
-            let mut idx = 0u32;
-            loop {
-                let mut di_data: SP_DEVINFO_DATA =
-                    unsafe { std::mem::zeroed() };
-                di_data.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
-
-                if unsafe {
-                    SetupDiEnumDeviceInfo(_guard.0, idx, &mut di_data)
-                } == 0
-                {
-                    break;
-                }
-
-                // Check if this device info entry has our interface.
-                let mut test_iface: SP_DEVICE_INTERFACE_DATA =
-                    unsafe { std::mem::zeroed() };
-                test_iface.cbSize =
-                    std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
-
-                if unsafe {
-                    SetupDiEnumDeviceInterfaces(
-                        _guard.0,
-                        &mut di_data,
-                        &guid,
-                        0,
-                        &mut test_iface,
-                    )
-                } != 0
-                {
-                    // Found a matching device info entry.
-                    dev_info_data = di_data;
-                    found_info = true;
-                    break;
-                }
-
-                idx += 1;
+            if unsafe {
+                SetupDiEnumDeviceInfo(_guard.0, idx, &mut di_data)
+            }
+            == 0
+            {
+                break;
             }
 
-            // Read device properties.
-            let dev_name = if found_info {
-                get_device_property(
+            // Check if this device info entry has our interface.
+            let mut test_iface: SP_DEVICE_INTERFACE_DATA =
+                unsafe { std::mem::zeroed() };
+            test_iface.cbSize =
+                std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
+
+            if unsafe {
+                SetupDiEnumDeviceInterfaces(
                     _guard.0,
-                    &mut dev_info_data,
-                    1, // SPDRP_DEVICEDESC
+                    &di_data,
+                    &guid,
+                    0,
+                    &mut test_iface,
                 )
-            } else {
-                None
-            };
-
-            let manufacturer = if found_info {
-                get_device_property(
-                    _guard.0,
-                    &mut dev_info_data,
-                    13, // SPDRP_MFG
-                )
-            } else {
-                None
-            };
-
-            let hardware_id = if found_info {
-                get_device_property(
-                    _guard.0,
-                    &mut dev_info_data,
-                    3, // SPDRP_HARDWAREID
-                )
-            } else {
-                None
-            };
-
-            // Read HID string attributes from the device.
-            let (hid_product, hid_vendor, hid_serial) =
-                read_hid_strings(handle);
-
-            // Close the device handle.
-            unsafe {
-                windows_sys::Win32::Foundation::CloseHandle(handle as isize);
+            } != 0
+            {
+                // Found a matching device info entry.
+                dev_info_data = di_data;
+                found_info = true;
+                break;
             }
 
-            // Build the fields, preferring HID string attributes over registry.
-            let name = dev_name
-                .or(Some(hid_product.clone()))
-                .unwrap_or_else(|| "<unknown>".to_string());
-
-            let vendor = hid_vendor
-                .or(manufacturer)
-                .unwrap_or_else(|| "<unknown>".to_string());
-
-            let model = hardware_id
-                .or(Some(hid_serial.clone()))
-                .unwrap_or_else(|| hid_product);
-
-            // Derive transport type from the hardware ID prefix.
-            let port = hardware_id.clone().and_then(|hw_id| {
-                hw_id.split('\n').next().and_then(|first_id| {
-                    if first_id.starts_with("USB") {
-                        Some("USB".to_string())
-                    } else if first_id.starts_with("BTHENUM")
-                        || first_id.starts_with("BTHLEDEV")
-                    {
-                        Some("Bluetooth".to_string())
-                    } else if first_id.starts_with("ACPI") {
-                        Some("Internal".to_string())
-                    } else {
-                        None
-                    }
-                })
-            });
-
-            keyboards.push(KeyboardInfo::new(
-                name,
-                vendor,
-                model,
-                interface_path_str,
-                port,
-            ));
+            idx += 1;
         }
+
+        // Read device properties.
+        let dev_name = if found_info {
+            get_device_property(
+                _guard.0,
+                &mut dev_info_data,
+                SPDRP_DEVICEDESC,
+            )
+        } else {
+            None
+        };
+
+        let manufacturer = if found_info {
+            get_device_property(
+                _guard.0,
+                &mut dev_info_data,
+                SPDRP_MFG,
+            )
+        } else {
+            None
+        };
+
+        let hardware_id = if found_info {
+            get_device_property(
+                _guard.0,
+                &mut dev_info_data,
+                SPDRP_HARDWAREID,
+            )
+        } else {
+            None
+        };
+
+        // Read HID string attributes from the device.
+        let (hid_product, hid_vendor, hid_serial) =
+            read_hid_strings(handle);
+
+        // Close the device handle.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
+
+        // Build the fields, preferring HID string attributes over registry.
+        let name = dev_name
+            .or(if hid_product.is_empty() { None } else { Some(hid_product.clone()) })
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let vendor = if hid_vendor.is_empty() {
+            manufacturer.unwrap_or_else(|| "<unknown>".to_string())
+        } else {
+            hid_vendor.clone()
+        };
+
+        let model = hardware_id.clone()
+            .or(if hid_serial.is_empty() { None } else { Some(hid_serial.clone()) })
+            .unwrap_or_else(|| hid_product.clone());
+
+        // Derive transport type from the hardware ID prefix.
+        let port = hardware_id.clone().and_then(|hw_id| {
+            hw_id.split('\n').next().and_then(|first_id| {
+                if first_id.starts_with("USB") {
+                    Some("USB".to_string())
+                } else if first_id.starts_with("BTHENUM")
+                    || first_id.starts_with("BTHLEDEV")
+                {
+                    Some("Bluetooth".to_string())
+                } else if first_id.starts_with("ACPI") {
+                    Some("Internal".to_string())
+                } else {
+                    None
+                }
+            })
+        });
+
+        keyboards.push(KeyboardInfo::new(
+            name,
+            vendor,
+            model,
+            interface_path_str,
+            port,
+        ));
 
         device_index += 1;
     }
@@ -526,7 +517,7 @@ mod tests {
     #[test]
     fn hid_class_guid_is_valid() {
         let guid = hid_class_guid();
-        assert_eq!(guid.Data1, 0x4D1E55B2);
+        assert_eq!(guid.data1, 0x4D1E55B2);
     }
 
     #[test]

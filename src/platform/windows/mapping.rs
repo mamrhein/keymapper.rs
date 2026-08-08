@@ -21,7 +21,7 @@ use windows_sys::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSG,
             SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-            WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+            WM_KEYDOWN, WM_SYSKEYDOWN,
         },
     },
 };
@@ -42,28 +42,28 @@ type HHOOK = *mut std::ffi::c_void;
 
 fn extract_modifier_bits() -> u8 {
     let mut bits: u8 = 0;
-    if unsafe { GetAsyncKeyState(Key::LeftControl.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::LeftControl.as_native() as i32) } < 0 {
         bits |= ModifierRole::LeftControl.mask();
     }
-    if unsafe { GetAsyncKeyState(Key::RightControl.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::RightControl.as_native() as i32) } < 0 {
         bits |= ModifierRole::RightControl.mask();
     }
-    if unsafe { GetAsyncKeyState(Key::LeftShift.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::LeftShift.as_native() as i32) } < 0 {
         bits |= ModifierRole::LeftShift.mask();
     }
-    if unsafe { GetAsyncKeyState(Key::RightShift.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::RightShift.as_native() as i32) } < 0 {
         bits |= ModifierRole::RightShift.mask();
     }
-    if unsafe { GetAsyncKeyState(Key::LeftAlt.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::LeftAlt.as_native() as i32) } < 0 {
         bits |= ModifierRole::LeftAlt.mask();
     }
-    if unsafe { GetAsyncKeyState(Key::RightAlt.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::RightAlt.as_native() as i32) } < 0 {
         bits |= ModifierRole::RightAlt.mask();
     }
-    if unsafe { GetAsyncKeyState(Key::LeftCommand.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::LeftCommand.as_native() as i32) } < 0 {
         bits |= ModifierRole::LeftCommand.mask();
     }
-    if unsafe { GetAsyncKeyState(Key::RightCommand.as_native()) } < 0 {
+    if unsafe { GetAsyncKeyState(Key::RightCommand.as_native() as i32) } < 0 {
         bits |= ModifierRole::RightCommand.mask();
     }
     bits
@@ -71,9 +71,7 @@ fn extract_modifier_bits() -> u8 {
 
 /// Map a modifier bit position back to the native VIRTUAL_KEY for emission.
 fn modifier_bit_to_vk(bit: u8) -> Option<VIRTUAL_KEY> {
-    let Some(role) = ModifierRole::try_from_bit(bit) else {
-        return None;
-    };
+    let role = ModifierRole::try_from_bit(bit)?;
     let key = match role {
         ModifierRole::LeftControl => Key::LeftControl,
         ModifierRole::RightControl => Key::RightControl,

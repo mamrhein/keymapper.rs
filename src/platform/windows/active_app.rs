@@ -10,8 +10,8 @@
 //! Synchronous foreground application query via Win32 APIs.
 
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, FALSE, HWND},
-    System::ProcessStatus::{
+    Foundation::{CloseHandle, FALSE},
+    System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         QueryFullProcessImageNameW,
     },
@@ -25,13 +25,13 @@ use windows_sys::Win32::{
 /// query fails or no window is in the foreground.
 pub fn get_active_app_name() -> String {
     let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd == HWND(0) {
+    if hwnd.is_null() {
         return "unknown".to_string();
     }
 
     // Get the process ID of the thread that owns the foreground window.
     let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
     if pid == 0 {
         return "unknown".to_string();
     }
@@ -39,7 +39,7 @@ pub fn get_active_app_name() -> String {
     // Open the process with minimal permissions to query its image name.
     let process =
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
-    if process.is_empty() {
+    if process.is_null() {
         return "unknown".to_string();
     }
 
@@ -60,11 +60,10 @@ pub fn get_active_app_name() -> String {
     // Extract the executable name from the full path.  The path uses backslash
     // separators (e.g. "C:\Windows\System32\notepad.exe"), so we find the last
     // backslash and take the file name from there.
-    if let Some(path) = String::from_utf16(&buffer[..size as usize]).ok() {
-        if let Some(stem) = path.rsplit('\\').next() {
+    if let Ok(path) = String::from_utf16(&buffer[..size as usize])
+        && let Some(stem) = path.rsplit('\\').next() {
             return stem.to_string();
         }
-    }
 
     "unknown".to_string()
 }

@@ -17,6 +17,7 @@ use std::fmt;
 
 /// A single captured keyboard event.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct CapturedEvent {
     /// The platform-native keycode (CGKeyCode on macOS, evdev code on Linux,
     /// VIRTUAL_KEY on Windows).
@@ -26,6 +27,7 @@ pub struct CapturedEvent {
 }
 
 /// Errors that can occur during sandbox setup or operation.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum SandboxError {
     /// Accessibility permission is missing (macOS) or equivalent privilege
@@ -73,6 +75,7 @@ impl std::error::Error for SandboxError {}
 /// implementations use internal types (e.g. `CFRetained<CGEventSource>`
 /// on macOS) that do not implement these bounds.  Cross-thread state
 /// sharing is handled via `Arc<Mutex<..>>` wrappers on a per-field basis.
+#[allow(dead_code)]
 pub trait Sandbox {
     /// Create a new sandbox instance.
     ///
@@ -139,4 +142,5 @@ pub use linux::LinuxSandbox;
 mod windows;
 
 #[cfg(target_os = "windows")]
+#[allow(unused_imports)]
 pub use windows::WindowsSandbox;

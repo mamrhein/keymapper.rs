@@ -15,4 +15,7 @@ mod mapping;
 pub(crate) use active_app::get_active_app_name;
 pub use key::Key;
 pub use keyboard::list_keyboards;
-pub use mapping::{reset_for_tests, start_mapping};
+pub use mapping::start_mapping;
+
+#[cfg(test)]
+pub use mapping::reset_for_tests;

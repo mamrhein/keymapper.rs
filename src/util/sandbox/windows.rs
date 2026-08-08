@@ -15,6 +15,7 @@
 use super::{Sandbox, SandboxError};
 
 /// Windows sandbox for end-to-end keyboard mapping tests.
+#[allow(dead_code)]
 pub struct WindowsSandbox;
 
 impl Sandbox for WindowsSandbox {

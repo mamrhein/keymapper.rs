@@ -31,7 +31,9 @@ type HHOOK = *mut std::ffi::c_void;
 use crate::platform::Key;
 
 /// Windows virtual-key code for the Control key.
+#[allow(dead_code)]
 const VK_LCONTROL: VIRTUAL_KEY = 0xA2;
+#[allow(dead_code)]
 const VK_RCONTROL: VIRTUAL_KEY = 0xA3;
 
 static HOOK_HANDLE: parking_lot::Mutex<isize> = parking_lot::Mutex::new(0);
