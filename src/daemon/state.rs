@@ -600,4 +600,380 @@ groups:
         assert!(state.resolve_keyboard("/dev/input/event5").is_some());
         assert!(state.resolve_keyboard("/dev/input/event99").is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // TestLookup — in-process mapping engine tests
+    // -----------------------------------------------------------------------
+
+    /// A simple [`Lookup`] implementation backed by a [`RuntimeLookupCache`]
+    /// for in-process testing.  Returns the configured app name from
+    /// [`active_app`]() without querying the platform.
+    struct TestLookup {
+        cache: RuntimeLookupCache,
+        app_name: String,
+    }
+
+    impl TestLookup {
+        fn from_yaml(yaml: &str) -> Self {
+            let config = AppConfig::load_from_str(yaml).unwrap();
+            Self {
+                cache: RuntimeLookupCache::compile_from_config(&config),
+                app_name: "test_app".to_string(),
+            }
+        }
+    }
+
+    impl std::fmt::Debug for TestLookup {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TestLookup").finish()
+        }
+    }
+
+    impl Lookup for TestLookup {
+        fn for_app(
+            &self,
+            app: &str,
+            key: u16,
+            modifiers: u8,
+            _kbd_device_id: Option<&str>,
+        ) -> Option<&[NativeKey]> {
+            // For tests we always check the global rules; app-scoped
+            // rules are tested via the RuntimeState tests above.
+            if let Some(rules) = self.cache.process_rules(app) {
+                find_match(rules, key, modifiers, |_rule_keyboards| true)
+            } else {
+                None
+            }
+        }
+
+        fn global(
+            &self,
+            key: u16,
+            modifiers: u8,
+            _kbd_id: Option<&str>,
+        ) -> Option<&[NativeKey]> {
+            find_match(
+                self.cache.global_rules(),
+                key,
+                modifiers,
+                |_rule_keyboards| true,
+            )
+        }
+
+        fn active_app(&self) -> Arc<str> {
+            Arc::from(self.app_name.as_str())
+        }
+    }
+
+    /// Simulates the full mapping engine flow: modifier tracking, lookup,
+    /// and output emission.  Returns the sequence of [`NativeKey`] outputs
+    /// that would be emitted for each input event.
+    ///
+    /// Each element is `Some(outputs)` if the key was mapped (swallowed and
+    /// remapped), or `None` if it passed through unchanged.
+    fn simulate_mapping(
+        lookup: &dyn Lookup,
+        events: &[(u16, bool)],
+    ) -> Vec<Option<Vec<NativeKey>>> {
+        let mut modifier_state: u8 = 0;
+        let mut results = Vec::new();
+
+        for &(key, is_down) in events {
+            // Map keycode to modifier bit.
+            let modifier_bit =
+                Key::from_native(key).and_then(|k| k.as_modifier_bit());
+
+            // Capture modifier state before updating (for concurrent
+            // matching).
+            let lookup_modifiers = modifier_state;
+
+            // Update modifier tracking.
+            if let Some(bit) = modifier_bit {
+                if is_down {
+                    modifier_state |= 1 << bit;
+                } else {
+                    modifier_state &= !(1 << bit);
+                }
+            }
+
+            // Perform lookup.
+            let active_outputs = lookup
+                .for_app(&lookup.active_app(), key, lookup_modifiers, None)
+                .or_else(|| lookup.global(key, lookup_modifiers, None))
+                .map(|v| v.to_vec());
+
+            // Undo modifier contribution if the key was swallowed.
+            if active_outputs.is_some()
+                && is_down
+                && let Some(bit) = modifier_bit
+            {
+                modifier_state &= !(1 << bit);
+            }
+
+            results.push(active_outputs);
+        }
+
+        results
+    }
+
+    // -----------------------------------------------------------------------
+    // In-process mapping engine integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn in_process_capslock_to_control() {
+        let yaml = r#"- mappings:
+    CapsLock: LeftControl"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        let results = simulate_mapping(
+            &lookup,
+            &[
+                (Key::CapsLock.as_native(), true),
+                (Key::CapsLock.as_native(), false),
+            ],
+        );
+
+        // Both events should be remapped to LeftControl.
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::LeftControl.as_native(),
+            }])
+        );
+        assert_eq!(
+            results[1],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::LeftControl.as_native(),
+            }])
+        );
+    }
+
+    #[test]
+    fn in_process_unmapped_passthrough() {
+        let yaml = r#"- mappings:
+    CapsLock: LeftControl"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        let results = simulate_mapping(
+            &lookup,
+            &[(Key::A.as_native(), true), (Key::A.as_native(), false)],
+        );
+
+        // 'A' has no mapping, so it passes through.
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0], None);
+        assert_eq!(results[1], None);
+    }
+
+    #[test]
+    fn in_process_simple_remap() {
+        let yaml = r#"- mappings:
+    A: B"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        let results = simulate_mapping(
+            &lookup,
+            &[(Key::A.as_native(), true), (Key::A.as_native(), false)],
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::B.as_native(),
+            }])
+        );
+        assert_eq!(
+            results[1],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::B.as_native(),
+            }])
+        );
+    }
+
+    #[test]
+    fn in_process_chord_output() {
+        let yaml = r#"- mappings:
+    CapsLock: Cmd+A"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        let results = simulate_mapping(
+            &lookup,
+            &[
+                (Key::CapsLock.as_native(), true),
+                (Key::CapsLock.as_native(), false),
+            ],
+        );
+
+        assert_eq!(results.len(), 2);
+        // Key-down produces one chord output: Cmd+A.
+        let down_outputs = results[0].as_ref().unwrap();
+        assert_eq!(down_outputs.len(), 1);
+        let chord = &down_outputs[0];
+        assert_eq!(chord.base, Key::A.as_native());
+        // Cmd modifier bit should be set (bit 6 for LeftCommand).
+        assert!((chord.modifiers & (1 << 6)) != 0);
+
+        // Key-up produces the same chord release.
+        let up_outputs = results[1].as_ref().unwrap();
+        assert_eq!(up_outputs.len(), 1);
+    }
+
+    #[test]
+    fn in_process_multi_output() {
+        let yaml = r#"- mappings:
+    CapsLock: [LeftControl, A]"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        let results = simulate_mapping(
+            &lookup,
+            &[
+                (Key::CapsLock.as_native(), true),
+                (Key::CapsLock.as_native(), false),
+            ],
+        );
+
+        assert_eq!(results.len(), 2);
+        // Key-down produces two outputs: LeftControl then A.
+        let down_outputs = results[0].as_ref().unwrap();
+        assert_eq!(down_outputs.len(), 2);
+        assert_eq!(down_outputs[0].base, Key::LeftControl.as_native());
+        assert_eq!(down_outputs[1].base, Key::A.as_native());
+
+        // Key-up produces the same two outputs.
+        let up_outputs = results[1].as_ref().unwrap();
+        assert_eq!(up_outputs.len(), 2);
+    }
+
+    #[test]
+    fn in_process_modifier_combination() {
+        let yaml = r#"- mappings:
+    Ctrl+A: B"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        let results = simulate_mapping(
+            &lookup,
+            &[
+                (Key::LeftControl.as_native(), true), // Ctrl down
+                (Key::A.as_native(), true),           // A down (with Ctrl)
+                (Key::A.as_native(), false),          // A up
+                (Key::LeftControl.as_native(), false), // Ctrl up
+            ],
+        );
+
+        assert_eq!(results.len(), 4);
+        // Ctrl down passes through (no modifier in its lookup_modifiers).
+        assert_eq!(results[0], None);
+        // A down with Ctrl modifier is remapped to B.
+        assert_eq!(
+            results[1],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::B.as_native(),
+            }])
+        );
+        // A up is also remapped (key-up of the trigger).
+        assert_eq!(
+            results[2],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::B.as_native(),
+            }])
+        );
+        // Ctrl up passes through.
+        assert_eq!(results[3], None);
+    }
+
+    #[test]
+    fn in_process_swap_mapping() {
+        let yaml = r#"- mappings:
+    CapsLock: LeftControl
+    LeftControl: CapsLock"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        // CapsLock -> LeftControl.
+        let results = simulate_mapping(
+            &lookup,
+            &[
+                (Key::CapsLock.as_native(), true),
+                (Key::CapsLock.as_native(), false),
+            ],
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::LeftControl.as_native(),
+            }])
+        );
+        assert_eq!(
+            results[1],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::LeftControl.as_native(),
+            }])
+        );
+
+        // LeftControl -> CapsLock.
+        let results = simulate_mapping(
+            &lookup,
+            &[
+                (Key::LeftControl.as_native(), true),
+                (Key::LeftControl.as_native(), false),
+            ],
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::CapsLock.as_native(),
+            }])
+        );
+        assert_eq!(
+            results[1],
+            Some(vec![NativeKey {
+                modifiers: 0,
+                base: Key::CapsLock.as_native(),
+            }])
+        );
+    }
+
+    #[test]
+    fn in_process_modifier_passthrough_with_remap() {
+        // When CapsLock is remapped to LeftControl, pressing it then 'A'
+        // should produce: Ctrl+A (the remapped modifier + the letter).
+        let yaml = r#"- mappings:
+    CapsLock: LeftControl"#;
+        let lookup = TestLookup::from_yaml(yaml);
+
+        let results = simulate_mapping(
+            &lookup,
+            &[
+                (Key::CapsLock.as_native(), true), // mapped to Ctrl
+                (Key::A.as_native(), true),        // A with Ctrl modifier
+                (Key::A.as_native(), false),       // A up
+                (Key::CapsLock.as_native(), false), // Ctrl up
+            ],
+        );
+
+        assert_eq!(results.len(), 4);
+        // CapsLock down is mapped to Ctrl.
+        assert!(results[0].is_some());
+        // 'A' with Ctrl modifier passes through (no rule for Ctrl+A).
+        assert_eq!(results[1], None);
+        // 'A' up passes through.
+        assert_eq!(results[2], None);
+        // CapsLock up is mapped to Ctrl up.
+        assert!(results[3].is_some());
+    }
 }
