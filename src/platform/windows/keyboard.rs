@@ -14,22 +14,21 @@ use std::ptr;
 use windows_sys::Win32::{
     Devices::{
         DeviceAndDriverInstallation::{
-            DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
-            SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
-            SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList,
-            SetupDiEnumDeviceInfo, SetupDiEnumDeviceInterfaces,
-            SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+            DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, SP_DEVICE_INTERFACE_DATA,
+            SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
+            SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
+            SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+            SetupDiGetDeviceInterfaceDetailW,
             SetupDiGetDeviceRegistryPropertyW,
         },
         HumanInterfaceDevice::{
-            HidD_FreePreparsedData, HidD_GetManufacturerString,
-            HidD_GetPreparsedData, HidD_GetProductString,
-            HidD_GetSerialNumberString, HidP_GetCaps,
-            HidP_GetLinkCollectionNodes, HIDP_CAPS,
-            HIDP_LINK_COLLECTION_NODE, PHIDP_PREPARSED_DATA,
+            HIDP_CAPS, HIDP_LINK_COLLECTION_NODE, HidD_FreePreparsedData,
+            HidD_GetManufacturerString, HidD_GetPreparsedData,
+            HidD_GetProductString, HidD_GetSerialNumberString, HidP_GetCaps,
+            HidP_GetLinkCollectionNodes, PHIDP_PREPARSED_DATA,
         },
     },
-    Foundation::{GetLastError, GENERIC_READ, INVALID_HANDLE_VALUE},
+    Foundation::{GENERIC_READ, GetLastError, INVALID_HANDLE_VALUE},
     Storage::FileSystem::{
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     },
@@ -136,18 +135,19 @@ fn parse_vid_pid(path: &str) -> Option<(u16, u16)> {
 fn derive_port(hardware_id: &str, interface_path: &str) -> Option<String> {
     // Check hardware ID first.
     if !hardware_id.is_empty()
-        && let Some(first_id) = hardware_id.split('\n').next() {
-            let lower = first_id.to_lowercase();
-            if lower.starts_with("usb") {
-                return Some("USB".to_string());
-            }
-            if lower.starts_with("bthenum") || lower.starts_with("bthledev") {
-                return Some("Bluetooth".to_string());
-            }
-            if lower.starts_with("acpi") {
-                return Some("Internal".to_string());
-            }
+        && let Some(first_id) = hardware_id.split('\n').next()
+    {
+        let lower = first_id.to_lowercase();
+        if lower.starts_with("usb") {
+            return Some("USB".to_string());
         }
+        if lower.starts_with("bthenum") || lower.starts_with("bthledev") {
+            return Some("Bluetooth".to_string());
+        }
+        if lower.starts_with("acpi") {
+            return Some("Internal".to_string());
+        }
+    }
 
     // Fall back to checking the interface path.
     let path_lower = interface_path.to_lowercase();
@@ -178,7 +178,7 @@ fn open_hid_device(interface_path: &[u16]) -> Option<*mut std::ffi::c_void> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             ptr::null_mut(), // no security attributes
             OPEN_EXISTING,
-            0, // no flags/attributes
+            0,               // no flags/attributes
             ptr::null_mut(), // no template file
         )
     };
@@ -244,7 +244,9 @@ fn get_device_property(
 // ---------------------------------------------------------------------------
 
 /// Read product, manufacturer, and serial from an open HID device handle.
-fn read_hid_strings(handle: *mut std::ffi::c_void) -> (String, String, String) {
+fn read_hid_strings(
+    handle: *mut std::ffi::c_void,
+) -> (String, String, String) {
     let mut product_buf = [0u16; 128];
     let mut vendor_buf = [0u16; 128];
     let mut serial_buf = [0u16; 128];
@@ -304,9 +306,8 @@ fn read_hid_strings(handle: *mut std::ffi::c_void) -> (String, String, String) {
 fn check_keyboard_via_hid(handle: *mut std::ffi::c_void) -> Option<bool> {
     let mut preparsed_data: PHIDP_PREPARSED_DATA = 0;
 
-    let success = unsafe {
-        HidD_GetPreparsedData(handle, &mut preparsed_data)
-    };
+    let success =
+        unsafe { HidD_GetPreparsedData(handle, &mut preparsed_data) };
 
     if !success || preparsed_data == 0 {
         return None;
@@ -369,7 +370,11 @@ fn check_keyboard_via_hid(handle: *mut std::ffi::c_void) -> Option<bool> {
 
 /// Falls back to checking device strings for keyboard-related keywords when
 /// HID preparsed data is unavailable.
-fn looks_like_keyboard(name: &str, hardware_id: &str, interface_path: &str) -> bool {
+fn looks_like_keyboard(
+    name: &str,
+    hardware_id: &str,
+    interface_path: &str,
+) -> bool {
     let name_lower = name.to_lowercase();
     let hw_lower = hardware_id.to_lowercase();
     let path_lower = interface_path.to_lowercase();
@@ -499,8 +504,9 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         let detail_data: *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W =
             detail_buf.as_mut_ptr() as *mut _;
         unsafe {
-            (*detail_data).cbSize =
-                std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+            (*detail_data).cbSize = std::mem::size_of::<
+                SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+            >() as u32;
         }
 
         let detail_ok = unsafe {
@@ -541,22 +547,17 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         // Get device info data for this interface so we can read registry
         // properties.  We need this regardless of whether the device open
         // succeeds, since we use it for fallback keyboard detection.
-        let mut dev_info_data: SP_DEVINFO_DATA =
-            unsafe { std::mem::zeroed() };
-        dev_info_data.cbSize =
-            std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
+        let mut dev_info_data: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+        dev_info_data.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
 
         let mut found_info = false;
         let mut idx = 0u32;
         loop {
-            let mut di_data: SP_DEVINFO_DATA =
-                unsafe { std::mem::zeroed() };
+            let mut di_data: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
             di_data.cbSize = std::mem::size_of::<SP_DEVINFO_DATA>() as u32;
 
-            if unsafe {
-                SetupDiEnumDeviceInfo(_guard.0, idx, &mut di_data)
-            }
-            == 0
+            if unsafe { SetupDiEnumDeviceInfo(_guard.0, idx, &mut di_data) }
+                == 0
             {
                 break;
             }
@@ -608,7 +609,11 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
                 // if preparsed data is unavailable.
                 match check_keyboard_via_hid(handle) {
                     Some(result) => result,
-                    None => looks_like_keyboard(&dev_desc, &hw_id_raw, &interface_path_str),
+                    None => looks_like_keyboard(
+                        &dev_desc,
+                        &hw_id_raw,
+                        &interface_path_str,
+                    ),
                 }
             }
             None => {
@@ -626,7 +631,12 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 
         // Read friendly name (preferred for display) and manufacturer.
         let dev_name = if found_info {
-            get_device_property(_guard.0, &mut dev_info_data, SPDRP_FRIENDLYNAME).unwrap_or_default()
+            get_device_property(
+                _guard.0,
+                &mut dev_info_data,
+                SPDRP_FRIENDLYNAME,
+            )
+            .unwrap_or_default()
         } else {
             String::new()
         };
@@ -638,16 +648,17 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         };
 
         // Read HID string attributes from the device if we can open it.
-        let (hid_product, hid_vendor, hid_serial) = match open_hid_device(&interface_path) {
-            Some(handle) => {
-                let strings = read_hid_strings(handle);
-                unsafe {
-                    windows_sys::Win32::Foundation::CloseHandle(handle);
+        let (hid_product, hid_vendor, hid_serial) =
+            match open_hid_device(&interface_path) {
+                Some(handle) => {
+                    let strings = read_hid_strings(handle);
+                    unsafe {
+                        windows_sys::Win32::Foundation::CloseHandle(handle);
+                    }
+                    strings
                 }
-                strings
-            }
-            None => (String::new(), String::new(), String::new()),
-        };
+                None => (String::new(), String::new(), String::new()),
+            };
 
         // Build the fields, preferring HID string attributes first, then
         // friendly name, then device description, falling back to path-derived
@@ -669,7 +680,8 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         };
 
         let vendor = if hid_vendor.is_empty() {
-            manufacturer.clone()
+            manufacturer
+                .clone()
                 .or_else(|| parse_vendor_from_path(&interface_path_str))
                 .unwrap_or_else(|| "<unknown>".to_string())
         } else {
@@ -776,16 +788,10 @@ mod tests {
     #[test]
     fn parse_vendor_from_path_finds_known_vendor() {
         let path = "\\?\\hid#vid_046d&pid_c52b&mi_00#...";
-        assert_eq!(
-            parse_vendor_from_path(path),
-            Some("Logitech".to_string())
-        );
+        assert_eq!(parse_vendor_from_path(path), Some("Logitech".to_string()));
 
         let path = "\\?\\hid#vid_04f2&pid_2159...";
-        assert_eq!(
-            parse_vendor_from_path(path),
-            Some("Chicony".to_string())
-        );
+        assert_eq!(parse_vendor_from_path(path), Some("Chicony".to_string()));
 
         let path = "\\?\\hid#vid_045e&pid_07ff...";
         assert_eq!(
@@ -805,7 +811,9 @@ mod tests {
 
     #[test]
     fn parse_vendor_from_path_no_vid() {
-        assert!(parse_vendor_from_path("\\?\\hid#vid_1234&pid_abcd").is_some());
+        assert!(
+            parse_vendor_from_path("\\?\\hid#vid_1234&pid_abcd").is_some()
+        );
         assert!(parse_vendor_from_path("no_vid_here").is_none());
     }
 
@@ -840,11 +848,7 @@ mod tests {
     #[test]
     fn looks_like_keyboard_rejects_non_keyboard() {
         assert!(!looks_like_keyboard("HID-compliant mouse", "", ""));
-        assert!(!looks_like_keyboard(
-            "",
-            "USB\\VID_046D+PID_C077&MI_01",
-            ""
-        ));
+        assert!(!looks_like_keyboard("", "USB\\VID_046D+PID_C077&MI_01", ""));
     }
 
     #[test]

@@ -15,17 +15,14 @@
 //! marker so the monitoring callback can distinguish "input" (marked) from
 //! "output" (unmarked, emitted by the daemon via `SendInput`).
 
-use std::sync::{
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 use windows_sys::Win32::{
     Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
         Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, SendInput,
-            VIRTUAL_KEY,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
             CallNextHookEx, KBDLLHOOKSTRUCT, SetWindowsHookExW,
@@ -291,10 +288,8 @@ extern "system" fn monitor_keyboard_proc(
 
         let vk = kbd_struct.vkCode as u16;
         let msg = w_param as u32;
-        let is_down = matches!(
-            msg,
-            WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP
-        );
+        let is_down =
+            matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP);
 
         // Only capture key-down and key-up; ignore key-repeat which is
         // reported as `WM_KEYDOWN` with the repeat count > 1 in the

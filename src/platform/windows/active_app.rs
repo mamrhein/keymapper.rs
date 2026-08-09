@@ -61,9 +61,10 @@ pub fn get_active_app_name() -> String {
     // separators (e.g. "C:\Windows\System32\notepad.exe"), so we find the last
     // backslash and take the file name from there.
     if let Ok(path) = String::from_utf16(&buffer[..size as usize])
-        && let Some(stem) = path.rsplit('\\').next() {
-            return stem.to_string();
-        }
+        && let Some(stem) = path.rsplit('\\').next()
+    {
+        return stem.to_string();
+    }
 
     "unknown".to_string()
 }

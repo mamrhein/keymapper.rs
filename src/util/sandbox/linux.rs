@@ -21,10 +21,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File},
-    os::unix::{
-        fs::{MetadataExt, OpenOptionsExt},
-
-    },
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
     process,
     sync::{
