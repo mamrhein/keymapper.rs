@@ -30,7 +30,7 @@ fn is_gui_process(pid: Pid) -> bool {
 
     // environ is null-separated KEY=VALUE pairs.  We check for the presence
     // of display server environment variables by searching for the key prefix.
-    data.windows(18).any(|w| w == b"WAYLAND_DISPLAY=")
+    data.windows(16).any(|w| w == b"WAYLAND_DISPLAY=")
         || data.windows(8).any(|w| w == b"DISPLAY=")
 }
 
@@ -97,8 +97,28 @@ pub fn list_app_names() -> Vec<String> {
             continue;
         };
 
+        // Try matching by executable name first.
         if let Some(app_id) =
             super::super::linux::desktop::resolve_app_id(&exe)
+        {
+            app_ids.push(app_id);
+            continue;
+        }
+
+        // Fall back to matching the process cmdline against the full Exec
+        // path from .desktop files.  This handles apps whose actual binary
+        // name differs from the Exec key (e.g., sandboxed apps like Zed
+        // where the running binary is "zed-editor" but Exec is "zed").
+        let Ok(cmdline) =
+            fs::read(format!("/proc/{}/cmdline", process.pid().as_u32()))
+        else {
+            continue;
+        };
+
+        if let Some(app_id) =
+            super::super::linux::desktop::resolve_app_id_from_cmdline(
+                &cmdline,
+            )
         {
             app_ids.push(app_id);
         }

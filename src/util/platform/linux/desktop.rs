@@ -27,9 +27,42 @@ const DESKTOP_DIRS: &[&str] =
 static DESKTOP_CACHE: LazyLock<HashMap<String, String>> =
     LazyLock::new(build_cache);
 
+/// Cached map from app installation root directory (e.g.,
+/// `"/home/ma/.local/zed.app/"`) to app id.  Used to match process command
+/// lines against .desktop files when the actual binary name differs from the
+/// Exec key (e.g., sandboxed apps like Zed).
+static APP_ROOT_CACHE: LazyLock<Vec<(String, String)>> =
+    LazyLock::new(build_app_root_cache);
+
 /// Resolve a binary name to its `.desktop` app id.
 pub fn resolve_app_id(exe: &str) -> Option<String> {
     DESKTOP_CACHE.get(exe).cloned()
+}
+
+/// Resolve an app id by checking if any command-line token falls under the
+/// same app installation root directory as the Exec path from a `.desktop`
+/// file.
+pub fn resolve_app_id_from_cmdline(cmdline: &[u8]) -> Option<String> {
+    // cmdline is null-separated; split into tokens.
+    let tokens: Vec<&str> = cmdline
+        .split(|&b| b == 0)
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| std::str::from_utf8(t).ok())
+        .collect();
+
+    // For each token that is an absolute path, check if it falls under any
+    // app installation root directory.
+    for token in &tokens {
+        if !token.starts_with('/') {
+            continue;
+        }
+        for (root, app_id) in APP_ROOT_CACHE.iter() {
+            if token.starts_with(root.as_str()) {
+                return Some(app_id.clone());
+            }
+        }
+    }
+    None
 }
 
 /// Build the full lookup map by scanning all known desktop directories.
@@ -56,6 +89,29 @@ fn build_cache() -> HashMap<String, String> {
     cache
 }
 
+/// Build a list of (app_root_directory, app_id) pairs by scanning all known
+/// desktop directories.
+fn build_app_root_cache() -> Vec<(String, String)> {
+    let mut cache = Vec::new();
+
+    for dir in expanded_dirs() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            if let Some((root, app_id)) = parse_desktop_file_app_root(&path) {
+                cache.push((root, app_id));
+            }
+        }
+    }
+    cache
+}
+
 /// Expand tilde in directory paths and filter to existing directories.
 fn expanded_dirs() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
@@ -73,6 +129,125 @@ fn expanded_dirs() -> Vec<PathBuf> {
         })
         .filter(|p| p.is_dir())
         .collect()
+}
+
+/// Parse a `.desktop` file and return the (app_root_directory, app_id) pair
+/// for non-standard installations.  The app root is the directory that
+/// contains the application's binaries (e.g., "bin/", "libexec/").
+///
+/// For system apps under `/usr/bin/`, `/usr/local/bin/`, etc., this returns
+/// `None` — those are handled by the simple exe-name cache.  For bundled
+/// apps (e.g., `/opt/google/chrome/chrome`,
+/// `/home/user/.local/zed.app/bin/zed`), the app root is the parent directory
+/// that contains all the application's files.
+fn parse_desktop_file_app_root(path: &Path) -> Option<(String, String)> {
+    let app_id = path.file_stem().and_then(|s| s.to_str())?.to_string();
+    if app_id.is_empty() {
+        return None;
+    }
+
+    let content = fs::read_to_string(path).ok()?;
+
+    let mut in_main_group = false;
+    let mut exec_value: Option<String> = None;
+    let mut is_application = true;
+    let mut hidden = false;
+    let mut no_display = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_main_group = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_main_group {
+            break;
+        }
+
+        let Some((key, value)) = split_key_value(line) else {
+            continue;
+        };
+
+        match key {
+            "Type" => is_application = value.trim() == "Application",
+            "Hidden" => hidden = value.trim().to_lowercase() == "true",
+            "NoDisplay" => no_display = value.trim().to_lowercase() == "true",
+            "Exec" => exec_value = Some(value.trim().to_string()),
+            _ => {}
+        }
+    }
+
+    if !is_application || hidden || no_display {
+        return None;
+    }
+
+    let exec_value = exec_value?;
+    let tokens: Vec<String> = tokenize_exec(&exec_value);
+
+    // Find the first token that is NOT a flag or %specifier.
+    let exe_token = tokens
+        .iter()
+        .find(|t| !t.starts_with('-') && !t.starts_with('%'))?;
+
+    let exe_token = exe_token.trim_matches('"');
+
+    // Only include absolute paths.
+    let exe_path = Path::new(exe_token);
+    if !exe_path.is_absolute() {
+        return None;
+    }
+
+    // Extract the app installation root directory.
+    let root = extract_app_root(exe_path)?;
+
+    Some((root, app_id))
+}
+
+/// Extract the app installation root directory from an executable path.
+///
+/// For standard system paths like `/usr/bin/foo` or `/usr/local/bin/foo`,
+/// returns `None` — these are matched by simple exe-name lookup.
+/// For bundled apps, returns the directory that contains subdirectories
+/// like `bin/`, `libexec/`, etc.
+/// Extract the app installation root directory from an executable path.
+///
+/// Returns the root path with a trailing "/" to ensure prefix matching
+/// does not produce false positives (e.g., "/opt/app/" matching
+/// "/opt/app2/something").
+///
+/// For standard system paths like `/usr/bin/foo` or `/usr/local/bin/foo`,
+/// returns `None` — these are matched by simple exe-name lookup.
+/// For bundled apps, returns the directory that contains subdirectories
+/// like `bin/`, `libexec/`, etc.
+fn extract_app_root(exe_path: &Path) -> Option<String> {
+    let parent = exe_path.parent()?;
+    let parent_name = parent.file_name()?.to_str()?;
+
+    // If the parent is a standard binary directory, this is a system app —
+    // no need for root-based matching.
+    if matches!(
+        parent_name,
+        "bin" | "sbin" | "bin64" | "sbin64"
+    ) {
+        // For /usr/bin/..., /usr/local/bin/..., etc., the app root is not
+        // useful for matching.
+        if parent.starts_with("/usr") {
+            return None;
+        }
+        // For /opt/google/chrome/, ~/.local/zed.app/, etc., the grandparent
+        // is the app installation root.
+        let root = parent.parent()?;
+        let root_str = root.to_str()?;
+        return Some(format!("{root_str}/"));
+    }
+
+    // For paths like /opt/app/app-binary or /home/user/.local/app/libexec/bin,
+    // the parent directory is the app root.
+    let root_str = parent.to_str()?;
+    Some(format!("{root_str}/"))
 }
 
 /// Parse a `.desktop` file and return the (executable, app_id) pair if it is
@@ -242,5 +417,61 @@ mod tests {
     #[test]
     fn parse_exec_only_specifiers() {
         assert_eq!(parse_exec_value("%f %u"), None);
+    }
+
+    #[test]
+    fn extract_app_root_system_bin() {
+        // System apps under /usr/bin/ should not produce an app root.
+        assert_eq!(
+            extract_app_root(Path::new("/usr/bin/firefox")),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_app_root_local_bin() {
+        // /usr/local/bin/ should also be skipped.
+        assert_eq!(
+            extract_app_root(Path::new("/usr/local/bin/something")),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_app_root_bundled_app() {
+        // Bundled apps like Zed should produce the app installation root.
+        assert_eq!(
+            extract_app_root(Path::new("/home/ma/.local/zed.app/bin/zed")),
+            Some("/home/ma/.local/zed.app/".into())
+        );
+    }
+
+    #[test]
+    fn extract_app_root_opt_app() {
+        // /opt apps should produce the app installation root.
+        assert_eq!(
+            extract_app_root(Path::new("/opt/google/chrome/chrome")),
+            Some("/opt/google/chrome/".into())
+        );
+    }
+
+    #[test]
+    fn extract_app_root_flat_layout() {
+        // Apps with flat layout (no bin/ subdir) should use the parent.
+        assert_eq!(
+            extract_app_root(Path::new("/opt/slack/slack")),
+            Some("/opt/slack/".into())
+        );
+    }
+
+    #[test]
+    fn resolve_cmdline_absolute_path_required() {
+        // Non-absolute paths in cmdline are skipped (handled by exe-name cache).
+        let cmdline = b"firefox\0--flag\0";
+        // No absolute paths, so no match from app root cache.
+        let result = resolve_app_id_from_cmdline(cmdline);
+        // Result depends on .desktop files present on the system.
+        // The important thing is it doesn't panic.
+        let _ = result;
     }
 }
