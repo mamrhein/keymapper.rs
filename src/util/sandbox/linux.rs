@@ -363,13 +363,11 @@ fn scan_event_devices() -> Vec<(u64, String)> {
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        if path.to_string_lossy().starts_with("/dev/input/event") {
-            if let Ok(metadata) = fs::metadata(&path) {
-                devices.push((
-                    metadata.rdev(),
-                    path.to_string_lossy().to_string(),
-                ));
-            }
+        if path.to_string_lossy().starts_with("/dev/input/event")
+            && let Ok(metadata) = fs::metadata(&path)
+        {
+            devices
+                .push((metadata.rdev(), path.to_string_lossy().to_string()));
         }
     }
 
@@ -409,12 +407,11 @@ fn find_device_by_name(name: &str) -> Option<Device> {
 
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        if path.to_string_lossy().starts_with("/dev/input/event") {
-            if let Ok(device) = open_device_nonblock(&path) {
-                if device.name() == Some(name) {
-                    return Some(device);
-                }
-            }
+        if path.to_string_lossy().starts_with("/dev/input/event")
+            && let Ok(device) = open_device_nonblock(&path)
+            && device.name() == Some(name)
+        {
+            return Some(device);
         }
     }
 

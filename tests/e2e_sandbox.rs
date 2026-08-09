@@ -54,8 +54,11 @@ impl E2eFileLock {
             if rc == 0 {
                 return Ok(Self { file });
             }
-            if unsafe { *libc::__error() } != libc::EWOULDBLOCK {
-                return Err(std::io::Error::from_raw_os_error(rc));
+            // flock returned -1 on error.  Check if it's EWOULDBLOCK (another
+            // process holds the lock) — if so, retry.  Otherwise propagate.
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(err);
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }

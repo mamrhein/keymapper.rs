@@ -40,10 +40,10 @@ evdev = "0.13"
 udev = "0.9"
 uinput = "0.1"
 sysinfo = "0.39" # process enumeration for `keymapper appnames`
-x11rb = { version = "0.13", features = ["allow-unsafe-code"], optional = true }
+x11rb = { version = "0.14", features = ["allow-unsafe-code"], optional = true }
 wayland-client = { version = "0.31", optional = true }
 cosmic-client-toolkit = { version = "0.2", optional = true }
-zbus = { version = "4", features = ["blocking"], optional = true }
+zbus = { version = "5", features = ["blocking"], optional = true }
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
