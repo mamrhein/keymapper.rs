@@ -29,21 +29,21 @@ pub fn get_active_app_name() -> String {
         "x11" => {
             #[cfg(feature = "x11")]
             {
-                return x11::get_active_app_name();
+                x11::get_active_app_name()
             }
             #[cfg(not(feature = "x11"))]
             {
-                return "unknown".to_string();
+                "unknown".to_string()
             }
         }
         "wayland" => {
             #[cfg(feature = "wayland")]
             {
-                return wayland::get_active_app_name();
+                wayland::get_active_app_name()
             }
             #[cfg(not(feature = "wayland"))]
             {
-                return "unknown".to_string();
+                "unknown".to_string()
             }
         }
         _ => {
