@@ -64,6 +64,11 @@ jobs:
       - name: Run tests
         run: cargo nextest run
 
+      - name: Build DriverKit driver
+        run: |
+          cd driver && make release
+          echo "Driver built at driver/Build/Products/Release/KeyMapperVirtualHID.kext"
+
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -89,6 +94,29 @@ jobs:
         run: |
           DMG="keymapper-${{ github.ref_name }}-${{ matrix.target }}.dmg"
           gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber
+
+  # -----------------------------------------------------------------------
+  # macOS e2e — run integration tests as root to bypass Privacy & Security
+  # -----------------------------------------------------------------------
+  macos-e2e:
+    needs: create-release
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Build DriverKit driver
+        run: cd driver && make release
+
+      - name: Run e2e tests as root
+        run: |
+          sudo bash scripts/.sign-and-test-e2e.sh --features driverkit
 
   # -----------------------------------------------------------------------
   # Linux — x86_64 (native)
