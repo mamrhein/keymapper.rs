@@ -32,6 +32,8 @@ use signal_hook::{
     flag::register,
 };
 
+#[cfg(feature = "driverkit")]
+use super::hid_socket::{HidSocket, build_keyboard_report, modifier_to_hid};
 use super::key::Key;
 use crate::{
     common::modifier::ModifierRole,
@@ -79,7 +81,45 @@ fn modifier_bit_to_code(bit: u8) -> Option<CGKeyCode> {
 
 /// Emit a single `NativeKey` as a chord: hold modifiers, press base,
 /// release base, release modifiers in reverse order.
+///
+/// When the `driverkit` feature is enabled and a `HidSocket` is available,
+/// emits a single USB HID keyboard report instead of individual CGEvents.
+/// Falls back to CGEvent posting if the driver is not loaded or emission
+/// fails.
+#[cfg(not(feature = "driverkit"))]
 fn emit_key_event(source: &CFRetained<CGEventSource>, native_key: &NativeKey) {
+    emit_cg_event_chord(source, native_key);
+}
+
+#[cfg(feature = "driverkit")]
+fn emit_key_event(
+    source: &CFRetained<CGEventSource>,
+    hid_socket: &Option<HidSocket>,
+    native_key: &NativeKey,
+) {
+    // Prefer the virtual HID device if available.
+    if let Some(socket) = hid_socket {
+        if let Ok(report) = build_keyboard_report(
+            modifier_to_hid(native_key.modifiers),
+            Some(native_key.base as CGKeyCode),
+        ) {
+            if socket.send_report(&report).is_ok() {
+                return;
+            }
+
+            eprintln!("HID socket emission failed, falling back to CGEvent");
+        }
+    }
+
+    // Fallback to CGEvent if driver is not available or report failed.
+    emit_cg_event_chord(source, native_key);
+}
+
+/// Post a `NativeKey` as individual CGEvent key-down/key-up events.
+fn emit_cg_event_chord(
+    source: &CFRetained<CGEventSource>,
+    native_key: &NativeKey,
+) {
     let mut pressed_modifiers: Vec<CGKeyCode> = Vec::new();
 
     // Press modifiers.
@@ -140,6 +180,10 @@ struct TapContext {
     source: CFRetained<CGEventSource>,
     /// Bitmask tracking which specific modifier keys are physically pressed.
     modifier_state: u8,
+    /// Connection to the DriverKit virtual HID keyboard.  `None` when the
+    /// driver is not loaded; falls back to CGEvent posting.
+    #[cfg(feature = "driverkit")]
+    hid_socket: Option<HidSocket>,
 }
 
 /// Holds the tap, run-loop-source, and callback context so they stay alive
@@ -171,10 +215,28 @@ pub fn start_mapping(
         CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
             .ok_or("Failed to create CGEventSource")?;
 
+    // Try to connect to the DriverKit virtual HID keyboard driver.
+    #[cfg(feature = "driverkit")]
+    let hid_socket = match HidSocket::discover_and_open() {
+        Ok(socket) => {
+            eprintln!("Using DriverKit HID keyboard for event emission.");
+            Some(socket)
+        }
+        Err(e) => {
+            eprintln!(
+                "DriverKit HID driver not available ({e}), falling back to \
+                 CGEvent."
+            );
+            None
+        }
+    };
+
     let context_ptr = Box::into_raw(Box::new(TapContext {
         lookup,
         source,
         modifier_state: 0,
+        #[cfg(feature = "driverkit")]
+        hid_socket,
     })) as *mut _;
 
     let tap = unsafe {
@@ -288,7 +350,15 @@ unsafe extern "C-unwind" fn macos_keyboard_callback_ffi(
         // are emitted and `null` is returned to suppress the original event.
         if is_down {
             for native_key in &outputs {
+                #[cfg(not(feature = "driverkit"))]
                 emit_key_event(&context.source, native_key);
+
+                #[cfg(feature = "driverkit")]
+                emit_key_event(
+                    &context.source,
+                    &context.hid_socket,
+                    native_key,
+                );
             }
         }
         return std::ptr::null_mut();

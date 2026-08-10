@@ -73,3 +73,9 @@ windows-sys = { version = "0.61", features = [
 default = ["wayland"]
 x11 = ["dep:x11rb"]
 wayland = ["dep:wayland-client", "dep:cosmic-client-toolkit", "dep:zbus"]
+
+# Enable the DriverKit-based virtual HID keyboard on macOS.  When active,
+# synthetic key events are emitted through a real hardware-level HID device
+# instead of CGEvent, bypassing the synthetic-event restrictions of modern
+# macOS.  Requires the KeyMapperDriver extension to be loaded.
+driverkit = []

@@ -8,6 +8,8 @@
 // $Revision$
 
 mod active_app;
+#[cfg(feature = "driverkit")]
+mod hid_socket;
 mod key;
 mod keyboard;
 mod mapping;
