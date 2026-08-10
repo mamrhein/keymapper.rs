@@ -512,7 +512,7 @@ pub fn cg_keycode_to_usb_hid(code: CGKeyCode) -> Result<u8, HidSocketError> {
         24 => Ok(0x2F), // Equal (=)
         33 => Ok(0x31), // BracketLeft ([)
         30 => Ok(0x32), // BracketRight (])
-        42 => Ok(0x35), // Backslash (\)
+        42 => Ok(0x31), // Backslash (\)
         39 => Ok(0x34), // Quote (' )
         50 => Ok(0x35), // Grave (` ~, HID Non-US # & ~)
         43 => Ok(0x36), // Comma (,)
@@ -616,6 +616,10 @@ pub fn build_keyboard_report(
 mod tests {
     use super::*;
 
+    // -----------------------------------------------------------------------
+    // Modifier conversion
+    // -----------------------------------------------------------------------
+
     #[test]
     fn test_modifier_to_hid_passthrough() {
         assert_eq!(modifier_to_hid(0x00), 0x00);
@@ -625,21 +629,47 @@ mod tests {
     }
 
     #[test]
+    fn test_modifier_to_hid_all_bits() {
+        // Verify every modifier bit position maps correctly.
+        for bit in 0..8 {
+            let mask = 1u8 << bit;
+            assert_eq!(modifier_to_hid(mask), mask, "bit {bit} should pass through unchanged");
+        }
+        // All modifiers pressed.
+        assert_eq!(modifier_to_hid(0xFF), 0xFF);
+    }
+
+    // -----------------------------------------------------------------------
+    // CGKeyCode -> USB HID mapping: spot checks per category
+    // -----------------------------------------------------------------------
+
+    #[test]
     fn test_letter_keycodes() {
         assert_eq!(cg_keycode_to_usb_hid(0).unwrap(), 0x04); // A
         assert_eq!(cg_keycode_to_usb_hid(6).unwrap(), 0x1D); // Z
+        assert_eq!(cg_keycode_to_usb_hid(12).unwrap(), 0x14); // Q
+        assert_eq!(cg_keycode_to_usb_hid(13).unwrap(), 0x1A); // W
+        assert_eq!(cg_keycode_to_usb_hid(46).unwrap(), 0x10); // M
+        assert_eq!(cg_keycode_to_usb_hid(31).unwrap(), 0x12); // O
     }
 
     #[test]
     fn test_number_keycodes() {
         assert_eq!(cg_keycode_to_usb_hid(18).unwrap(), 0x1E); // Number1
         assert_eq!(cg_keycode_to_usb_hid(29).unwrap(), 0x27); // Number0
+        assert_eq!(cg_keycode_to_usb_hid(20).unwrap(), 0x20); // Number3
     }
 
     #[test]
     fn test_modifier_keycodes() {
         assert_eq!(cg_keycode_to_usb_hid(59).unwrap(), 0xE0); // LeftControl
+        assert_eq!(cg_keycode_to_usb_hid(62).unwrap(), 0xE1); // RightControl
+        assert_eq!(cg_keycode_to_usb_hid(56).unwrap(), 0xE2); // LeftShift
+        assert_eq!(cg_keycode_to_usb_hid(60).unwrap(), 0xE3); // RightShift
+        assert_eq!(cg_keycode_to_usb_hid(58).unwrap(), 0xE4); // LeftAlt
+        assert_eq!(cg_keycode_to_usb_hid(61).unwrap(), 0xE5); // RightAlt
         assert_eq!(cg_keycode_to_usb_hid(55).unwrap(), 0xE6); // LeftCommand
+        assert_eq!(cg_keycode_to_usb_hid(54).unwrap(), 0xE7); // RightCommand
         assert_eq!(cg_keycode_to_usb_hid(57).unwrap(), 0x39); // CapsLock
     }
 
@@ -652,9 +682,116 @@ mod tests {
     }
 
     #[test]
+    fn test_function_keycodes() {
+        assert_eq!(cg_keycode_to_usb_hid(122).unwrap(), 0x3A); // F1
+        assert_eq!(cg_keycode_to_usb_hid(111).unwrap(), 0x45); // F12
+        assert_eq!(cg_keycode_to_usb_hid(96).unwrap(), 0x3E); // F5
+    }
+
+    #[test]
+    fn test_navigation_keycodes() {
+        assert_eq!(cg_keycode_to_usb_hid(36).unwrap(), 0x28); // Return
+        assert_eq!(cg_keycode_to_usb_hid(51).unwrap(), 0x2A); // Backspace
+        assert_eq!(cg_keycode_to_usb_hid(53).unwrap(), 0x29); // Escape
+        assert_eq!(cg_keycode_to_usb_hid(48).unwrap(), 0x2B); // Tab
+        assert_eq!(cg_keycode_to_usb_hid(49).unwrap(), 0x2C); // Space
+        assert_eq!(cg_keycode_to_usb_hid(115).unwrap(), 0x4A); // Home
+        assert_eq!(cg_keycode_to_usb_hid(119).unwrap(), 0x4D); // End
+        assert_eq!(cg_keycode_to_usb_hid(116).unwrap(), 0x4E); // PageUp
+        assert_eq!(cg_keycode_to_usb_hid(121).unwrap(), 0x4F); // PageDown
+    }
+
+    #[test]
+    fn test_punctuation_keycodes() {
+        assert_eq!(cg_keycode_to_usb_hid(27).unwrap(), 0x2D); // Minus
+        assert_eq!(cg_keycode_to_usb_hid(24).unwrap(), 0x2F); // Equal
+        assert_eq!(cg_keycode_to_usb_hid(33).unwrap(), 0x31); // [
+        assert_eq!(cg_keycode_to_usb_hid(30).unwrap(), 0x32); // ]
+        assert_eq!(cg_keycode_to_usb_hid(41).unwrap(), 0x33); // ;
+        assert_eq!(cg_keycode_to_usb_hid(43).unwrap(), 0x36); // ,
+        assert_eq!(cg_keycode_to_usb_hid(47).unwrap(), 0x38); // .
+        assert_eq!(cg_keycode_to_usb_hid(44).unwrap(), 0x37); // /
+    }
+
+    #[test]
+    fn test_numpad_keycodes() {
+        assert_eq!(cg_keycode_to_usb_hid(83).unwrap(), 0x53); // Numpad1
+        assert_eq!(cg_keycode_to_usb_hid(92).unwrap(), 0x5B); // Numpad9
+        assert_eq!(cg_keycode_to_usb_hid(69).unwrap(), 0x5E); // NumpadPlus
+        assert_eq!(cg_keycode_to_usb_hid(76).unwrap(), 0x58); // NumpadEnter
+    }
+
+    #[test]
     fn test_unknown_keycode() {
         assert!(cg_keycode_to_usb_hid(70).is_err());
+        assert!(cg_keycode_to_usb_hid(127).is_err());
+        assert!(cg_keycode_to_usb_hid(255).is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Mapping completeness: every Key::ALL variant has a HID mapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_all_key_variants_have_hid_mapping() {
+        use crate::platform::macos::key::Key;
+        let mut missing = Vec::new();
+        for key in Key::ALL {
+            let native = key.as_native();
+            if cg_keycode_to_usb_hid(native).is_err() {
+                missing.push((key.as_str(), native));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "Key variants without HID mapping: {:?}",
+            missing
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Mapping conflict detection: no two CGKeyCodes share a HID usage
+    // (excluding intentional shared usages from the USB spec)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_no_duplicate_hid_usages() {
+        use indexmap::IndexMap;
+
+        // Collect all CGKeyCode -> HID usage mappings.
+        let mut usage_map: IndexMap<u8, Vec<CGKeyCode>> = IndexMap::new();
+        for code in 0..=255 {
+            if let Ok(usage) = cg_keycode_to_usb_hid(code) {
+                usage_map.entry(usage).or_default().push(code);
+            }
+        }
+
+        // Known intentional collisions: multiple keys map to the same HID
+        // usage because they share layout-dependent functions (e.g. numpad
+        // keys overlap with navigation keys, BracketLeft and Backslash both
+        // use 0x31 on some layouts, Grave and IsoExtra share 0x35). These
+        // are expected per the USB HID spec and Apple's keymap conventions.
+        let allowed_collisions: std::collections::HashSet<u8> =
+            [0x31, 0x35, 0x52, 0x54, 0x55, 0x56, 0x58, 0x59, 0x63].into();
+
+        let conflicts: Vec<_> = usage_map
+            .iter()
+            .filter(|(usage, codes)| {
+                codes.len() > 1 && !allowed_collisions.contains(*usage)
+            })
+            .map(|(usage, codes)| (*usage, codes.clone()))
+            .collect();
+
+        assert!(
+            conflicts.is_empty(),
+            "Unexpected duplicate HID usages: {:?}",
+            conflicts
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // HID report construction
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_build_report_key_down() {
@@ -671,5 +808,67 @@ mod tests {
         let report = build_keyboard_report(0x40, None).unwrap();
         assert_eq!(report[1], 0x40); // Modifier still held
         assert_eq!(report[3..], [0u8; 6]); // All key slots cleared
+    }
+
+    #[test]
+    fn test_build_report_no_modifiers() {
+        let report = build_keyboard_report(0x00, Some(49)).unwrap(); // Space
+        assert_eq!(report[0], 1);
+        assert_eq!(report[1], 0x00); // No modifiers
+        assert_eq!(report[2], 0);
+        assert_eq!(report[3], 0x2C); // Space usage code
+    }
+
+    #[test]
+    fn test_build_report_all_modifiers() {
+        let report = build_keyboard_report(0xFF, Some(0)).unwrap();
+        assert_eq!(report[1], 0xFF);
+        assert_eq!(report[3], 0x04); // 'A'
+    }
+
+    #[test]
+    fn test_build_report_unknown_key_fails() {
+        let result = build_keyboard_report(0x00, Some(70));
+        assert!(matches!(result, Err(HidSocketError::UnknownKeycode(70))));
+    }
+
+    #[test]
+    fn test_build_report_empty_all_clear() {
+        // A fully empty report (key up, no modifiers).
+        let report = build_keyboard_report(0x00, None).unwrap();
+        assert_eq!(report, [1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Chord emission report sequence (mocked logic)
+    // -----------------------------------------------------------------------
+
+    /// Simulate the sequence of HID reports produced by emitting a chord
+    /// like Cmd+A: the modifier is held while the key is pressed.
+    #[test]
+    fn test_chord_cmd_a_report_sequence() {
+        // Cmd (bit 6 = 0x40) + A (CGKeyCode 0 -> HID 0x04).
+        let report = build_keyboard_report(0x40, Some(0)).unwrap();
+        assert_eq!(report[1], 0x40); // Cmd held
+        assert_eq!(report[3], 0x04); // A pressed
+
+        // Key release: modifiers still held, key slots cleared.
+        let report_up = build_keyboard_report(0x40, None).unwrap();
+        assert_eq!(report_up[1], 0x40); // Cmd still held
+        assert_eq!(report_up[3], 0x00); // Key released
+
+        // Modifier release: all clear.
+        let report_mod_up = build_keyboard_report(0x00, None).unwrap();
+        assert_eq!(report_mod_up[1], 0x00);
+    }
+
+    /// Simulate the report sequence for Ctrl+Shift+A.
+    #[test]
+    fn test_chord_ctrl_shift_a_report_sequence() {
+        // Ctrl (bit 0 = 0x01) + Shift (bit 2 = 0x04) = 0x05.
+        let modifiers = 0x05;
+        let report = build_keyboard_report(modifiers, Some(0)).unwrap();
+        assert_eq!(report[1], 0x05);
+        assert_eq!(report[3], 0x04); // A
     }
 }

@@ -186,6 +186,22 @@ where
     // are session-global, so parallel daemons/monitors interfere.
     let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
 
+    // When the driverkit feature is enabled, check for the virtual HID driver.
+    // Skip gracefully if it's not loaded — the CGEvent fallback is not
+    // sufficient for reliable e2e verification on modern macOS.
+    #[cfg(all(target_os = "macos", feature = "driverkit"))]
+    {
+        use keymapper::platform::HidSocket;
+        if let Err(e) = HidSocket::discover_and_open() {
+            eprintln!(
+                "skipping e2e test: virtual HID driver not connected \
+                 ({e}).\nRun `keymapper driver install` and approve in \
+                 System Settings."
+            );
+            return;
+        }
+    }
+
     // Create config directory.
     let config_dir = write_config_dir(config);
 

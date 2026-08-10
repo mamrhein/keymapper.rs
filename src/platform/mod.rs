@@ -23,7 +23,7 @@ pub(crate) use linux::get_active_app_name;
 #[cfg(target_os = "linux")]
 pub use linux::{Key, list_keyboards, start_mapping};
 #[cfg(all(target_os = "macos", feature = "driverkit"))]
-pub(crate) use macos::HidSocket;
+pub use macos::HidSocket;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::get_active_app_name;
 #[cfg(target_os = "macos")]
