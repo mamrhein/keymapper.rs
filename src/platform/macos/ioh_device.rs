@@ -482,15 +482,15 @@ pub enum IOHidResult {
     Unavailable(String),
 }
 
-/// Try to start keyboard input capture via IOHIDManager.
+/// Start keyboard input capture via IOHIDManager.
 ///
 /// If successful, returns an `IOHidResult::Active` containing the handle and a
-/// shutdown flag.  The caller is responsible for running the CFRunLoop (shared
-/// with CGEventTap fallback) until the shutdown flag is set.
+/// shutdown flag.  The caller is responsible for running the CFRunLoop until
+/// the shutdown flag is set.
 ///
 /// Returns `IOHidResult::Unavailable` when IOHIDManager symbols cannot be
-/// resolved or the manager fails to open, allowing graceful fallback to the
-/// CGEventTap path.
+/// resolved or the manager fails to open.  There is no fallback — input
+/// capture requires IOHIDManager.
 pub fn start_iohid_mapping(
     lookup: std::sync::Arc<
         parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
