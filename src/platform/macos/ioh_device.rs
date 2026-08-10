@@ -675,23 +675,20 @@ unsafe extern "C" fn iohid_input_callback(
     // Emit mapped outputs.  Only emit on key down; key ups are handled by the
     // modifier state tracking (the modifier release will be captured
     // separately).
-    if let Some(outputs) = active_outputs {
-        if is_down {
-            for native_key in &outputs {
-                #[cfg(not(feature = "driverkit"))]
-                super::mapping::emit_key_event(&context.source, native_key);
+    if let Some(outputs) = active_outputs
+        && is_down
+    {
+        for native_key in &outputs {
+            #[cfg(not(feature = "driverkit"))]
+            super::mapping::emit_key_event(&context.source, native_key);
 
-                #[cfg(feature = "driverkit")]
-                super::mapping::emit_key_event(
-                    &context.source,
-                    &context.hid_socket,
-                    native_key,
-                );
-            }
+            #[cfg(feature = "driverkit")]
+            super::mapping::emit_key_event(
+                &context.source,
+                &context.hid_socket,
+                native_key,
+            );
         }
-
-        // Suppress the event.  IOHIDManager callbacks that
-        // don't return an event effectively consume it.
     }
 
     // Unmapped key — let the system handle it by not consuming the event.
