@@ -319,7 +319,7 @@ impl Sandbox for LinuxSandbox {
     /// The secondary device is NOT grabbed by the daemon.  Events injected
     /// into it pass through directly to the system and are captured by the
     /// sandbox monitor.
-    pub fn create_secondary_device(&mut self) -> Result<(), SandboxError> {
+    fn create_secondary_device(&mut self) -> Result<(), SandboxError> {
         let device_name = format!("{SECONDARY_DEVICE_NAME}-{}", process::id());
         let (device, path) = create_uinput_device(&device_name)?;
 
@@ -330,12 +330,12 @@ impl Sandbox for LinuxSandbox {
 
     /// Return the device path of the secondary virtual keyboard, if one was
     /// created.
-    pub fn secondary_device_path(&self) -> Option<&str> {
+    fn secondary_device_path(&self) -> Option<&str> {
         self.secondary_device_path.as_deref()
     }
 
     /// Inject a key-down event into the secondary virtual input device.
-    pub fn inject_key_down_secondary(
+    fn inject_key_down_secondary(
         &self,
         code: u16,
     ) -> Result<(), SandboxError> {
@@ -343,10 +343,7 @@ impl Sandbox for LinuxSandbox {
     }
 
     /// Inject a key-up event into the secondary virtual input device.
-    pub fn inject_key_up_secondary(
-        &self,
-        code: u16,
-    ) -> Result<(), SandboxError> {
+    fn inject_key_up_secondary(&self, code: u16) -> Result<(), SandboxError> {
         self.inject_key_to_secondary(code, 0)
     }
 
