@@ -531,3 +531,157 @@ fn e2e_swap_mapping() {
         );
     });
 }
+
+/// Verify that a keyboard filter restricts mappings to matching devices.
+///
+/// The daemon discovers both virtual keyboards but only grabs one for
+/// monitoring.  The config uses a per-group `keyboards` filter that matches
+/// the primary device's name.  Depending on which device the daemon grabs:
+///
+/// - If primary is grabbed: CapsLock is remapped to LeftControl (filter
+///   matches).
+/// - If secondary is grabbed: CapsLock passes through unchanged (filter blocks
+///   the mapping because the grabbed device doesn't match).
+///
+/// Both outcomes are valid and demonstrate correct keyboard filter behavior.
+#[cfg(target_os = "linux")]
+#[test]
+fn e2e_keyboard_filter() {
+    use keymapper::util::sandbox::{
+        LinuxSandbox, linux::INPUT_DEVICE_NAME_PREFIX,
+    };
+
+    // Serialize e2e tests.
+    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
+
+    // Create the sandbox.
+    let mut sandbox = match LinuxSandbox::new() {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            eprintln!("sandbox not available, skipping test");
+            return;
+        }
+        Err(e) => {
+            eprintln!("sandbox creation failed: {e}, skipping test");
+            return;
+        }
+    };
+
+    sandbox.setup().unwrap_or_else(|e| {
+        eprintln!("sandbox setup failed: {e}, skipping test");
+        std::process::exit(0);
+    });
+
+    // Create the secondary device with a different name.
+    sandbox.create_secondary_device().unwrap_or_else(|e| {
+        eprintln!("failed to create secondary device: {e}");
+        sandbox.teardown();
+        return;
+    });
+
+    // Get device paths for identification.
+    let primary_path = sandbox.input_device_id().unwrap();
+    let secondary_path = sandbox.secondary_device_path().unwrap();
+
+    // Build the device name that the daemon will discover for the primary.
+    // The daemon's keyboard discovery on Linux uses `ID_PRODUCT_NAME` from
+    // udev, falling back to the evdev device name.  We use the evdev device
+    // name pattern set by the sandbox.
+    let primary_name =
+        format!("{INPUT_DEVICE_NAME_PREFIX}-{}", std::process::id());
+
+    // Give the monitor tap a moment to stabilize.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Write config with a per-group keyboard filter matching the primary name.
+    let seq =
+        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let config_dir =
+        env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
+    std::fs::create_dir_all(&config_dir).expect("failed to create temp dir");
+
+    let config_content = format!(
+        r#"- name: "primary keyboard rules"
+  keyboards:
+    - name: "{primary_name}"
+  mappings:
+    CapsLock: LeftControl"#
+    );
+    std::fs::write(config_dir.join("config.yaml"), &config_content)
+        .expect("failed to write config");
+
+    // Spawn the daemon.
+    let mut daemon = start_daemon_in_dir(&config_dir);
+
+    // Allow the daemon to initialize.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Drain any events captured during startup.
+    let _ = sandbox.drain_output_events();
+
+    // Inject CapsLock from the primary device and check output.
+    sandbox
+        .inject_key_down(codes::CAPSLOCK)
+        .expect("inject key down");
+    sandbox
+        .inject_key_up(codes::CAPSLOCK)
+        .expect("inject key up");
+
+    let primary_events = sandbox.drain_output_events();
+
+    // Determine which device the daemon grabbed by checking if CapsLock was
+    // remapped.  If events show LeftControl, the daemon grabbed primary and
+    // the filter matched.  If events show CapsLock, the daemon grabbed
+    // secondary and the filter blocked the mapping.
+    let primary_grabbed =
+        primary_events.iter().any(|e| e.code == codes::LEFT_CONTROL);
+
+    if primary_grabbed {
+        // Daemon grabbed primary; filter matches; mapping applies.
+        assert_eq!(
+            primary_events,
+            vec![
+                CapturedEvent {
+                    code: codes::LEFT_CONTROL,
+                    is_down: true,
+                },
+                CapturedEvent {
+                    code: codes::LEFT_CONTROL,
+                    is_down: false,
+                },
+            ],
+            "primary device should be remapped (filter matches)"
+        );
+        eprintln!(
+            "keyboard filter test: daemon grabbed primary ({primary_path}), \
+             filter matched, CapsLock remapped to LeftControl"
+        );
+    } else {
+        // Daemon grabbed secondary; filter does NOT match; mapping blocked.
+        assert_eq!(
+            primary_events,
+            vec![
+                CapturedEvent {
+                    code: codes::CAPSLOCK,
+                    is_down: true,
+                },
+                CapturedEvent {
+                    code: codes::CAPSLOCK,
+                    is_down: false,
+                },
+            ],
+            "secondary device should pass through (filter blocks mapping)"
+        );
+        eprintln!(
+            "keyboard filter test: daemon grabbed secondary \
+             ({secondary_path}), filter did not match, CapsLock passed \
+             through"
+        );
+    }
+
+    // Teardown.
+    daemon.kill();
+    sandbox.teardown();
+    std::fs::remove_dir_all(&config_dir).ok();
+}

@@ -37,7 +37,10 @@ use evdev::{Device, EventType};
 use super::{CapturedEvent, Sandbox, SandboxError};
 
 /// Unique device name prefix for sandbox input keyboards.
-const INPUT_DEVICE_NAME_PREFIX: &str = "sandbox-input-";
+pub const INPUT_DEVICE_NAME_PREFIX: &str = "sandbox-keyboard-primary";
+
+/// Unique device name for the secondary sandbox input keyboard.
+pub const SECONDARY_DEVICE_NAME: &str = "sandbox-keyboard-secondary";
 
 /// Name pattern the daemon uses for its output uinput device.
 const DAEMON_OUTPUT_DEVICE_NAME: &str = "CrossPlatform_Virtual_Keyboard";
@@ -99,6 +102,13 @@ pub struct LinuxSandbox {
     /// Path to the input device's `/dev/input/event*` node, returned by
     /// `input_device_id()` so the daemon can target it.
     input_device_path: Option<String>,
+
+    /// Secondary virtual input device for injecting events from a
+    /// different source.  Used by keyboard filter tests.
+    secondary_device: Option<Arc<Mutex<uinput::Device>>>,
+
+    /// Path to the secondary device's `/dev/input/event*` node.
+    secondary_device_path: Option<String>,
 
     /// Shared event queue between the monitor thread and the test thread.
     queue: Arc<EventQueue>,
@@ -282,6 +292,8 @@ impl Sandbox for LinuxSandbox {
         Ok(Some(Self {
             device: None,
             input_device_path: None,
+            secondary_device: None,
+            secondary_device_path: None,
             queue: Arc::new(EventQueue::new()),
             monitor: None,
             is_setup: false,
@@ -289,11 +301,82 @@ impl Sandbox for LinuxSandbox {
     }
 
     fn setup(&mut self) -> Result<(), SandboxError> {
-        let (device, path) = create_uinput_device()?;
+        let device_name =
+            format!("{INPUT_DEVICE_NAME_PREFIX}-{}", process::id());
+        let (device, path) = create_uinput_device(&device_name)?;
 
         self.device = Some(Arc::new(Mutex::new(device)));
         self.input_device_path = Some(path);
         self.is_setup = true;
+
+        Ok(())
+    }
+
+    /// Create a secondary virtual input device for injecting events from a
+    /// different source.  This device has a distinct name so the daemon's
+    /// keyboard filter can differentiate between primary and secondary events.
+    ///
+    /// The secondary device is NOT grabbed by the daemon.  Events injected
+    /// into it pass through directly to the system and are captured by the
+    /// sandbox monitor.
+    pub fn create_secondary_device(&mut self) -> Result<(), SandboxError> {
+        let device_name = format!("{SECONDARY_DEVICE_NAME}-{}", process::id());
+        let (device, path) = create_uinput_device(&device_name)?;
+
+        self.secondary_device = Some(Arc::new(Mutex::new(device)));
+        self.secondary_device_path = Some(path);
+        Ok(())
+    }
+
+    /// Return the device path of the secondary virtual keyboard, if one was
+    /// created.
+    pub fn secondary_device_path(&self) -> Option<&str> {
+        self.secondary_device_path.as_deref()
+    }
+
+    /// Inject a key-down event into the secondary virtual input device.
+    pub fn inject_key_down_secondary(
+        &self,
+        code: u16,
+    ) -> Result<(), SandboxError> {
+        self.inject_key_to_secondary(code, 1)
+    }
+
+    /// Inject a key-up event into the secondary virtual input device.
+    pub fn inject_key_up_secondary(
+        &self,
+        code: u16,
+    ) -> Result<(), SandboxError> {
+        self.inject_key_to_secondary(code, 0)
+    }
+
+    /// Inject a keyboard event into the secondary virtual input device.
+    fn inject_key_to_secondary(
+        &self,
+        code: u16,
+        value: i32,
+    ) -> Result<(), SandboxError> {
+        let device = self.secondary_device.as_ref().ok_or_else(|| {
+            SandboxError::InjectionFailed(
+                "secondary device not created; call \
+                 create_secondary_device() first"
+                    .to_string(),
+            )
+        })?;
+
+        let mut dev = device
+            .lock()
+            .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
+
+        dev.write(EventType::KEY.0 as _, code as i32, value)
+            .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
+
+        dev.synchronize()
+            .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
+
+        // Allow the kernel to propagate the event to readers of the event
+        // node.
+        thread::sleep(Duration::from_millis(5));
 
         Ok(())
     }
@@ -333,11 +416,13 @@ impl Sandbox for LinuxSandbox {
             }
         }
 
-        // Drop the uinput device — the kernel automatically removes the
-        // associated /dev/input/event* node when the file descriptor is
+        // Drop the uinput devices — the kernel automatically removes the
+        // associated /dev/input/event* nodes when the file descriptors are
         // closed.
         self.device.take();
+        self.secondary_device.take();
         self.input_device_path.take();
+        self.secondary_device_path.take();
 
         self.is_setup = false;
     }
@@ -424,19 +509,16 @@ fn find_device_by_name(name: &str) -> Option<Device> {
 
 /// Create a uinput-based virtual keyboard and return the device along with
 /// its `/dev/input/event*` node path.
-///
-/// The device name is `sandbox-input-{pid}` to avoid collisions with other
-/// uinput devices and to make identification straightforward.
-fn create_uinput_device() -> Result<(uinput::Device, String), SandboxError> {
-    let device_name = format!("{INPUT_DEVICE_NAME_PREFIX}{}", process::id());
-
+fn create_uinput_device(
+    name: &str,
+) -> Result<(uinput::Device, String), SandboxError> {
     // Snapshot existing event nodes so we can identify the new one after
     // creation.
     let before = scan_event_devices();
 
     let device = uinput::default()
         .map_err(|e| SandboxError::DeviceCreationFailed(format!("{e}")))?
-        .name(&device_name)
+        .name(name)
         .map_err(|e| SandboxError::DeviceCreationFailed(format!("{e}")))?
         .event(uinput::event::Keyboard::All)
         .map_err(|e| SandboxError::DeviceCreationFailed(format!("{e}")))?

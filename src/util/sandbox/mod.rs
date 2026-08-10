@@ -133,7 +133,7 @@ mod macos;
 pub use macos::MacoSandbox;
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub mod linux;
 
 #[cfg(target_os = "linux")]
 pub use linux::LinuxSandbox;
