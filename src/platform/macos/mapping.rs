@@ -87,12 +87,15 @@ fn modifier_bit_to_code(bit: u8) -> Option<CGKeyCode> {
 /// Falls back to CGEvent posting if the driver is not loaded or emission
 /// fails.
 #[cfg(not(feature = "driverkit"))]
-fn emit_key_event(source: &CFRetained<CGEventSource>, native_key: &NativeKey) {
+pub(crate) fn emit_key_event(
+    source: &CFRetained<CGEventSource>,
+    native_key: &NativeKey,
+) {
     emit_cg_event_chord(source, native_key);
 }
 
 #[cfg(feature = "driverkit")]
-fn emit_key_event(
+pub(crate) fn emit_key_event(
     source: &CFRetained<CGEventSource>,
     hid_socket: &Option<HidSocket>,
     native_key: &NativeKey,
@@ -208,6 +211,62 @@ impl Drop for EventTapHandle {
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let source =
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .ok_or("Failed to create CGEventSource")?;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    register(SIGINT, shutdown.clone())
+        .expect("failed to register SIGINT handler");
+    register(SIGTERM, shutdown.clone())
+        .expect("failed to register SIGTERM handler");
+
+    // Try IOHIDManager first (provides per-device identity for keyboard
+    // filtering).  Falls back to CGEventTap if IOHIDManager is unavailable.
+    match super::ioh_device::start_iohid_mapping(
+        lookup.clone(),
+        source,
+        shutdown.clone(),
+    ) {
+        super::ioh_device::IOHidResult::Active(handle, shutdown_flag) => {
+            run_event_loop(handle, shutdown_flag)?;
+        }
+        super::ioh_device::IOHidResult::Unavailable(reason) => {
+            eprintln!(
+                "IOHIDManager unavailable ({reason}), falling back to \
+                 CGEventTap."
+            );
+            start_mapping_cgevent(lookup, shutdown)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Run the CFRunLoop until the shutdown flag is set.
+fn run_event_loop<H>(
+    handle: H,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Poll the run loop in default mode until shutdown is signaled.
+    // `kCFRunLoopCommonModes` is a pseudo-mode that cannot be passed to
+    // CFRunLoopRunInMode; `kCFRunLoopDefaultMode` is a member of the common
+    // modes set and receives the tap events.
+    while !shutdown.load(Ordering::Acquire) {
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
+    }
+
+    println!("Shutdown signal received. Cleaning up...");
+    drop(handle);
+
+    Ok(())
+}
+
+/// Start keyboard input capture via CGEventTap (legacy fallback path).
+fn start_mapping_cgevent(
+    lookup: Arc<RwLock<dyn Lookup>>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mask: u64 =
         (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::KeyUp.0);
 
@@ -275,28 +334,13 @@ pub fn start_mapping(
     CGEvent::tap_enable(&tap, true);
     println!("macOS Event Tap running.");
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    register(SIGINT, shutdown.clone())
-        .expect("failed to register SIGINT handler");
-    register(SIGTERM, shutdown.clone())
-        .expect("failed to register SIGTERM handler");
-
     let handle = EventTapHandle {
         tap,
         run_loop_source,
         context_ptr,
     };
 
-    // Poll the run loop in default mode until shutdown is signaled.
-    // `kCFRunLoopCommonModes` is a pseudo-mode that cannot be passed to
-    // CFRunLoopRunInMode; `kCFRunLoopDefaultMode` is a member of the common
-    // modes set and receives the tap events.
-    while !shutdown.load(Ordering::Acquire) {
-        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
-    }
-
-    println!("Shutdown signal received. Cleaning up...");
-    drop(handle);
+    run_event_loop(handle, shutdown)?;
 
     Ok(())
 }
