@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# name:     homebrew-tap
+# triggers: version tags (v*)
+#
+# After the release workflow finishes, this job opens a pull request against
+# the Homebrew tap to update the formula with the new version and archive URLs.
+# No notarization step is required — ad-hoc signing is sufficient for local
+# driver installation.
+# ---------------------------------------------------------------------------
+
+name: homebrew-tap
+
+on:
+  workflow_run:
+    workflows: ["release"]
+    types:
+      - completed
+
+env:
+  HOMEBREW_TAP_OWNER: mamrhein
+  HOMEBREW_TAP_REPO: homebrew-keymapper
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Update the Homebrew formula when the release workflow succeeds
+  # -----------------------------------------------------------------------
+  update-tap:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout formula repository
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.HOMEBREW_TAP_OWNER }}/${{ env.HOMEBREW_TAP_REPO }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Determine version
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Extract the tag name from the triggering workflow run
+          TAG=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
+            --jq '.head_branch')
+          if [[ "$TAG" != v* ]]; then
+            echo "Not a version tag ($TAG), skipping." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update formula
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          # Update version and url in the formula
+          sed -i '' \
+            -e "s/version \".*\"/version \"$VERSION\"/" \
+            -e "s|url \".*/v[^\"]*\"|url \"https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz\"|" \
+            "./Formula/keymapper.rb"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.meta.outputs.version }}"
+          BRANCH="update-to-${VERSION}"
+          git checkout -b "$BRANCH"
+          git add Formula/keymapper.rb
+          git diff --cached --quiet || git commit -m "chore: update to version ${VERSION}"
+          git push origin "$BRANCH" --force-with-lease
+          gh pr create \
+            --title "chore: update to version ${VERSION}" \
+            --body "Automated pull request to update the Homebrew formula for keymapper ${VERSION}." \
+            --base main \
+            --head "$BRANCH"

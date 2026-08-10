@@ -1,8 +1,8 @@
 # Homebrew formula for keymapper.
 #
 # Builds the Rust crate and the DriverKit virtual HID extension from source.
-# The driver is installed to <prefix>/lib/keymapper/KeyMapperVirtualHID.kext
-# and discovered at runtime via IOKit.
+# The driver is installed to ~/Library/Extensions/ and discovered at runtime
+# via IOKit.
 #
 # Install locally (not yet in a tap):
 #   brew install --build-from-source path/to/brew/keymapper.rb
@@ -39,12 +39,23 @@ class Keymapper < Formula
                     "CODE_SIGNING_REQUIRED=YES",
                     "CODE_SIGNING_ALLOWED=YES"
 
-            # Install the driver bundle alongside library files.
-            kext_dir = HOMEBREW_PREFIX / "lib/keymapper"
+            # Install the driver bundle to the user Extensions directory so
+            # macOS loads it automatically.
+            kext_dir = HOMEBREW_USER_EXTENSIONS
             kext_dir.mkpath
             cp_r "driver-build/Build/Products/Release/KeyMapperVirtualHID.kext",
                  kext_dir
         end
+    end
+
+    def caveats
+        <<~EOS
+            The KeyMapperVirtualHID driver was installed to
+            #{HOMEBREW_USER_EXTENSIONS}.
+
+            On first run, approve the driver in
+            System Settings > Privacy & Security.
+        EOS
     end
 
     service do

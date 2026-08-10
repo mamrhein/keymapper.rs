@@ -5,7 +5,7 @@
 # Targets:
 #   make build     — Debug build, active architecture only (default)
 #   make release   — Release build, all architectures
-#   make install   — Build and copy the .kext to ~/Library/Application Support/keymapper/
+#   make install   — Build and copy the .kext to ~/Library/Extensions/
 #   make clean     — Remove build artifacts
 # ---------------------------------------------------------------------------
 
@@ -13,7 +13,7 @@ XCODE_PROJ := KeyMapperVirtualHID.xcodeproj
 SCHEME     := KeyMapperVirtualHID
 KEXT_NAME  := KeyMapperVirtualHID.kext
 
-APP_SUPPORT_DIR := $(HOME)/Library/Application Support/keymapper
+EXTENSIONS_DIR := $(HOME)/Library/Extensions
 
 COMMON_FLAGS := \
 	CODE_SIGN_IDENTITY=- \
@@ -39,10 +39,11 @@ release:
 	  $(COMMON_FLAGS)
 
 install: release
-	mkdir -p "$(APP_SUPPORT_DIR)"
-	cp -R Build/Products/Release/$(KEXT_NAME) "$(APP_SUPPORT_DIR)/"
+	mkdir -p "$(EXTENSIONS_DIR)"
+	cp -R Build/Products/Release/$(KEXT_NAME) "$(EXTENSIONS_DIR)/"
 	@echo ""
-	@echo "Driver installed to $(APP_SUPPORT_DIR)/$(KEXT_NAME)"
+	@echo "Driver installed to $(EXTENSIONS_DIR)/$(KEXT_NAME)"
+	@echo "Approve it in System Settings > Privacy & Security on first run."
 
 clean:
 	xcodebuild -project $(XCODE_PROJ) \
