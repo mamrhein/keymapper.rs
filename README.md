@@ -19,6 +19,16 @@ Alternatively, download a pre-built DMG from the [releases page](https://github.
 
 Run `keymapperd` with appropriate privileges for keyboard interception (Accessibility on macOS, `/dev/input` access on Linux).
 
+### macOS — Homebrew
+
+```bash
+brew install keymapper
+```
+
+This builds both the Rust binaries and the DriverKit virtual HID extension from source. Requires Xcode command-line tools.
+
+The driver must be approved in System Settings > Privacy & Security on first run. See [macos-driver.md](docs/macos-driver.md) for details.
+
 ## Quick start
 
 ```bash
@@ -207,6 +217,8 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 **macOS — "Failed to create CGEventTap":** grant Accessibility permission in System Settings > Privacy & Security > Accessibility. Restart the daemon after granting access.
 
+**macOS — DriverKit driver not loading:** check System Settings > Privacy & Security for a blocked driver prompt, click **Allow**, then reboot. See [macos-driver.md](docs/macos-driver.md) for full troubleshooting.
+
 **Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
 
 **Rules don't take effect:** check that the `apps` value matches the actual application name. Run `keymapper appnames` to find the correct value. Omit `apps` for global rules.
@@ -218,5 +230,5 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 | Platform | Mechanism |
 |----------|-----------|
 | Linux | `evdev` device grab + `uinput` virtual keyboard |
-| macOS | `CGEventTap` (requires Accessibility permission) |
+| macOS | `CGEventTap` for interception; DriverKit virtual HID driver for event emission (falls back to `CGEvent`) |
 | Windows | Low-level keyboard hook (`WH_KEYBOARD_LL`) |
