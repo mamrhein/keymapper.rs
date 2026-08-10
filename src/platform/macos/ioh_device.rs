@@ -302,7 +302,7 @@ impl IOHidFunctions {
             std::mem::transmute::<*mut c_void, Option<FnIOHIDManagerCreate>>(
                 libc::dlsym(
                     handle,
-                    b"IOHIDManagerCreate\0".as_ptr() as *const _,
+                    c"IOHIDManagerCreate".as_ptr() as *const _,
                 ),
             )
         };
@@ -312,7 +312,7 @@ impl IOHidFunctions {
                 Option<FnIOHIDManagerSetDeviceMatching>,
             >(libc::dlsym(
                 handle,
-                b"IOHIDManagerSetDeviceMatching\0".as_ptr() as *const _,
+                c"IOHIDManagerSetDeviceMatching".as_ptr() as *const _,
             ))
         };
         let manager_schedule_with_run_loop = unsafe {
@@ -321,7 +321,7 @@ impl IOHidFunctions {
                 Option<FnIOHIDManagerScheduleWithRunLoop>,
             >(libc::dlsym(
                 handle,
-                b"IOHIDManagerScheduleWithRunLoop\0".as_ptr() as *const _,
+                c"IOHIDManagerScheduleWithRunLoop".as_ptr() as *const _,
             ))
         };
         let manager_register_input_callback = unsafe {
@@ -330,23 +330,17 @@ impl IOHidFunctions {
                 Option<FnIOHIDManagerRegisterInputCallback>,
             >(libc::dlsym(
                 handle,
-                b"IOHIDManagerRegisterInputCallback\0".as_ptr() as *const _,
+                c"IOHIDManagerRegisterInputCallback".as_ptr() as *const _,
             ))
         };
         let manager_open = unsafe {
             std::mem::transmute::<*mut c_void, Option<FnIOHIDManagerOpen>>(
-                libc::dlsym(
-                    handle,
-                    b"IOHIDManagerOpen\0".as_ptr() as *const _,
-                ),
+                libc::dlsym(handle, c"IOHIDManagerOpen".as_ptr() as *const _),
             )
         };
         let manager_close = unsafe {
             std::mem::transmute::<*mut c_void, Option<FnIOHIDManagerClose>>(
-                libc::dlsym(
-                    handle,
-                    b"IOHIDManagerClose\0".as_ptr() as *const _,
-                ),
+                libc::dlsym(handle, c"IOHIDManagerClose".as_ptr() as *const _),
             )
         };
         let device_get_location_id = unsafe {
@@ -355,15 +349,12 @@ impl IOHidFunctions {
                 Option<FnIOHIDDeviceGetLocationID>,
             >(libc::dlsym(
                 handle,
-                b"IOHIDDeviceGetLocationID\0".as_ptr() as *const _,
+                c"IOHIDDeviceGetLocationID".as_ptr() as *const _,
             ))
         };
         let event_get_type = unsafe {
             std::mem::transmute::<*mut c_void, Option<FnIOHIDEventGetType>>(
-                libc::dlsym(
-                    handle,
-                    b"IOHIDEventGetType\0".as_ptr() as *const _,
-                ),
+                libc::dlsym(handle, c"IOHIDEventGetType".as_ptr() as *const _),
             )
         };
         let event_get_integer_value = unsafe {
@@ -372,7 +363,7 @@ impl IOHidFunctions {
                 Option<FnIOHIDEventGetIntegerValue>,
             >(libc::dlsym(
                 handle,
-                b"IOHIDEventGetIntegerValue\0".as_ptr() as *const _,
+                c"IOHIDEventGetIntegerValue".as_ptr() as *const _,
             ))
         };
 
