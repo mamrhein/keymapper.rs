@@ -16,3 +16,7 @@
 # profiling data
 perf.data*
 flamegraph.*
+
+# DriverKit driver build artifacts
+driver/Build/
+driver/driver-build/
