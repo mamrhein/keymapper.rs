@@ -78,10 +78,10 @@ fn local_install_path() -> PathBuf {
 /// Returns the path if found, `None` otherwise.
 fn find_installed_kext() -> Option<PathBuf> {
     // Check Homebrew path first (if this is a Homebrew install).
-    if let Some(hp) = homebrew_install_path() {
-        if hp.join("Contents/Info.plist").is_file() {
-            return Some(hp);
-        }
+    if let Some(hp) = homebrew_install_path()
+        && hp.join("Contents/Info.plist").is_file()
+    {
+        return Some(hp);
     }
 
     // Check local development path.
@@ -177,12 +177,12 @@ fn is_driver_loaded_in_iokit() -> bool {
         .output()
         .ok();
 
-    if let Some(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.is_empty() {
-                return true;
-            }
+    if let Some(output) = output
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.is_empty() {
+            return true;
         }
     }
 
@@ -212,13 +212,13 @@ fn is_socket_connected() -> bool {
 /// Build and install the DriverKit extension for local development.
 pub fn install() -> Result<(), String> {
     // Check if the driver is already installed via Homebrew.
-    if let Some(hp) = homebrew_install_path() {
-        if hp.join("Contents/Info.plist").is_file() {
-            println!("Driver is already installed via Homebrew at:");
-            println!("  {}", hp.display());
-            println!("Run `keymapper driver status` for details.");
-            return Ok(());
-        }
+    if let Some(hp) = homebrew_install_path()
+        && hp.join("Contents/Info.plist").is_file()
+    {
+        println!("Driver is already installed via Homebrew at:");
+        println!("  {}", hp.display());
+        println!("Run `keymapper driver status` for details.");
+        return Ok(());
     }
 
     // Verify xcodebuild is available.
@@ -249,7 +249,7 @@ pub fn install() -> Result<(), String> {
             .to_string());
     }
 
-    println!("");
+    println!();
     println!("Driver installed successfully.");
     println!(
         "First launch will prompt in System Settings → Privacy & Security."
