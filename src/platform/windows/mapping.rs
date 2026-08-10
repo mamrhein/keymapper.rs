@@ -186,17 +186,6 @@ fn hook_handle() -> HHOOK {
     *HOOK_HANDLE.lock() as _
 }
 
-/// Clears hook callback state so tests can run in isolation.
-///
-/// Windows `WH_KEYBOARD_LL` requires module-level statics because the hook
-/// callback cannot capture user data. This function resets both statics to
-/// their initial state.
-#[cfg(test)]
-pub fn reset_for_tests() {
-    *SHARED_LOOKUP.lock() = None;
-    *HOOK_HANDLE.lock() = 0;
-}
-
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
