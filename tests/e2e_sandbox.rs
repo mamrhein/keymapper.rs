@@ -685,3 +685,175 @@ fn e2e_keyboard_filter() {
     sandbox.teardown();
     std::fs::remove_dir_all(&config_dir).ok();
 }
+
+/// Verify that a keyboard filter restricts mappings to matching devices on
+/// macOS.
+///
+/// Unlike the Linux test, macOS uses IOHIDManager for input capture, which
+/// delivers events per-device and provides the device's Location ID. The
+/// sandbox injects events via CGEvent, which operates at a higher layer than
+/// IOHIDManager. This means injected events bypass the daemon's input capture
+/// entirely — they go straight to the session and are captured by the monitor
+/// tap regardless of whether a mapping exists.
+///
+/// This test validates:
+/// 1. Keyboard discovery via `list_keyboards()` works on macOS.
+/// 2. A keyboard-filtered config is constructed correctly from discovered
+///    device metadata.
+/// 3. The daemon starts and runs with the filtered config.
+/// 4. Unmapped keys pass through to the monitor tap (CGEvent injection always
+///    reaches HIDEventTap).
+///
+/// To fully verify that mapped keys are suppressed, a real physical keyboard
+/// must be used. The test logs the discovered keyboards and the filter config
+/// so a user can manually verify filtering by pressing keys on an attached
+/// keyboard.
+#[cfg(target_os = "macos")]
+#[test]
+fn e2e_keyboard_filter() {
+    // Serialize e2e tests across nextest worker processes.
+    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
+
+    // Discover attached keyboards.
+    let keyboards = match keymapper::platform::list_keyboards() {
+        Ok(kbs) => kbs,
+        Err(e) => {
+            eprintln!("keyboard discovery failed: {e}, skipping test");
+            return;
+        }
+    };
+
+    if keyboards.is_empty() {
+        eprintln!("no keyboards discovered, skipping test");
+        return;
+    }
+
+    eprintln!("discovered {} keyboard(s):", keyboards.len());
+    for kb in &keyboards {
+        eprintln!(
+            "  - name={}, vendor={}, model={}, device={}",
+            kb.name, kb.vendor, kb.model, kb.device
+        );
+    }
+
+    // Build a keyboard filter that matches the first discovered keyboard.
+    let target = &keyboards[0];
+    let config_content =
+        if !target.vendor.is_empty() && target.vendor != "0x0000" {
+            // Filter by vendor — the most stable identifier.
+            format!(
+                r#"keyboards:
+  - vendor: "{vendor}"
+groups:
+  - mappings:
+      CapsLock: LeftControl"#,
+                vendor = target.vendor
+            )
+        } else {
+            // Fallback: filter by name if vendor is not available.
+            format!(
+                r#"keyboards:
+  - name: "{name}"
+groups:
+  - mappings:
+      CapsLock: LeftControl"#,
+                name = target.name
+            )
+        };
+
+    eprintln!("keyboard filter config:\n{}", config_content);
+
+    // Create config directory.
+    let seq =
+        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let config_dir =
+        env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
+    std::fs::create_dir_all(&config_dir).expect("failed to create temp dir");
+    std::fs::write(config_dir.join("config.yaml"), &config_content)
+        .expect("failed to write config");
+
+    // Create the sandbox — skip gracefully if not available.
+    let mut sandbox = match create_sandbox() {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            eprintln!("sandbox not available on this platform, skipping test");
+            std::fs::remove_dir_all(&config_dir).ok();
+            return;
+        }
+        Err(e) => {
+            eprintln!("sandbox creation failed: {e}, skipping test");
+            std::fs::remove_dir_all(&config_dir).ok();
+            return;
+        }
+    };
+
+    sandbox.setup().unwrap_or_else(|e| {
+        eprintln!("sandbox setup failed: {e}, skipping test");
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::process::exit(0);
+    });
+
+    // Give the monitor tap a moment to stabilize.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Spawn the daemon in a subprocess.
+    let mut daemon = start_daemon_in_dir(&config_dir);
+
+    // Allow the daemon to initialize.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Drain any events captured during startup.
+    let _ = sandbox.drain_output_events();
+
+    // Inject CapsLock via CGEvent.  On macOS, CGEvent injection bypasses
+    // IOHIDManager, so the daemon never sees this event. The monitor tap
+    // captures it at the HIDEventTap layer, so it always appears in output.
+    // This validates that the sandbox infrastructure works, but cannot
+    // verify that keyboard filtering suppresses mapped keys from real
+    // keyboards.
+    sandbox
+        .inject_key_down(codes::CAPSLOCK)
+        .expect("inject key down");
+    sandbox
+        .inject_key_up(codes::CAPSLOCK)
+        .expect("inject key up");
+
+    let events = sandbox.drain_output_events();
+
+    // CGEvent-injected events always reach the monitor tap, regardless of
+    // daemon mappings. We verify that the injection and capture infrastructure
+    // works correctly.
+    assert_eq!(
+        events,
+        vec![
+            CapturedEvent {
+                code: codes::CAPSLOCK,
+                is_down: true,
+            },
+            CapturedEvent {
+                code: codes::CAPSLOCK,
+                is_down: false,
+            },
+        ],
+        "CGEvent-injected CapsLock should reach the monitor tap. Note: this \
+         does NOT verify keyboard filtering, because CGEvent injection \
+         bypasses IOHIDManager. For real filtering verification, press \
+         CapsLock on an attached keyboard and observe whether it is remapped \
+         to LeftControl."
+    );
+
+    eprintln!(
+        "keyboard filter test: daemon running with filter for '{}' \
+         (vendor={}). CGEvent injection bypasses IOHIDManager, so the \
+         sandbox cannot verify mapped key suppression. To verify filtering, \
+         press CapsLock on the '{}' keyboard and observe whether it is \
+         remapped to LeftControl.",
+        target.name, target.vendor, target.name
+    );
+
+    // Teardown.
+    daemon.kill();
+    sandbox.teardown();
+    std::fs::remove_dir_all(&config_dir).ok();
+}

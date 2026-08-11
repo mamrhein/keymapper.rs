@@ -9,9 +9,10 @@
 
 //! macOS sandbox using CGEventTap for monitoring and CGEvent for injection.
 //!
-//! The monitor tap runs on a dedicated thread with its own CFRunLoop,
-//! capturing all keyboard events at the HID level.  Injected events are
-//! posted at HIDEventTap so the daemon's event tap sees them.
+//! The daemon captures keyboard input via IOHIDManager.  This sandbox runs a
+//! separate CGEventTap monitor on a dedicated thread with its own CFRunLoop,
+//! capturing all keyboard events at the HID level for test verification.
+//! Injected events are posted at HIDEventTap so the monitor tap sees them.
 
 use std::{
     ffi::c_void,

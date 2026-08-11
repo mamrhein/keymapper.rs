@@ -10,6 +10,7 @@
 mod active_app;
 #[cfg(feature = "driverkit")]
 mod hid_socket;
+mod ioh_device;
 mod key;
 mod keyboard;
 mod mapping;
