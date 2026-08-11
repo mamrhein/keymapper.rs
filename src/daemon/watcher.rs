@@ -9,7 +9,7 @@
 
 use std::{
     fs::File,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
@@ -304,16 +304,27 @@ fn reload_from_str(
     content: &str,
     state: &Arc<RwLock<dyn MutableLookup>>,
 ) -> ReloadResult {
-    match RuntimeLookupCache::compile_from_str(content) {
-        Ok(new_cache) => {
-            let mut write_guard = state.write();
-            write_guard.set_lookup_cache(new_cache);
-            println!("Configuration hot-swapped successfully!");
-        }
+    let new_cache = match RuntimeLookupCache::compile_from_str(content) {
+        Ok(cache) => cache,
         Err(err) => {
             return ReloadResult::Err(err.to_string());
         }
+    };
+
+    // Swap the cache inside the write lock, then release the lock before
+    // printing the success message.  This ordering guarantees that by the
+    // time an observer sees the message in stdout, the new cache is already
+    // visible to all readers of the RwLock.
+    {
+        let mut write_guard = state.write();
+        write_guard.set_lookup_cache(new_cache);
     }
+
+    // Flush stdout to ensure the message reaches any pipe consumers before
+    // returning.  When stdout is block-buffered (e.g., when captured by a
+    // subprocess), println! alone may leave the message in an internal buffer.
+    println!("Configuration hot-swapped successfully!");
+    let _ = std::io::stdout().flush();
 
     ReloadResult::Ok
 }
