@@ -213,7 +213,6 @@ impl Drop for DaemonGuard {
 /// captures from the specified input device instead of auto-discovering.
 fn start_daemon_in_dir(
     config_dir: &PathBuf,
-    device_path: Option<&str>,
 ) -> DaemonGuard {
     use std::process::Stdio;
 
@@ -221,10 +220,6 @@ fn start_daemon_in_dir(
     cmd.current_dir(config_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-
-    if let Some(path) = device_path {
-        cmd.arg("--device").arg(path);
-    }
 
     let mut child = cmd.spawn().expect("failed to spawn keymapperd");
 
@@ -310,8 +305,7 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    let device_path = sandbox.input_device_id().map(|s| s.to_string());
-    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
+    let mut daemon = start_daemon_in_dir(&config_dir);
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -410,8 +404,7 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon.
-    let device_path = sandbox.input_device_id().map(|s| s.to_string());
-    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
+    let mut daemon = start_daemon_in_dir(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
