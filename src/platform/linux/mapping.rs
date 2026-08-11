@@ -266,18 +266,8 @@ fn find_keyboard_device_fallback()
 
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
-    device_path_override: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut raw_device, device_path) =
-        if let Some(path) = device_path_override {
-            // Use the explicitly provided device path (e.g. from --device CLI
-            // flag during end-to-end testing with a virtual keyboard).
-            let device = Device::open(path)
-                .map_err(|e| format!("failed to open device {path}: {e}"))?;
-            (device, path.to_string())
-        } else {
-            find_keyboard_device()?
-        };
+    let (mut raw_device, device_path) = find_keyboard_device()?;
     raw_device.grab()?;
 
     let mut virtual_device = uinput::default()?

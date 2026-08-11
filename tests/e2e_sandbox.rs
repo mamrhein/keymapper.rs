@@ -765,8 +765,7 @@ fn e2e_keyboard_filter() {
 
     // Spawn the daemon, passing the primary device path so it captures from
     // the sandbox virtual keyboard.
-    let device_path = sandbox.input_device_id().map(|s| s.to_string());
-    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
+    let mut daemon = start_daemon_in_dir(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
