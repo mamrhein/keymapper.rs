@@ -198,7 +198,7 @@ pub fn start_mapping(
         SetWindowsHookExW(
             WH_KEYBOARD_LL,
             Some(low_level_keyboard_proc),
-            h_instance,
+            Some(h_instance),
             0,
         )?
     };
@@ -225,13 +225,13 @@ extern "system" fn low_level_keyboard_proc(
 ) -> LRESULT {
     if code < 0 {
         return unsafe {
-            CallNextHookEx(hook_handle(), code, w_param, l_param)
+            CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
     }
 
     let Some(lookup) = get_shared_lookup() else {
         return unsafe {
-            CallNextHookEx(hook_handle(), code, w_param, l_param)
+            CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
     };
 
@@ -269,6 +269,6 @@ extern "system" fn low_level_keyboard_proc(
     }
 
     unsafe {
-        CallNextHookEx(hook_handle(), code, w_param, l_param)
+        CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
     }
 }

@@ -9,7 +9,7 @@
 
 //! Synchronous foreground application query via Win32 APIs.
 
-use windows::Win32::Foundation::{CloseHandle, BOOL};
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,
@@ -38,7 +38,7 @@ pub fn get_active_app_name() -> String {
 
     // Open the process with minimal permissions to query its image name.
     let Ok(process) = (unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, BOOL(0), pid)
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
     }) else {
         return "unknown".to_string();
     };

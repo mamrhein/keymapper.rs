@@ -281,17 +281,17 @@ fn read_hid_strings(
     };
 
     (
-        if product.as_bool() {
+        if product {
             wstring(&product_buf)
         } else {
             String::new()
         },
-        if vendor.as_bool() {
+        if vendor {
             wstring(&vendor_buf)
         } else {
             String::new()
         },
-        if serial.as_bool() {
+        if serial {
             wstring(&serial_buf)
         } else {
             String::new()
@@ -314,7 +314,7 @@ fn check_keyboard_via_hid(handle: HANDLE) -> Option<bool> {
     let success =
         unsafe { HidD_GetPreparsedData(handle, &mut preparsed_data) };
 
-    if !success.as_bool() || preparsed_data == PHIDP_PREPARSED_DATA(0) {
+    if !success || preparsed_data == PHIDP_PREPARSED_DATA(0) {
         return None;
     }
 

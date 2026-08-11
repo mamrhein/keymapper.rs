@@ -56,7 +56,7 @@ objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", 
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
 crossbeam-channel = "0.5" # lock-free IPC between input threads
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_UI_Input",

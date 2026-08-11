@@ -234,9 +234,9 @@ fn create_message_only_window() -> Result<HWND, Box<dyn std::error::Error>> {
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            HWND_MESSAGE, // Message-only window — no visible presence.
+            Some(HWND_MESSAGE), // Message-only window — no visible presence.
             None,
-            HINSTANCE(ptr::null_mut()),
+            Some(HINSTANCE(ptr::null_mut())),
             None,
         )
     }?;
@@ -343,7 +343,7 @@ fn run_message_loop(_hwnd: HWND) {
 /// this message.
 pub fn stop_raw_input_loop(hwnd: HWND) {
     unsafe {
-        let _ = PostMessageW(hwnd, WM_STOP, WPARAM(0), LPARAM(0));
+        let _ = PostMessageW(Some(hwnd), WM_STOP, WPARAM(0), LPARAM(0));
     }
 }
 

@@ -183,7 +183,7 @@ impl Sandbox for WindowsSandbox {
             SetWindowsHookExW(
                 WH_KEYBOARD_LL,
                 Some(monitor_keyboard_proc),
-                h_instance,
+                Some(h_instance),
                 0,
             )
         }
@@ -271,7 +271,7 @@ extern "system" fn monitor_keyboard_proc(
 ) -> LRESULT {
     if code < 0 {
         return unsafe {
-            CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+            CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
         };
     }
 
@@ -283,7 +283,7 @@ extern "system" fn monitor_keyboard_proc(
     if kbd_struct.dwExtraInfo != SEND_MARKER {
         let Some(queue) = monitor_queue() else {
             return unsafe {
-                CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+                CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
             };
         };
 
@@ -301,7 +301,7 @@ extern "system" fn monitor_keyboard_proc(
 
     // Always pass the event through — we are only monitoring.
     unsafe {
-        CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+        CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
     }
 }
 

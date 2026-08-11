@@ -39,7 +39,7 @@ pub fn probe() {
         SetWindowsHookExW(
             WH_KEYBOARD_LL,
             Some(probe_keyboard_proc),
-            h_instance,
+            Some(h_instance),
             0,
         )
         .expect("Failed to set keyboard hook")
@@ -77,7 +77,7 @@ extern "system" fn probe_keyboard_proc(
 ) -> LRESULT {
     if code < 0 {
         return unsafe {
-            CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+            CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
         };
     }
 
@@ -94,7 +94,7 @@ extern "system" fn probe_keyboard_proc(
         if ctrl_state < 0 {
             unsafe { PostQuitMessage(0) };
             return unsafe {
-                CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+                CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
             };
         }
     }
@@ -120,6 +120,6 @@ extern "system" fn probe_keyboard_proc(
     }
 
     unsafe {
-        CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+        CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
     }
 }

@@ -100,7 +100,7 @@ fn get_file_description(path: &str) -> Option<String> {
         let mut buffer = vec![0u8; size as usize];
         if windows::Win32::Storage::FileSystem::GetFileVersionInfoW(
             windows::core::PCWSTR::from_raw(path_utf16.as_ptr()),
-            0,
+            None,
             size,
             buffer.as_mut_ptr() as _,
         )
@@ -181,7 +181,8 @@ struct WindowCollector {
     pids: HashSet<u32>,
 }
 
-use windows::Win32::Foundation::{BOOL, LPARAM};
+use windows::core::BOOL;
+use windows::Win32::Foundation::LPARAM;
 
 extern "system" fn enum_windows_proc(
     hwnd: windows::Win32::Foundation::HWND,
