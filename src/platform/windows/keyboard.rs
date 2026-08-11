@@ -389,7 +389,7 @@ fn looks_like_keyboard(
     }
 
     // Check interface path for keyboard-specific sub-path.
-    if path_lower.ends_with(r"\kbd") {
+    if path_lower.ends_with(r"\kbd") || path_lower.ends_with("{kbd}") {
         return true;
     }
 
