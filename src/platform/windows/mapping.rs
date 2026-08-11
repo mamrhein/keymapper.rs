@@ -491,16 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn reply_polling_loop_is_reasonable() {
-        // The polling loop allows up to 50 iterations of 1ms sleep before
-        // timing out, giving the worker ~50ms to respond.  This is short
-        // enough to not cause noticeable input lag but long enough for the
-        // worker to process the event.
-        assert!(50 <= 100);
-        assert!(50 >= 10);
-    }
-
-    #[test]
     fn hook_tx_static_is_initially_none() {
         // Verify that the static sender starts as None.  This is mainly
         // a sanity check that the static initialisation works correctly.
