@@ -2,9 +2,9 @@
 # name:     ci-e2e
 # triggers: push to main, pull requests
 #
-# Runs the end-to-end sandbox tests on all supported platforms.  Linux
-# requires /dev/uinput access, so the job runs as root.  macOS requires
-# Accessibility privileges, so it also runs as root with ad-hoc signing.
+# Runs the end-to-end sandbox tests on Linux.  macOS requires TCC
+# Accessibility permission for CGEventTap, which cannot be granted on
+# CI runners, so macOS e2e tests must be run manually on a desktop.
 # ---------------------------------------------------------------------------
 
 name: ci-e2e
@@ -62,22 +62,27 @@ jobs:
           sudo modprobe uinput || true
           # The ubuntu-latest runner has /dev/uinput with root:root 0660.
           # Running tests as root grants the required write access.
-          sudo -E cargo nextest run --no-capture --test e2e_sandbox
+          sudo -E PATH="$PATH" cargo nextest run --no-capture --test e2e_sandbox
 
   # -----------------------------------------------------------------------
-  # macOS — e2e sandbox tests with Accessibility permission
+  # macOS — e2e sandbox tests
+  #
+  # Disabled: CGEventTap requires TCC Accessibility permission, which cannot
+  # be granted on CI runners (SIP enabled, no user interaction). Tests must
+  # be run manually on a macOS desktop with the test binary in the
+  # Accessibility list.
   # -----------------------------------------------------------------------
-  macos-e2e:
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Run e2e tests as root (for Accessibility permission)
-        run: sudo bash scripts/sign-and-test-e2e.sh
+  # macos-e2e:
+  #   runs-on: macos-latest
+  #
+  #   steps:
+  #     - uses: actions/checkout@v5
+  #
+  #     - name: Install Rust stable
+  #       uses: dtolnay/rust-toolchain@stable
+  #
+  #     - name: Install cargo-nextest
+  #       uses: taiki-e/install-action@nextest
+  #
+  #     - name: Run e2e tests as root (for Accessibility permission)
+  #       run: sudo bash scripts/sign-and-test-e2e.sh
