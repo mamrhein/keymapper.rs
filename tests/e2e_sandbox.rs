@@ -17,7 +17,9 @@
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::{env, path::PathBuf, process::Command};
+use std::{
+    env, path::PathBuf, process::Command, sync::mpsc, thread, time::Duration,
+};
 
 use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
 #[cfg(unix)]
@@ -146,16 +148,60 @@ fn write_config_dir(content: &str) -> PathBuf {
     dir
 }
 
-/// RAII guard that kills the daemon subprocess on `Drop`. Ensures cleanup
-/// even when tests panic.
+/// Timeout for waiting on a config hot-reload to complete.  The watcher
+/// debounces filesystem events for 500ms (DEBOUNCE_INTERVAL), so we allow
+/// some headroom for parsing and cache compilation.
+const RELOAD_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// RAII guard that kills the daemon subprocess on `Drop`. Captures stdout
+/// in a background thread so callers can await specific log messages
+/// (e.g. "Configuration hot-swapped successfully!").
 struct DaemonGuard {
     child: std::process::Child,
+    /// Receiver for stdout lines from the daemon.
+    stdout_rx: mpsc::Receiver<String>,
 }
 
 impl DaemonGuard {
     fn kill(&mut self) {
         self.child.kill().ok();
         self.child.wait().ok();
+    }
+
+    /// Block until the daemon logs a hot-reload success message, or timeout.
+    ///
+    /// Returns `Ok(())` when the reload completed, `Err` on timeout.
+    fn await_reload(&self) -> Result<(), String> {
+        let target = "Configuration hot-swapped successfully!";
+        let deadline = std::time::Instant::now() + RELOAD_TIMEOUT;
+
+        loop {
+            let remaining =
+                deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(
+                    "timeout waiting for config hot-reload".to_string()
+                );
+            }
+
+            match self.stdout_rx.recv_timeout(remaining) {
+                Ok(line) => {
+                    if line.contains(target) {
+                        return Ok(());
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(
+                        "timeout waiting for config hot-reload".to_string()
+                    );
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(
+                        "daemon stdout closed unexpectedly".to_string()
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -169,11 +215,40 @@ impl Drop for DaemonGuard {
 /// Spawn the `keymapperd` binary in *config_dir* and return a guard that
 /// ensures the child is killed on `Drop`.
 fn start_daemon_in_dir(config_dir: &PathBuf) -> DaemonGuard {
-    let child = Command::new(daemon_bin_path())
+    use std::process::Stdio;
+
+    let mut child = Command::new(daemon_bin_path())
         .current_dir(config_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("failed to spawn keymapperd");
-    DaemonGuard { child }
+
+    let stdout = child.stdout.take().expect("failed to capture stdout");
+
+    // Spawn a background thread that reads stdout line-by-line and sends
+    // each line over the channel.  This allows `await_reload()` to poll
+    // for specific log messages without blocking the test thread.
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        use std::io::BufRead;
+        let reader = std::io::BufReader::new(stdout);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    if tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    DaemonGuard {
+        child,
+        stdout_rx: rx,
+    }
 }
 
 /// Helper that wraps the full test lifecycle: setup sandbox, start daemon,
@@ -265,6 +340,87 @@ fn create_sandbox() -> Result<Option<Box<dyn Sandbox>>, SandboxError> {
     use keymapper::util::sandbox::WindowsSandbox;
     let s = WindowsSandbox::new()?;
     Ok(s.map(|x| Box::new(x) as Box<dyn Sandbox>))
+}
+
+/// Overwrite the config file in *config_dir* with new content.
+///
+/// Uses `std::fs::write` which truncates and rewrites the same file path,
+/// triggering `notify::EventKind::Modify` on the watched file. The watcher
+/// debounces multiple events, so rapid successive writes are safe.
+fn update_config(config_dir: &PathBuf, content: &str) {
+    std::fs::write(config_dir.join("config.yaml"), content)
+        .expect("failed to write updated config");
+}
+
+/// Helper that wraps the full test lifecycle for hot-reload tests:
+/// setup sandbox, start daemon, then run a multi-phase test closure that
+/// has access to the config directory path and the daemon guard so it can
+/// modify the config and await reloads.
+fn run_e2e_test_with_reload<F>(initial_config: &str, test_fn: F)
+where
+    F: FnOnce(&dyn Sandbox, &PathBuf, &mut DaemonGuard),
+{
+    // Serialize e2e tests across nextest worker processes.
+    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
+
+    // When the driverkit feature is enabled, check for the virtual HID driver.
+    #[cfg(all(target_os = "macos", feature = "driverkit"))]
+    {
+        use keymapper::platform::HidSocket;
+        if let Err(e) = HidSocket::discover_and_open() {
+            eprintln!(
+                "skipping e2e test: virtual HID driver not connected \
+                 ({e}).\nRun `keymapper driver install` and approve in \
+                 System Settings."
+            );
+            return;
+        }
+    }
+
+    // Create config directory.
+    let config_dir = write_config_dir(initial_config);
+
+    // Create the sandbox — skip gracefully if not available.
+    let mut sandbox = match create_sandbox() {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            eprintln!("sandbox not available on this platform, skipping test");
+            std::fs::remove_dir_all(&config_dir).ok();
+            return;
+        }
+        Err(e) => {
+            eprintln!("sandbox creation failed: {e}, skipping test");
+            std::fs::remove_dir_all(&config_dir).ok();
+            return;
+        }
+    };
+
+    sandbox.setup().unwrap_or_else(|e| {
+        eprintln!("sandbox setup failed: {e}, skipping test");
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::process::exit(0);
+    });
+
+    // Give the monitor tap a moment to stabilize.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Spawn the daemon.
+    let mut daemon = start_daemon_in_dir(&config_dir);
+
+    // Allow the daemon to initialize.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Drain any events captured during startup.
+    let _ = sandbox.drain_output_events();
+
+    // Run the multi-phase test body.
+    test_fn(&*sandbox, &config_dir, &mut daemon);
+
+    // Teardown.
+    daemon.kill();
+
+    sandbox.teardown();
+    std::fs::remove_dir_all(&config_dir).ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -856,4 +1012,80 @@ groups:
     daemon.kill();
     sandbox.teardown();
     std::fs::remove_dir_all(&config_dir).ok();
+}
+
+/// Verify that changing the config file while the daemon is running causes
+/// the new mapping to take effect.
+///
+/// The test exercises three phases:
+/// 1. Initial mapping is active (CapsLock → LeftControl).
+/// 2. Config is rewritten to map CapsLock → A, and the daemon hot-reloads.
+/// 3. The new mapping is verified by injecting CapsLock and expecting A.
+#[test]
+fn e2e_config_hot_reload() {
+    let initial_config = r#"- mappings:
+    CapsLock: LeftControl"#;
+
+    run_e2e_test_with_reload(initial_config, |sandbox, config_dir, daemon| {
+        // --- Phase 1: verify initial mapping (CapsLock → LeftControl) ---
+        sandbox
+            .inject_key_down(codes::CAPSLOCK)
+            .expect("inject key down");
+        sandbox
+            .inject_key_up(codes::CAPSLOCK)
+            .expect("inject key up");
+
+        let events = sandbox.drain_output_events();
+        assert_eq!(
+            events,
+            vec![
+                CapturedEvent {
+                    code: codes::LEFT_CONTROL,
+                    is_down: true,
+                },
+                CapturedEvent {
+                    code: codes::LEFT_CONTROL,
+                    is_down: false,
+                },
+            ],
+            "initial mapping: CapsLock should be remapped to LeftControl"
+        );
+
+        // --- Phase 2: hot-reload config to CapsLock → A ---
+        let new_config = r#"- mappings:
+    CapsLock: A"#;
+        update_config(config_dir, new_config);
+
+        // Block until the daemon reports a successful hot-swap.
+        daemon.await_reload().expect(
+            "daemon should have hot-reloaded the configuration within timeout",
+        );
+
+        // Small grace period after reload for the new cache to be used.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // --- Phase 3: verify new mapping takes effect (CapsLock → A) ---
+        sandbox
+            .inject_key_down(codes::CAPSLOCK)
+            .expect("inject key down");
+        sandbox
+            .inject_key_up(codes::CAPSLOCK)
+            .expect("inject key up");
+
+        let events = sandbox.drain_output_events();
+        assert_eq!(
+            events,
+            vec![
+                CapturedEvent {
+                    code: codes::A,
+                    is_down: true
+                },
+                CapturedEvent {
+                    code: codes::A,
+                    is_down: false
+                },
+            ],
+            "reloaded mapping: CapsLock should be remapped to A"
+        );
+    });
 }
