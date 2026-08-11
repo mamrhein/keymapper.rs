@@ -40,6 +40,7 @@ jobs:
             pkg-config \
             libdbus-1-dev \
             libudev-dev \
+            libxkbcommon-dev \
             libxcb1-dev
 
       - name: Install cargo-nextest
@@ -79,4 +80,4 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Run e2e tests as root (for Accessibility permission)
-        run: sudo bash scripts/.sign-and-test-e2e.sh
+        run: sudo bash scripts/sign-and-test-e2e.sh

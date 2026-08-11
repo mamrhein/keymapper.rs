@@ -138,6 +138,7 @@ jobs:
             pkg-config \
             libdbus-1-dev \
             libudev-dev \
+            libxkbcommon-dev \
             libxcb1-dev
 
       - name: Install cargo-nextest
@@ -182,6 +183,7 @@ jobs:
             pkg-config \
             libdbus-1-dev \
             libudev-dev \
+            libxkbcommon-dev \
             libxcb1-dev
 
       - name: Install cargo-nextest
