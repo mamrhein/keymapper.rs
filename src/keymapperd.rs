@@ -29,8 +29,6 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-
     let config_path = keymapper::common::config_path::find_config_path_strict(
     )
     .map_err(|e| {

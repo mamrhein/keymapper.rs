@@ -151,7 +151,6 @@ fn emit_cg_event_chord(
 /// monitor tap, but only IOHIDManager is used for input.
 pub fn start_mapping(
     lookup: Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
-    _device_path_override: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // macOS uses global event capture; device path is ignored.
     let source =

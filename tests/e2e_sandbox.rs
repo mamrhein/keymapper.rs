@@ -211,20 +211,13 @@ impl Drop for DaemonGuard {
 ///
 /// When *device_path* is `Some`, passes it as `--device` to the daemon so it
 /// captures from the specified input device instead of auto-discovering.
-fn start_daemon_in_dir(
-    config_dir: &PathBuf,
-    device_path: Option<&str>,
-) -> DaemonGuard {
+fn start_daemon_in_dir(config_dir: &PathBuf) -> DaemonGuard {
     use std::process::Stdio;
 
     let mut cmd = Command::new(daemon_bin_path());
     cmd.current_dir(config_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-
-    if let Some(path) = device_path {
-        cmd.arg("--device").arg(path);
-    }
 
     let mut child = cmd.spawn().expect("failed to spawn keymapperd");
 
@@ -310,8 +303,7 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    let device_path = sandbox.input_device_id().map(|s| s.to_string());
-    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
+    let mut daemon = start_daemon_in_dir(&config_dir);
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -410,8 +402,7 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon.
-    let device_path = sandbox.input_device_id().map(|s| s.to_string());
-    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
+    let mut daemon = start_daemon_in_dir(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -961,8 +952,7 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.
-    let device_path = sandbox.input_device_id().map(|s| s.to_string());
-    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
+    let mut daemon = start_daemon_in_dir(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1032,8 +1022,8 @@ groups:
 /// identification. This means:
 ///
 /// 1. Keyboard filtering is effectively bypassed for `SendInput` events.
-/// 2. The mapping still works because the worker finds the rule without
-///    device filtering.
+/// 2. The mapping still works because the worker finds the rule without device
+///    filtering.
 /// 3. Real physical keyboard events (which DO trigger Raw Input) are subject
 ///    to the keyboard filter.
 ///
@@ -1174,20 +1164,19 @@ groups:
             events.iter().any(|e| e.code == codes::LEFT_CONTROL);
         if has_left_control {
             eprintln!(
-                "keyboard filter test: CapsLock was remapped to \
-                 LeftControl (SendInput bypasses Raw Input, so device \
-                 filtering is not applied)"
+                "keyboard filter test: CapsLock was remapped to LeftControl \
+                 (SendInput bypasses Raw Input, so device filtering is not \
+                 applied)"
             );
         }
     }
 
     eprintln!(
         "keyboard filter test: daemon running with filter for '{}' \
-         (vendor={}). SendInput injection does NOT trigger WM_INPUT, \
-         so the worker falls back to no-device-ID lookup and keyboard \
-         filtering is bypassed. To verify filtering, press CapsLock on \
-         the '{}' keyboard and observe whether it is remapped to \
-         LeftControl.",
+         (vendor={}). SendInput injection does NOT trigger WM_INPUT, so the \
+         worker falls back to no-device-ID lookup and keyboard filtering is \
+         bypassed. To verify filtering, press CapsLock on the '{}' keyboard \
+         and observe whether it is remapped to LeftControl.",
         target.name, target.vendor, target.name
     );
 
