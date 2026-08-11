@@ -228,10 +228,7 @@ fn extract_app_root(exe_path: &Path) -> Option<String> {
 
     // If the parent is a standard binary directory, this is a system app —
     // no need for root-based matching.
-    if matches!(
-        parent_name,
-        "bin" | "sbin" | "bin64" | "sbin64"
-    ) {
+    if matches!(parent_name, "bin" | "sbin" | "bin64" | "sbin64") {
         // For /usr/bin/..., /usr/local/bin/..., etc., the app root is not
         // useful for matching.
         if parent.starts_with("/usr") {
@@ -422,10 +419,7 @@ mod tests {
     #[test]
     fn extract_app_root_system_bin() {
         // System apps under /usr/bin/ should not produce an app root.
-        assert_eq!(
-            extract_app_root(Path::new("/usr/bin/firefox")),
-            None
-        );
+        assert_eq!(extract_app_root(Path::new("/usr/bin/firefox")), None);
     }
 
     #[test]

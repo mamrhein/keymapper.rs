@@ -126,23 +126,22 @@ impl HidFunctions {
         // `Option<FnType>` is valid because both have identical size and
         // alignment, and the null/non-null bit patterns match.
         let create = unsafe {
-            std::mem::transmute::<*mut c_void, Option<FnIOHIDServiceSocketCreate>>(
-                libc::dlsym(
-                    handle,
-                    b"IOHIDServiceSocketCreate\0".as_ptr() as *const _,
-                ),
-            )
+            std::mem::transmute::<
+                *mut c_void,
+                Option<FnIOHIDServiceSocketCreate>,
+            >(libc::dlsym(
+                handle,
+                b"IOHIDServiceSocketCreate\0".as_ptr() as *const _,
+            ))
         };
         let send_report = unsafe {
             std::mem::transmute::<
                 *mut c_void,
                 Option<FnIOHIDServiceSocketSendReport>,
-            >(
-                libc::dlsym(
-                    handle,
-                    b"IOHIDServiceSocketSendReport\0".as_ptr() as *const _,
-                ),
-            )
+            >(libc::dlsym(
+                handle,
+                b"IOHIDServiceSocketSendReport\0".as_ptr() as *const _,
+            ))
         };
         let close = unsafe {
             std::mem::transmute::<*mut c_void, Option<FnIOHIDServiceSocketClose>>(
@@ -158,10 +157,7 @@ impl HidFunctions {
         // guard needs suppression.
         let _ = handle;
 
-        if create.is_none()
-            || send_report.is_none()
-            || close.is_none()
-        {
+        if create.is_none() || send_report.is_none() || close.is_none() {
             return false;
         }
 
@@ -179,7 +175,8 @@ impl HidFunctions {
 
         // Another thread raced us. Verify the cached values are valid.
         let cached = HID_FUNCS.get().expect("race in HidFunctions::resolve");
-        cached.create.is_some() && cached.send_report.is_some()
+        cached.create.is_some()
+            && cached.send_report.is_some()
             && cached.close.is_some()
     }
 }
@@ -633,7 +630,11 @@ mod tests {
         // Verify every modifier bit position maps correctly.
         for bit in 0..8 {
             let mask = 1u8 << bit;
-            assert_eq!(modifier_to_hid(mask), mask, "bit {bit} should pass through unchanged");
+            assert_eq!(
+                modifier_to_hid(mask),
+                mask,
+                "bit {bit} should pass through unchanged"
+            );
         }
         // All modifiers pressed.
         assert_eq!(modifier_to_hid(0xFF), 0xFF);

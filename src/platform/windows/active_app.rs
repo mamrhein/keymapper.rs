@@ -9,7 +9,7 @@
 
 //! Synchronous foreground application query via Win32 APIs.
 
-use windows::Win32::Foundation::{CloseHandle, BOOL};
+use windows::Win32::Foundation::{BOOL, CloseHandle};
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
     QueryFullProcessImageNameW,

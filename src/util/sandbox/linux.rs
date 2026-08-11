@@ -343,10 +343,7 @@ impl Sandbox for LinuxSandbox {
     }
 
     /// Inject a key-up event into the secondary virtual input device.
-    fn inject_key_up_secondary(
-        &self,
-        code: u16,
-    ) -> Result<(), SandboxError> {
+    fn inject_key_up_secondary(&self, code: u16) -> Result<(), SandboxError> {
         self.inject_key_to_secondary(code, 0)
     }
 

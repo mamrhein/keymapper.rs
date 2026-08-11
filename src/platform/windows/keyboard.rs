@@ -13,12 +13,11 @@ use std::ptr;
 
 use windows::Win32::Devices::{
     DeviceAndDriverInstallation::{
-        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
-        SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
-        SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
+        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
+        SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+        SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
         SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-        SetupDiGetDeviceInterfaceDetailW,
-        SetupDiGetDeviceRegistryPropertyW,
+        SetupDiGetDeviceInterfaceDetailW, SetupDiGetDeviceRegistryPropertyW,
     },
     HumanInterfaceDevice::{
         HIDP_CAPS, HIDP_LINK_COLLECTION_NODE, HidD_FreePreparsedData,
@@ -175,10 +174,10 @@ fn open_hid_device(interface_path: &[u16]) -> Option<HANDLE> {
             windows::core::PCWSTR::from_raw(interface_path.as_ptr()),
             GENERIC_READ.0,
             FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0),
-            None,            // no security attributes
+            None, // no security attributes
             OPEN_EXISTING,
             windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
-            None,            // no template file
+            None, // no template file
         )
     }) else {
         return None;
@@ -248,9 +247,7 @@ fn get_device_property(
 // ---------------------------------------------------------------------------
 
 /// Read product, manufacturer, and serial from an open HID device handle.
-fn read_hid_strings(
-    handle: HANDLE,
-) -> (String, String, String) {
+fn read_hid_strings(handle: HANDLE) -> (String, String, String) {
     let mut product_buf = [0u16; 128];
     let mut vendor_buf = [0u16; 128];
     let mut serial_buf = [0u16; 128];
@@ -807,11 +804,7 @@ mod tests {
 
     #[test]
     fn looks_like_keyboard_detects_name_match() {
-        assert!(looks_like_keyboard(
-            "HID Keyboard Device",
-            "",
-            ""
-        ));
+        assert!(looks_like_keyboard("HID Keyboard Device", "", ""));
     }
 
     #[test]

@@ -32,8 +32,9 @@ static HOOK_HANDLE: parking_lot::Mutex<RawHookHandle> =
 
 /// Probe for key presses using a WH_KEYBOARD_LL hook.
 pub fn probe() {
-    let h_instance: HINSTANCE =
-        unsafe { GetModuleHandleW(None) }.expect("Failed to get module handle").into();
+    let h_instance: HINSTANCE = unsafe { GetModuleHandleW(None) }
+        .expect("Failed to get module handle")
+        .into();
 
     let handle: HHOOK = unsafe {
         SetWindowsHookExW(
@@ -62,8 +63,7 @@ pub fn probe() {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        UnhookWindowsHookEx(handle)
-            .expect("Failed to unhook keyboard hook");
+        UnhookWindowsHookEx(handle).expect("Failed to unhook keyboard hook");
     }
 }
 
@@ -99,13 +99,13 @@ extern "system" fn probe_keyboard_proc(
 
     // Print on key down.
     if is_key_down {
-        let (name, code_str) = if let Some(key) =
-            Key::from_native(vk_code.0)
-        {
+        let (name, code_str) = if let Some(key) = Key::from_native(vk_code.0) {
             (key.as_str().to_string(), format!("{}", key.as_native()))
         } else {
             // Try to get a character representation.
-            let char_code = unsafe { MapVirtualKeyW(vk_code.0 as u32, windows::Win32::UI::Input::KeyboardAndMouse::MAP_VIRTUAL_KEY_TYPE(2)) };
+            let char_code = unsafe {
+                MapVirtualKeyW(vk_code.0 as u32, windows::Win32::UI::Input::KeyboardAndMouse::MAP_VIRTUAL_KEY_TYPE(2))
+            };
             let name = if char_code != 0 && (char_code as u8) as char != '\0' {
                 format!("Unknown({}, {})", vk_code.0, char_code as u8 as char)
             } else {
@@ -117,7 +117,5 @@ extern "system" fn probe_keyboard_proc(
         println!("{name}: {code_str}");
     }
 
-    unsafe {
-        CallNextHookEx(HHOOK::default(), code, w_param, l_param)
-    }
+    unsafe { CallNextHookEx(HHOOK::default(), code, w_param, l_param) }
 }

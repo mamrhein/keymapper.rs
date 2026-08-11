@@ -82,7 +82,9 @@ pub fn is_daemon_running(name: &str) -> bool {
     };
     let target = to_wide(&target_name);
 
-    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+    let Ok(snapshot) =
+        (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })
+    else {
         return false;
     };
     if snapshot == INVALID_HANDLE_VALUE {
