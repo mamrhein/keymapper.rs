@@ -120,6 +120,7 @@ pub struct LinuxSandbox {
     is_setup: bool,
 }
 
+#[allow(dead_code)]
 impl LinuxSandbox {
     /// Check that `/dev/uinput` is accessible and writable.
     fn check_uinput() -> Result<(), SandboxError> {
@@ -283,34 +284,6 @@ impl LinuxSandbox {
             thread_handle: Some(thread_handle),
         });
     }
-}
-
-impl Sandbox for LinuxSandbox {
-    fn new() -> Result<Option<Self>, SandboxError> {
-        Self::check_uinput()?;
-
-        Ok(Some(Self {
-            device: None,
-            input_device_path: None,
-            secondary_device: None,
-            secondary_device_path: None,
-            queue: Arc::new(EventQueue::new()),
-            monitor: None,
-            is_setup: false,
-        }))
-    }
-
-    fn setup(&mut self) -> Result<(), SandboxError> {
-        let device_name =
-            format!("{INPUT_DEVICE_NAME_PREFIX}-{}", process::id());
-        let (device, path) = create_uinput_device(&device_name)?;
-
-        self.device = Some(Arc::new(Mutex::new(device)));
-        self.input_device_path = Some(path);
-        self.is_setup = true;
-
-        Ok(())
-    }
 
     /// Create a secondary virtual input device for injecting events from a
     /// different source.  This device has a distinct name so the daemon's
@@ -319,7 +292,7 @@ impl Sandbox for LinuxSandbox {
     /// The secondary device is NOT grabbed by the daemon.  Events injected
     /// into it pass through directly to the system and are captured by the
     /// sandbox monitor.
-    fn create_secondary_device(&mut self) -> Result<(), SandboxError> {
+    pub fn create_secondary_device(&mut self) -> Result<(), SandboxError> {
         let device_name = format!("{SECONDARY_DEVICE_NAME}-{}", process::id());
         let (device, path) = create_uinput_device(&device_name)?;
 
@@ -330,12 +303,12 @@ impl Sandbox for LinuxSandbox {
 
     /// Return the device path of the secondary virtual keyboard, if one was
     /// created.
-    fn secondary_device_path(&self) -> Option<&str> {
+    pub fn secondary_device_path(&self) -> Option<&str> {
         self.secondary_device_path.as_deref()
     }
 
     /// Inject a key-down event into the secondary virtual input device.
-    fn inject_key_down_secondary(
+    pub fn inject_key_down_secondary(
         &self,
         code: u16,
     ) -> Result<(), SandboxError> {
@@ -343,12 +316,12 @@ impl Sandbox for LinuxSandbox {
     }
 
     /// Inject a key-up event into the secondary virtual input device.
-    fn inject_key_up_secondary(&self, code: u16) -> Result<(), SandboxError> {
+    pub fn inject_key_up_secondary(&self, code: u16) -> Result<(), SandboxError> {
         self.inject_key_to_secondary(code, 0)
     }
 
     /// Inject a keyboard event into the secondary virtual input device.
-    fn inject_key_to_secondary(
+    pub fn inject_key_to_secondary(
         &self,
         code: u16,
         value: i32,
@@ -374,6 +347,34 @@ impl Sandbox for LinuxSandbox {
         // Allow the kernel to propagate the event to readers of the event
         // node.
         thread::sleep(Duration::from_millis(5));
+
+        Ok(())
+    }
+}
+
+impl Sandbox for LinuxSandbox {
+    fn new() -> Result<Option<Self>, SandboxError> {
+        Self::check_uinput()?;
+
+        Ok(Some(Self {
+            device: None,
+            input_device_path: None,
+            secondary_device: None,
+            secondary_device_path: None,
+            queue: Arc::new(EventQueue::new()),
+            monitor: None,
+            is_setup: false,
+        }))
+    }
+
+    fn setup(&mut self) -> Result<(), SandboxError> {
+        let device_name =
+            format!("{INPUT_DEVICE_NAME_PREFIX}-{}", process::id());
+        let (device, path) = create_uinput_device(&device_name)?;
+
+        self.device = Some(Arc::new(Mutex::new(device)));
+        self.input_device_path = Some(path);
+        self.is_setup = true;
 
         Ok(())
     }
