@@ -18,7 +18,12 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::{
-    env, path::{Path, PathBuf}, process::Command, sync::mpsc, thread, time::Duration,
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
@@ -85,34 +90,37 @@ impl E2eFileLock {
 }
 
 // ---------------------------------------------------------------------------
-// Platform-specific key codes
+// Platform-specific key codes — sourced from the platform Key enum
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
 mod codes {
-    // CGKeyCode values (see src/platform/macos/key.rs)
-    pub const CAPSLOCK: u16 = 57;
-    pub const LEFT_CONTROL: u16 = 59;
-    pub const A: u16 = 0;
-    pub const B: u16 = 11;
+    use keymapper::platform::Key;
+
+    pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
+    pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
+    pub const A: u16 = Key::A.as_native();
+    pub const B: u16 = Key::B.as_native();
 }
 
 #[cfg(target_os = "linux")]
 mod codes {
-    // Linux evdev key codes (see include/uapi/linux/input-event-codes.h)
-    pub const CAPSLOCK: u16 = 58; // KEY_CAPSLOCK
-    pub const LEFT_CONTROL: u16 = 29; // KEY_LEFTCTRL
-    pub const A: u16 = 30; // KEY_A
-    pub const B: u16 = 31; // KEY_B
+    use keymapper::platform::Key;
+
+    pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
+    pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
+    pub const A: u16 = Key::A.as_native();
+    pub const B: u16 = Key::B.as_native();
 }
 
 #[cfg(target_os = "windows")]
 mod codes {
-    // Windows virtual-key codes (see WinUser.h)
-    pub const CAPSLOCK: u16 = 0x14; // VK_CAPITAL
-    pub const LEFT_CONTROL: u16 = 0xA2; // VK_LCONTROL
-    pub const A: u16 = 0x41; // VK_A
-    pub const B: u16 = 0x42; // VK_B
+    use keymapper::platform::Key;
+
+    pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
+    pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
+    pub const A: u16 = Key::A.as_native();
+    pub const B: u16 = Key::B.as_native();
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +174,11 @@ impl DaemonGuard {
     fn kill(&mut self) {
         self.child.kill().ok();
         self.child.wait().ok();
+
+        // Allow the kernel time to clean up uinput device nodes after the
+        // daemon's file descriptors are closed.  Without this delay the
+        // next test's monitor may discover a stale /dev/input/event* entry.
+        thread::sleep(Duration::from_millis(50));
     }
 
     /// Block until the daemon logs a hot-reload success message, or timeout.
