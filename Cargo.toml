@@ -53,10 +53,12 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWorkspace"] }
 objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary"] }
 
-# Windows-specific system bindings (official Microsoft crate)
+# Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
+crossbeam-channel = "0.5" # lock-free IPC between input threads
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
