@@ -9,13 +9,28 @@
 
 use std::sync::Arc;
 
+use clap::Parser;
 use parking_lot::RwLock;
 
 // Import Lookup so read-only trait methods are in scope, and MutableLookup so
 // mutation methods are callable on the concrete RuntimeState type.
 use keymapper::daemon::state::{Lookup, MutableLookup};
 
+/// Cross-platform key-remapping daemon.
+#[derive(Parser)]
+struct Args {
+    /// Override the input device path (Linux only).
+    ///
+    /// When specified, the daemon captures keyboard events exclusively from
+    /// this device node instead of auto-discovering connected keyboards.
+    /// Primarily used for end-to-end testing with virtual keyboards.
+    #[arg(long)]
+    device: Option<String>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
     let config_path = keymapper::common::config_path::find_config_path_strict(
     )
     .map_err(|e| {
@@ -62,5 +77,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::from_raw(ptr as *const RwLock<dyn Lookup>)
     };
 
-    keymapper::platform::start_mapping(platform_state)
+    keymapper::platform::start_mapping(platform_state, args.device.as_deref())
 }

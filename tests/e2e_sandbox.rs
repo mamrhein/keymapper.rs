@@ -214,15 +214,25 @@ impl Drop for DaemonGuard {
 
 /// Spawn the `keymapperd` binary in *config_dir* and return a guard that
 /// ensures the child is killed on `Drop`.
-fn start_daemon_in_dir(config_dir: &PathBuf) -> DaemonGuard {
+///
+/// When *device_path* is `Some`, passes it as `--device` to the daemon so it
+/// captures from the specified input device instead of auto-discovering.
+fn start_daemon_in_dir(
+    config_dir: &PathBuf,
+    device_path: Option<&str>,
+) -> DaemonGuard {
     use std::process::Stdio;
 
-    let mut child = Command::new(daemon_bin_path())
-        .current_dir(config_dir)
+    let mut cmd = Command::new(daemon_bin_path());
+    cmd.current_dir(config_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("failed to spawn keymapperd");
+        .stderr(Stdio::inherit());
+
+    if let Some(path) = device_path {
+        cmd.arg("--device").arg(path);
+    }
+
+    let mut child = cmd.spawn().expect("failed to spawn keymapperd");
 
     let stdout = child.stdout.take().expect("failed to capture stdout");
 
@@ -306,7 +316,8 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -405,7 +416,8 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -767,8 +779,10 @@ fn e2e_keyboard_filter() {
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    // Spawn the daemon.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    // Spawn the daemon, passing the primary device path so it captures from
+    // the sandbox virtual keyboard.
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -954,7 +968,8 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));

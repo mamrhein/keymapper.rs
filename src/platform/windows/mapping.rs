@@ -14,13 +14,12 @@ use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput,
-    VIRTUAL_KEY,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSG,
-    SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, HHOOK,
-    WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG,
+    SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN,
+    WM_SYSKEYDOWN,
 };
 
 use super::key::Key;
@@ -87,11 +86,7 @@ fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
 }
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
-    let mut flags: u32 = if is_key_up {
-        KEYEVENTF_KEYUP.0
-    } else {
-        0
-    };
+    let mut flags: u32 = if is_key_up { KEYEVENTF_KEYUP.0 } else { 0 };
     if is_extended_key(vk) {
         flags |= KEYEVENTF_EXTENDEDKEY.0;
     }
@@ -188,11 +183,12 @@ fn hook_handle() -> HHOOK {
 
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
+    _device_path_override: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Windows uses a global keyboard hook; device path is ignored.
     set_shared_lookup(lookup);
 
-    let h_instance: HINSTANCE =
-        unsafe { GetModuleHandleW(None)?.into() };
+    let h_instance: HINSTANCE = unsafe { GetModuleHandleW(None)?.into() };
 
     let handle = unsafe {
         SetWindowsHookExW(
@@ -268,7 +264,5 @@ extern "system" fn low_level_keyboard_proc(
         return LRESULT(1); // Swallow the original key
     }
 
-    unsafe {
-        CallNextHookEx(hook_handle(), code, w_param, l_param)
-    }
+    unsafe { CallNextHookEx(hook_handle(), code, w_param, l_param) }
 }
