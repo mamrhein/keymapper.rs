@@ -10,20 +10,17 @@
 use std::{sync::Arc, thread, time::Duration};
 
 use parking_lot::RwLock;
-use windows_sys::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
-    UI::{
-        Input::KeyboardAndMouse::{
-            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-        },
-        WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSG,
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-            WM_KEYDOWN, WM_SYSKEYDOWN,
-        },
-    },
+use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput,
+    VIRTUAL_KEY,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, MSG,
+    SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, HHOOK,
+    WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
 use super::key::Key;
@@ -31,10 +28,6 @@ use crate::{
     common::modifier::ModifierRole,
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
-
-/// Type aliases for hook types not re-exported in windows-sys 0.61.
-#[allow(clippy::upper_case_acronyms)]
-type HHOOK = *mut std::ffi::c_void;
 
 // ---------------------------------------------------------------------------
 // Modifier handling
@@ -82,21 +75,25 @@ fn modifier_bit_to_vk(bit: u8) -> Option<VIRTUAL_KEY> {
         ModifierRole::LeftCommand => Key::LeftCommand,
         ModifierRole::RightCommand => Key::RightCommand,
     };
-    Some(key.as_native())
+    Some(VIRTUAL_KEY(key.as_native()))
 }
 
 fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
     matches!(
-        vk,
+        vk.0,
         0xA3 | 0xA5 | 0x21 | 0x22 | 0x23 | 0x25
             ..=0x28 | 0x2D | 0x2E | 0x6F | 0x92
     )
 }
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
-    let mut flags = if is_key_up { KEYEVENTF_KEYUP } else { 0 };
+    let mut flags: u32 = if is_key_up {
+        KEYEVENTF_KEYUP.0
+    } else {
+        0
+    };
     if is_extended_key(vk) {
-        flags |= KEYEVENTF_EXTENDEDKEY;
+        flags |= KEYEVENTF_EXTENDEDKEY.0;
     }
 
     let input = INPUT {
@@ -105,18 +102,14 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
             ki: KEYBDINPUT {
                 wVk: vk,
                 wScan: 0,
-                dwFlags: flags,
+                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
                 time: 0,
                 dwExtraInfo: 0,
             },
         },
     };
     unsafe {
-        SendInput(
-            1,
-            std::ptr::addr_of!(input),
-            std::mem::size_of::<INPUT>() as i32,
-        );
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
     }
 }
 
@@ -133,10 +126,10 @@ fn emit_key_event(native_key: &NativeKey) {
         }
     }
 
-    simulate_key_event(native_key.base as VIRTUAL_KEY, false);
+    simulate_key_event(VIRTUAL_KEY(native_key.base), false);
     thread::sleep(Duration::from_millis(1));
 
-    simulate_key_event(native_key.base as VIRTUAL_KEY, true);
+    simulate_key_event(VIRTUAL_KEY(native_key.base), true);
     thread::sleep(Duration::from_millis(1));
 
     for vk in pressed_modifiers.into_iter().rev() {
@@ -148,7 +141,7 @@ fn emit_key_event(native_key: &NativeKey) {
 /// Map a raw VIRTUAL_KEY to its modifier bit position via the shared
 /// `ModifierRole` type.
 fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
-    let role = match vk {
+    let role = match vk.0 {
         0xA2 => ModifierRole::LeftControl,
         0xA3 => ModifierRole::RightControl,
         0xA0 => ModifierRole::LeftShift,
@@ -168,7 +161,14 @@ fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
 
 static SHARED_LOOKUP: parking_lot::Mutex<Option<Arc<RwLock<dyn Lookup>>>> =
     parking_lot::Mutex::new(None);
-static HOOK_HANDLE: parking_lot::Mutex<isize> = parking_lot::Mutex::new(0);
+
+// `HHOOK` wraps a raw `*mut c_void` which is not `Send`.  We use a raw
+// pointer stored in a usize instead, which is `Send` and `Sync`.  This is
+// safe because the hook handle is only ever read/written through the mutex.
+type RawHookHandle = usize;
+
+static HOOK_HANDLE: parking_lot::Mutex<RawHookHandle> =
+    parking_lot::Mutex::new(0);
 
 fn set_shared_lookup(lookup: Arc<RwLock<dyn Lookup>>) {
     *SHARED_LOOKUP.lock() = Some(lookup);
@@ -179,11 +179,11 @@ fn get_shared_lookup() -> Option<Arc<RwLock<dyn Lookup>>> {
 }
 
 fn set_hook_handle(handle: HHOOK) {
-    *HOOK_HANDLE.lock() = handle as isize;
+    *HOOK_HANDLE.lock() = handle.0 as RawHookHandle;
 }
 
 fn hook_handle() -> HHOOK {
-    *HOOK_HANDLE.lock() as _
+    HHOOK(*HOOK_HANDLE.lock() as *mut std::ffi::c_void)
 }
 
 pub fn start_mapping(
@@ -192,27 +192,27 @@ pub fn start_mapping(
     set_shared_lookup(lookup);
 
     let h_instance: HINSTANCE =
-        unsafe { GetModuleHandleW(std::ptr::null::<u16>()) };
+        unsafe { GetModuleHandleW(None)?.into() };
 
-    let handle: HHOOK = unsafe {
+    let handle = unsafe {
         SetWindowsHookExW(
             WH_KEYBOARD_LL,
             Some(low_level_keyboard_proc),
             h_instance,
             0,
-        )
+        )?
     };
 
-    if handle.is_null() {
+    if handle.is_invalid() {
         return Err("Failed to install global keyboard hook".into());
     }
     set_hook_handle(handle);
     println!("Windows low-level hook listening.");
 
     unsafe {
-        let mut msg: MSG = std::mem::zeroed();
-        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
-        UnhookWindowsHookEx(hook_handle());
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+        UnhookWindowsHookEx(hook_handle())?;
     }
 
     Ok(())
@@ -235,11 +235,11 @@ extern "system" fn low_level_keyboard_proc(
         };
     };
 
-    let kbd_struct = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
-    let vk_code = kbd_struct.vkCode as VIRTUAL_KEY;
+    let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
+    let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
 
     let is_key_down =
-        w_param as u32 == WM_KEYDOWN || w_param as u32 == WM_SYSKEYDOWN;
+        w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
 
     // Clear the current key's modifier bit from the polled state so that
     // bare-modifier triggers (e.g. "LeftControl: A") match correctly against
@@ -251,8 +251,8 @@ extern "system" fn low_level_keyboard_proc(
 
     let guard = lookup.read();
     let active_outputs = guard
-        .for_app(&guard.active_app(), vk_code, pressed_modifiers, None)
-        .or_else(|| guard.global(vk_code, pressed_modifiers, None))
+        .for_app(&guard.active_app(), vk_code.0, pressed_modifiers, None)
+        .or_else(|| guard.global(vk_code.0, pressed_modifiers, None))
         .map(|v| v.to_vec());
     drop(guard);
 
@@ -265,8 +265,10 @@ extern "system" fn low_level_keyboard_proc(
                 emit_key_event(native_key);
             }
         }
-        return 1; // Swallow the original key
+        return LRESULT(1); // Swallow the original key
     }
 
-    unsafe { CallNextHookEx(hook_handle(), code, w_param, l_param) }
+    unsafe {
+        CallNextHookEx(hook_handle(), code, w_param, l_param)
+    }
 }

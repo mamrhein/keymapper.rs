@@ -17,26 +17,20 @@
 
 use std::sync::{Arc, Mutex};
 
-use windows_sys::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
-    UI::{
-        Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, SendInput, VIRTUAL_KEY,
-        },
-        WindowsAndMessaging::{
-            CallNextHookEx, KBDLLHOOKSTRUCT, SetWindowsHookExW,
-            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-            WM_SYSKEYDOWN, WM_SYSKEYUP,
-        },
-    },
+use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    SendInput, VIRTUAL_KEY,
+};
+use windows::Win32::UI::WindowsAndMessaging::HHOOK;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, KBDLLHOOKSTRUCT, SetWindowsHookExW,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use super::{CapturedEvent, Sandbox, SandboxError};
-
-/// Type alias for hook handles not re-exported in windows-sys 0.61.
-#[allow(clippy::upper_case_acronyms)]
-type HHOOK = *mut std::ffi::c_void;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -128,15 +122,19 @@ impl WindowsSandbox {
         code: u16,
         is_down: bool,
     ) -> Result<(), SandboxError> {
-        let flags = if is_down { 0 } else { 0x0002 }; // KEYEVENTF_KEYUP
+        let flags: u32 = if is_down {
+            0
+        } else {
+            0x0002 // KEYEVENTF_KEYUP
+        };
 
         let input = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: code as VIRTUAL_KEY,
+                    wVk: VIRTUAL_KEY(code),
                     wScan: 0,
-                    dwFlags: flags,
+                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
                     time: 0,
                     dwExtraInfo: SEND_MARKER,
                 },
@@ -144,11 +142,7 @@ impl WindowsSandbox {
         };
 
         let result = unsafe {
-            SendInput(
-                1,
-                std::ptr::addr_of!(input),
-                std::mem::size_of::<INPUT>() as i32,
-            )
+            SendInput(&[input], std::mem::size_of::<INPUT>() as i32)
         };
 
         if result != 1 {
@@ -167,7 +161,7 @@ impl Sandbox for WindowsSandbox {
         // operate on the current desktop session.  No prerequisite check is
         // needed.
         Ok(Some(Self {
-            hook_handle: std::ptr::null_mut(),
+            hook_handle: HHOOK::default(),
             queue: Arc::new(EventQueue::new()),
             is_setup: false,
         }))
@@ -183,7 +177,7 @@ impl Sandbox for WindowsSandbox {
         set_monitor_queue(Some(Arc::clone(&self.queue)));
 
         let h_instance: HINSTANCE =
-            unsafe { GetModuleHandleW(std::ptr::null::<u16>()) };
+            unsafe { GetModuleHandleW(None) }.expect("Failed to get module handle").into();
 
         let handle: HHOOK = unsafe {
             SetWindowsHookExW(
@@ -192,9 +186,15 @@ impl Sandbox for WindowsSandbox {
                 h_instance,
                 0,
             )
-        };
+        }
+        .map_err(|e| {
+            set_monitor_queue(None);
+            SandboxError::DeviceCreationFailed(format!(
+                "failed to install monitoring keyboard hook: {e}"
+            ))
+        })?;
 
-        if handle.is_null() {
+        if handle.is_invalid() {
             set_monitor_queue(None);
             return Err(SandboxError::DeviceCreationFailed(
                 "failed to install monitoring keyboard hook".to_string(),
@@ -232,11 +232,12 @@ impl Sandbox for WindowsSandbox {
             return;
         }
 
-        if !self.hook_handle.is_null() {
+        if !self.hook_handle.is_invalid() {
             unsafe {
-                UnhookWindowsHookEx(self.hook_handle);
+                UnhookWindowsHookEx(self.hook_handle)
+                    .expect("Failed to unhook monitoring keyboard hook");
             }
-            self.hook_handle = std::ptr::null_mut();
+            self.hook_handle = HHOOK::default();
         }
 
         // Clear the shared queue reference.
@@ -270,11 +271,11 @@ extern "system" fn monitor_keyboard_proc(
 ) -> LRESULT {
     if code < 0 {
         return unsafe {
-            CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
+            CallNextHookEx(HHOOK::default(), code, w_param, l_param)
         };
     }
 
-    let kbd_struct = unsafe { *(l_param as *const KBDLLHOOKSTRUCT) };
+    let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
 
     // Only record events that are NOT from our injector.  The absence of the
     // marker means the event was either a real key press or, more relevantly,
@@ -282,12 +283,12 @@ extern "system" fn monitor_keyboard_proc(
     if kbd_struct.dwExtraInfo != SEND_MARKER {
         let Some(queue) = monitor_queue() else {
             return unsafe {
-                CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param)
+                CallNextHookEx(HHOOK::default(), code, w_param, l_param)
             };
         };
 
         let vk = kbd_struct.vkCode as u16;
-        let msg = w_param as u32;
+        let msg = w_param.0 as u32;
         let is_down =
             matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP);
 
@@ -299,7 +300,9 @@ extern "system" fn monitor_keyboard_proc(
     }
 
     // Always pass the event through — we are only monitoring.
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param) }
+    unsafe {
+        CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+    }
 }
 
 // ---------------------------------------------------------------------------

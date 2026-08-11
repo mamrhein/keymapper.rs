@@ -9,13 +9,13 @@
 
 //! Synchronous foreground application query via Win32 APIs.
 
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, FALSE},
-    System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        QueryFullProcessImageNameW,
-    },
-    UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
+use windows::Win32::Foundation::{CloseHandle, BOOL};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId,
 };
 
 /// Synchronously query the current foreground application name.
@@ -25,21 +25,24 @@ use windows_sys::Win32::{
 /// query fails or no window is in the foreground.
 pub fn get_active_app_name() -> String {
     let hwnd = unsafe { GetForegroundWindow() };
-    if hwnd.is_null() {
+    if hwnd.is_invalid() {
         return "unknown".to_string();
     }
 
     // Get the process ID of the thread that owns the foreground window.
     let mut pid: u32 = 0;
-    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     if pid == 0 {
         return "unknown".to_string();
     }
 
     // Open the process with minimal permissions to query its image name.
-    let process =
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
-    if process.is_null() {
+    let Ok(process) = (unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, BOOL(0), pid)
+    }) else {
+        return "unknown".to_string();
+    };
+    if process.is_invalid() {
         return "unknown".to_string();
     }
 
@@ -47,10 +50,15 @@ pub fn get_active_app_name() -> String {
     let mut buffer = [0u16; 512]; // MAX_PATH * 2, sufficient for executable paths.
     let mut size = buffer.len() as u32;
     let ok = unsafe {
-        QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut size)
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
     };
 
-    if ok == 0 {
+    if ok.is_err() {
         unsafe { CloseHandle(process) };
         return "unknown".to_string();
     }

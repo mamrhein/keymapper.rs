@@ -53,16 +53,16 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWorkspace"] }
 objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary"] }
 
-# Windows-specific system bindings
+# Windows-specific system bindings (official Microsoft crate)
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_UI_WindowsAndMessaging",
+windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
-    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_ProcessStatus",
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_Devices_DeviceAndDriverInstallation",
