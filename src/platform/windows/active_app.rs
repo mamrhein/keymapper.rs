@@ -59,11 +59,13 @@ pub fn get_active_app_name() -> String {
     };
 
     if ok.is_err() {
-        unsafe { CloseHandle(process) };
+        // CloseHandle fails only with an invalid handle, which would be a bug.
+        let _ = unsafe { CloseHandle(process) };
         return "unknown".to_string();
     }
 
-    unsafe { CloseHandle(process) };
+    // CloseHandle fails only with an invalid handle, which would be a bug.
+    let _ = unsafe { CloseHandle(process) };
 
     // Extract the executable name from the full path.  The path uses backslash
     // separators (e.g. "C:\Windows\System32\notepad.exe"), so we find the last

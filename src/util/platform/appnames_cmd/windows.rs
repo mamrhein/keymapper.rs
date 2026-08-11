@@ -15,7 +15,6 @@
 
 use std::{collections::HashSet, path::Path};
 
-use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
     TH32CS_SNAPMODULE,
@@ -25,8 +24,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IsWindowVisible,
 };
 
-/// SAFETY: Handle type alias for ToolHelp snapshot handles.
-type SnapshotHandle = HANDLE;
+
 
 /// Convert a null-terminated UTF-16 slice to a Rust String.
 fn utf16_to_string(data: &[u16]) -> String {
@@ -172,7 +170,8 @@ fn get_process_exe_path(pid: u32) -> Option<String> {
             None
         };
 
-        windows::Win32::Foundation::CloseHandle(mod_snap);
+        // CloseHandle fails only with an invalid handle, which would be a bug.
+        let _ = windows::Win32::Foundation::CloseHandle(mod_snap);
         result
     }
 }
@@ -215,8 +214,10 @@ pub fn list_app_names() -> Vec<String> {
         pids: HashSet::new(),
     };
 
+    // EnumWindows returns FALSE on failure, which leaves the collector partially
+    // populated.  This is tolerated — the caller simply gets fewer app names.
     unsafe {
-        EnumWindows(Some(enum_windows_proc), LPARAM(&mut collector as *mut _ as isize));
+        let _ = EnumWindows(Some(enum_windows_proc), LPARAM(&mut collector as *mut _ as isize));
     };
 
     let mut app_names: Vec<String> = Vec::new();

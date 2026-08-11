@@ -107,7 +107,8 @@ pub fn is_daemon_running(name: &str) -> bool {
         }
     }
 
-    unsafe { CloseHandle(snapshot) };
+    // CloseHandle fails only with an invalid handle, which would be a bug.
+    let _ = unsafe { CloseHandle(snapshot) };
     found
 }
 
@@ -169,9 +170,10 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
         // is independent; we don't need to track it.
         let proc_handle: HANDLE = pi.hProcess;
         let thread_handle: HANDLE = pi.hThread;
+        // CloseHandle fails only with an invalid handle, which would be a bug.
         unsafe {
-            CloseHandle(proc_handle);
-            CloseHandle(thread_handle);
+            let _ = CloseHandle(proc_handle);
+            let _ = CloseHandle(thread_handle);
         }
         Ok(())
     } else {

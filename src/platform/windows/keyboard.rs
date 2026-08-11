@@ -203,8 +203,9 @@ fn get_device_property(
     let mut property_type_out = property_type;
     let mut required_size: u32 = 0;
 
-    // First call to determine the required buffer size.
-    unsafe {
+    // First call to determine the required buffer size.  The API is documented
+    // to return FALSE on this probe call, but populates `required_size`.
+    let _ = unsafe {
         SetupDiGetDeviceRegistryPropertyW(
             h_dev_info,
             dev_info_data,
@@ -212,7 +213,7 @@ fn get_device_property(
             Some(&mut property_type_out),
             None,
             Some(&mut required_size),
-        );
+        )
     };
 
     if required_size == 0 {
@@ -478,7 +479,8 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 
         // Get the device interface detail (includes the interface path).
         let mut required_size: u32 = 0;
-        unsafe {
+        // Probe call — expected to fail, but populates `required_size`.
+        let _ = unsafe {
             SetupDiGetDeviceInterfaceDetailW(
                 _guard.0,
                 &interface_data,
@@ -486,7 +488,7 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
                 0,
                 Some(&mut required_size),
                 None,
-            );
+            )
         };
 
         if required_size == 0 {
@@ -647,9 +649,10 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             match open_hid_device(&interface_path) {
                 Some(handle) => {
                     let strings = read_hid_strings(handle);
-                    unsafe {
-                        windows::Win32::Foundation::CloseHandle(handle);
-                    }
+                    // CloseHandle fails only with an invalid handle, which would be a bug.
+                    let _ = unsafe {
+                        windows::Win32::Foundation::CloseHandle(handle)
+                    };
                     strings
                 }
                 None => (String::new(), String::new(), String::new()),
@@ -727,9 +730,8 @@ struct SetupDiGuard(HDEVINFO);
 
 impl Drop for SetupDiGuard {
     fn drop(&mut self) {
-        unsafe {
-            SetupDiDestroyDeviceInfoList(self.0);
-        };
+        // Drop cannot propagate errors; ignoring is the standard approach.
+        let _ = unsafe { SetupDiDestroyDeviceInfoList(self.0) };
     }
 }
 
