@@ -430,4 +430,140 @@ mod tests {
         }
         assert_eq!(count, 1000);
     }
+
+    #[test]
+    fn multi_device_event_distinction() {
+        // Verify that events from different devices can be distinguished.
+        let event1 = RawInputEvent {
+            vk_code: VIRTUAL_KEY(0x41),
+            is_key_up: false,
+            device_handle_ptr: 0x1000, // Device 1
+        };
+
+        let event2 = RawInputEvent {
+            vk_code: VIRTUAL_KEY(0x41),
+            is_key_up: false,
+            device_handle_ptr: 0x2000, // Device 2
+        };
+
+        // Same key, different devices.
+        assert_eq!(event1.vk_code, event2.vk_code);
+        assert_ne!(event1.device_handle_ptr, event2.device_handle_ptr);
+    }
+
+    #[test]
+    fn concurrent_senders_stress_test() {
+        use std::thread;
+
+        let (tx, rx) = crossbeam_channel::unbounded::<RawInputEvent>();
+
+        let num_senders = 10;
+        let events_per_sender = 100;
+
+        let handles: Vec<_> = (0..num_senders)
+            .map(|sender_id| {
+                let tx = tx.clone();
+                thread::spawn(move || {
+                    for i in 0..events_per_sender {
+                        tx.send(RawInputEvent {
+                            vk_code: VIRTUAL_KEY(i as u16),
+                            is_key_up: i % 2 == 0,
+                            device_handle_ptr: sender_id as usize,
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Drop the original sender so we can count exactly.
+        drop(tx);
+
+        let mut received = 0;
+        while let Ok(_event) = rx.try_recv() {
+            received += 1;
+        }
+        assert_eq!(received, num_senders * events_per_sender);
+    }
+
+    #[test]
+    fn event_ordering_preserved_for_single_sender() {
+        let (tx, rx) = crossbeam_channel::unbounded::<RawInputEvent>();
+
+        // Send events in a specific order.
+        for i in 0..100 {
+            tx.send(RawInputEvent {
+                vk_code: VIRTUAL_KEY(i),
+                is_key_up: false,
+                device_handle_ptr: 0,
+            })
+            .unwrap();
+        }
+
+        // Receive and verify ordering.
+        for expected in 0..100 {
+            let event = rx.recv().unwrap();
+            assert_eq!(
+                event.vk_code.0, expected,
+                "event ordering violated at index {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_sender_set_and_get() {
+        // Verify the static sender storage works correctly.
+        // Note: this test may interfere with other tests that use the
+        // same static, so we restore the state afterwards.
+
+        let (tx, _rx) = crossbeam_channel::unbounded::<RawInputEvent>();
+
+        // Save the current state.
+        let previous = get_raw_input_tx();
+
+        set_raw_input_tx(tx);
+
+        // Verify we can retrieve it.
+        assert!(get_raw_input_tx().is_some());
+
+        // Restore the previous state.
+        if let Some(prev_tx) = previous {
+            set_raw_input_tx(prev_tx);
+        } else {
+            // Create a new bounded channel and drop the receiver immediately,
+            // so the sender is in a "disconnected" state similar to None.
+            let (dummy_tx, dummy_rx) = crossbeam_channel::bounded::<RawInputEvent>(1);
+            drop(dummy_rx);
+            set_raw_input_tx(dummy_tx);
+        }
+    }
+
+    #[test]
+    fn raw_input_event_debug_format() {
+        let event = RawInputEvent {
+            vk_code: VIRTUAL_KEY(0x41),
+            is_key_up: true,
+            device_handle_ptr: 0x1234,
+        };
+
+        let debug_str = format!("{event:?}");
+        assert!(debug_str.contains("RawInputEvent"));
+        assert!(debug_str.contains("0x41") || debug_str.contains("65"));
+    }
+
+    #[test]
+    fn wm_stop_message_constant() {
+        // Verify that WM_STOP is defined as a custom message.
+        assert_eq!(WM_STOP, WM_USER + 1);
+    }
+
+    #[test]
+    fn rim_type_keyboard_constant() {
+        // Verify the keyboard input type constant.
+        assert_eq!(RIM_TYPEKEYBOARD, 0x01);
+    }
 }

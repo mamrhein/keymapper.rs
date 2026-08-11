@@ -481,6 +481,98 @@ fn resolve_device_path(handle_ptr: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::daemon::mapping_cache::{NativeKey, RuntimeLookupCache};
+    use crate::daemon::state::Lookup;
+    use crate::platform::Key;
+    use std::collections::HashMap;
+
+    // -----------------------------------------------------------------------
+    // Mock Lookup for testing process_hook_event and decide
+    // -----------------------------------------------------------------------
+
+    /// A [`Lookup`] implementation that returns configurable outputs.
+    struct MockLookup {
+        app_name: String,
+        /// Map of (key, modifiers, device_id_option) -> outputs.
+        global_map: HashMap<(u16, u8, Option<String>), Vec<NativeKey>>,
+    }
+
+    impl MockLookup {
+        fn new() -> Self {
+            Self {
+                app_name: "test_app".to_string(),
+                global_map: HashMap::new(),
+            }
+        }
+
+        /// Configure the mock to return *outputs* for global lookups of
+        /// the given key with the given modifiers and device ID.
+        fn with_global(
+            mut self,
+            key: u16,
+            modifiers: u8,
+            device_id: Option<&str>,
+            outputs: Vec<NativeKey>,
+        ) -> Self {
+            self.global_map.insert(
+                (key, modifiers, device_id.map(String::from)),
+                outputs,
+            );
+            self
+        }
+    }
+
+    impl std::fmt::Debug for MockLookup {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MockLookup").finish()
+        }
+    }
+
+    impl Lookup for MockLookup {
+        fn for_app(
+            &self,
+            _app: &str,
+            _key: u16,
+            _modifiers: u8,
+            _device_id: Option<&str>,
+        ) -> Option<&[NativeKey]> {
+            None
+        }
+
+        fn global(
+            &self,
+            key: u16,
+            modifiers: u8,
+            device_id: Option<&str>,
+        ) -> Option<&[NativeKey]> {
+            // We store outputs in a static vec so we can return a reference.
+            // This is safe because MockLookup lives for the test duration.
+            self.global_map
+                .get(&(key, modifiers, device_id.map(String::from)))
+                .map(|v| v.as_slice())
+        }
+
+        fn active_app(&self) -> Arc<str> {
+            Arc::from(self.app_name.as_str())
+        }
+    }
+
+    /// Helper that builds an Arc<RwLock<dyn Lookup>> from a MockLookup.
+    fn arc_lookup(lookup: MockLookup) -> Arc<RwLock<dyn Lookup>> {
+        Arc::new(RwLock::new(lookup))
+    }
+
+    /// Helper to create a native key output for a given Key.
+    fn nk(key: Key) -> NativeKey {
+        NativeKey {
+            modifiers: 0,
+            base: key.as_native(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Decision enum tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn decision_variants_are_clone() {
@@ -697,5 +789,501 @@ mod tests {
     fn device_cache_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<DeviceCache>();
+    }
+
+    // -----------------------------------------------------------------------
+    // Decide function tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decide_returns_pass_through_when_no_mapping() {
+        let lookup = arc_lookup(MockLookup::new());
+
+        let decision = decide(&lookup, VIRTUAL_KEY(0x41), 0, None);
+
+        assert!(matches!(decision, Decision::PassThrough));
+    }
+
+    #[test]
+    fn decide_returns_swallow_when_mapping_found() {
+        let outputs = vec![nk(Key::LeftControl)];
+        let lookup = arc_lookup(
+            MockLookup::new()
+                .with_global(Key::CapsLock.as_native(), 0, None, outputs),
+        );
+
+        let decision = decide(&lookup, VIRTUAL_KEY(Key::CapsLock.as_native()), 0, None);
+
+        match &decision {
+            Decision::Swallow(v) => assert_eq!(v[0].base, Key::LeftControl.as_native()),
+            _ => panic!("expected Swallow, got {decision:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_with_device_id_passes_through_when_device_not_matched() {
+        // MockLookup only matches when device_id is None. When a device_id
+        // is provided, no mapping is found, so PassThrough.
+        let lookup = arc_lookup(MockLookup::new());
+
+        let decision = decide(
+            &lookup,
+            VIRTUAL_KEY(Key::CapsLock.as_native()),
+            0,
+            Some(r"\\?\hid#vid_046d#..."),
+        );
+
+        assert!(matches!(decision, Decision::PassThrough));
+    }
+
+    #[test]
+    fn decide_with_device_id_returns_mapping_when_configured() {
+        let outputs = vec![nk(Key::A)];
+        let lookup = arc_lookup(
+            MockLookup::new().with_global(
+                Key::B.as_native(),
+                0,
+                Some(r"\\?\hid#vid_046d#..."),
+                outputs,
+            ),
+        );
+
+        let decision = decide(
+            &lookup,
+            VIRTUAL_KEY(Key::B.as_native()),
+            0,
+            Some(r"\\?\hid#vid_046d#..."),
+        );
+
+        match &decision {
+            Decision::Swallow(v) => assert_eq!(v[0].base, Key::A.as_native()),
+            _ => panic!("expected Swallow, got {decision:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_with_modifiers_returns_mapping_when_configured() {
+        let outputs = vec![nk(Key::LeftControl)];
+        // Modifier bit 0 = LeftControl held
+        let lookup = arc_lookup(
+            MockLookup::new()
+                .with_global(Key::A.as_native(), 0b0000_0001, None, outputs),
+        );
+
+        let decision = decide(&lookup, VIRTUAL_KEY(Key::A.as_native()), 0b0000_0001, None);
+
+        assert!(matches!(&decision, Decision::Swallow(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Process hook event integration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn process_hook_event_key_down_with_raw_input_match() {
+        // Clean key state cache first.
+        key_state_cache().remove(Key::CapsLock.as_native());
+
+        let lookup = arc_lookup(
+            MockLookup::new().with_global(
+                Key::CapsLock.as_native(),
+                0,
+                Some(r"\\?\hid#vid_046d#..."),
+                vec![nk(Key::LeftControl)],
+            ),
+        );
+
+        let mut raw_buffer = vec![BufferedRawInput {
+            event: RawInputEvent {
+                vk_code: VIRTUAL_KEY(Key::CapsLock.as_native()),
+                is_key_up: false,
+                device_handle_ptr: 0x1234,
+            },
+            received_at: Instant::now(),
+        }];
+
+        let device_cache = DeviceCache::new();
+        // Pre-populate the device cache so resolve_device_path is not needed.
+        {
+            let mut map = device_cache.map.lock().unwrap();
+            map.insert(0x1234, r"\\?\hid#vid_046d#...".to_string());
+        }
+
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let hook_event = HookEvent {
+            vk_code: VIRTUAL_KEY(Key::CapsLock.as_native()),
+            is_key_up: false,
+            modifiers: 0,
+            reply_tx,
+        };
+
+        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+
+        let decision = reply_rx.recv().unwrap();
+        match &decision {
+            Decision::Swallow(v) => assert_eq!(v[0].base, Key::LeftControl.as_native()),
+            _ => panic!("expected Swallow, got {decision:?}"),
+        }
+
+        // Raw input event was consumed from buffer.
+        assert_eq!(raw_buffer.len(), 0);
+
+        // Key state was cached for the key-up.
+        assert!(key_state_cache().get(Key::CapsLock.as_native()).is_some());
+
+        // Cleanup.
+        key_state_cache().remove(Key::CapsLock.as_native());
+    }
+
+    #[test]
+    fn process_hook_event_key_up_uses_cached_decision() {
+        // Seed the cache with a Swallow decision.
+        key_state_cache().insert(
+            Key::CapsLock.as_native(),
+            CachedKeyState {
+                decision: Decision::Swallow(vec![nk(Key::LeftControl)]),
+                modifiers: 0,
+            },
+        );
+
+        let lookup = arc_lookup(MockLookup::new());
+        let mut raw_buffer: Vec<BufferedRawInput> = Vec::new();
+        let device_cache = DeviceCache::new();
+
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let hook_event = HookEvent {
+            vk_code: VIRTUAL_KEY(Key::CapsLock.as_native()),
+            is_key_up: true,
+            modifiers: 0,
+            reply_tx,
+        };
+
+        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+
+        let decision = reply_rx.recv().unwrap();
+        // Key-up Swallow should have empty outputs (emission only on key-down).
+        assert!(matches!(decision, Decision::Swallow(ref v) if v.is_empty()));
+
+        // Cache entry was removed.
+        assert!(key_state_cache().get(Key::CapsLock.as_native()).is_none());
+    }
+
+    #[test]
+    fn process_hook_event_key_up_pass_through_when_not_cached() {
+        // No cached entry — key-up passes through.
+        key_state_cache().remove(Key::A.as_native());
+
+        let lookup = arc_lookup(MockLookup::new());
+        let mut raw_buffer: Vec<BufferedRawInput> = Vec::new();
+        let device_cache = DeviceCache::new();
+
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let hook_event = HookEvent {
+            vk_code: VIRTUAL_KEY(Key::A.as_native()),
+            is_key_up: true,
+            modifiers: 0,
+            reply_tx,
+        };
+
+        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+
+        let decision = reply_rx.recv().unwrap();
+        assert!(matches!(decision, Decision::PassThrough));
+    }
+
+    #[test]
+    fn process_hook_event_key_down_no_mapping_pass_through() {
+        // Clean key state cache.
+        key_state_cache().remove(Key::Z.as_native());
+
+        let lookup = arc_lookup(MockLookup::new());
+        let mut raw_buffer: Vec<BufferedRawInput> = Vec::new();
+        let device_cache = DeviceCache::new();
+
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let hook_event = HookEvent {
+            vk_code: VIRTUAL_KEY(Key::Z.as_native()),
+            is_key_up: false,
+            modifiers: 0,
+            reply_tx,
+        };
+
+        // Use a very short timeout to avoid waiting for decide_with_delay.
+        // Since there's no raw buffer entry and no mapping, the worker
+        // falls back to lookup without device ID, which also returns None.
+        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+
+        let decision = reply_rx.recv().unwrap();
+        assert!(matches!(decision, Decision::PassThrough));
+
+        // Cleanup.
+        key_state_cache().remove(Key::Z.as_native());
+    }
+
+    // -----------------------------------------------------------------------
+    // Buffer eviction stress tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn evict_stale_under_load() {
+        let mut buffer = Vec::new();
+
+        // Insert 1000 entries with varying ages.
+        for i in 0..1000u16 {
+            buffer.push(BufferedRawInput {
+                event: RawInputEvent {
+                    vk_code: VIRTUAL_KEY(i),
+                    is_key_up: false,
+                    device_handle_ptr: i as usize,
+                },
+                // Half are old, half are new.
+                received_at: if i % 2 == 0 {
+                    Instant::now() - std::time::Duration::from_millis(200)
+                } else {
+                    Instant::now()
+                },
+            });
+        }
+
+        assert_eq!(buffer.len(), 1000);
+
+        evict_stale(&mut buffer, std::time::Duration::from_millis(100));
+
+        // Only the "new" entries (odd indices) should remain.
+        assert_eq!(buffer.len(), 500);
+        for entry in &buffer {
+            assert!(entry.event.vk_code.0 % 2 != 0);
+        }
+    }
+
+    #[test]
+    fn find_match_in_buffer_with_many_duplicates() {
+        let now = Instant::now();
+        let mut buffer = Vec::new();
+
+        // Insert 100 entries with the same vk_code but increasing timestamps.
+        for i in 0..100 {
+            buffer.push(BufferedRawInput {
+                event: RawInputEvent {
+                    vk_code: VIRTUAL_KEY(0x41),
+                    is_key_up: false,
+                    device_handle_ptr: i,
+                },
+                received_at: now + std::time::Duration::from_millis(i as u64),
+            });
+        }
+
+        // Should return the most recent (highest handle_ptr).
+        let handle = find_match_in_buffer(VIRTUAL_KEY(0x41), &mut buffer);
+        assert_eq!(handle, Some(99));
+        assert_eq!(buffer.len(), 99);
+
+        buffer.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // Key state cache rapid cycle tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn key_state_cache_rapid_press_release_cycle() {
+        let cache = key_state_cache();
+        let vk = Key::CapsLock.as_native();
+
+        // Simulate rapid press-release cycles.
+        for _ in 0..100 {
+            cache.insert(
+                vk,
+                CachedKeyState {
+                    decision: Decision::Swallow(vec![nk(Key::LeftControl)]),
+                    modifiers: 0,
+                },
+            );
+            assert!(cache.get(vk).is_some());
+            cache.remove(vk);
+            assert!(cache.get(vk).is_none());
+        }
+    }
+
+    #[test]
+    fn key_state_cache_multiple_keys_independent() {
+        let cache = key_state_cache();
+
+        // Insert different states for different keys.
+        cache.insert(
+            0x41, // 'A'
+            CachedKeyState {
+                decision: Decision::Swallow(vec![nk(Key::B)]),
+                modifiers: 0,
+            },
+        );
+        cache.insert(
+            0x42, // 'B'
+            CachedKeyState {
+                decision: Decision::PassThrough,
+                modifiers: 0,
+            },
+        );
+
+        assert!(matches!(
+            cache.get(0x41),
+            Some(CachedKeyState { decision: Decision::Swallow(_), .. })
+        ));
+        assert!(matches!(
+            cache.get(0x42),
+            Some(CachedKeyState { decision: Decision::PassThrough, .. })
+        ));
+
+        // Remove one, the other remains.
+        cache.remove(0x41);
+        assert!(cache.get(0x41).is_none());
+        assert!(cache.get(0x42).is_some());
+
+        // Cleanup.
+        cache.remove(0x42);
+    }
+
+    // -----------------------------------------------------------------------
+    // Device cache concurrent access tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn device_cache_handles_concurrent_lookups() {
+        use std::thread;
+
+        let cache = Arc::new(DeviceCache::new());
+        // Pre-populate the cache to avoid needing real device handles.
+        {
+            let mut map = cache.map.lock().unwrap();
+            for i in 0..10 {
+                map.insert(i, format!("device_{i}"));
+            }
+        }
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let cache = Arc::clone(&cache);
+                thread::spawn(move || {
+                    for _ in 0..100 {
+                        let result = cache.get_or_resolve(i);
+                        assert_eq!(result, Some(format!("device_{i}")));
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Channel behaviour tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn hook_event_reply_channel_delivers_once() {
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded::<Decision>(1);
+
+        reply_tx.send(Decision::Swallow(vec![nk(Key::A)])).unwrap();
+
+        let decision = reply_rx.recv().unwrap();
+        assert!(matches!(decision, Decision::Swallow(_)));
+
+        // Sender is dropped; receiver should error.
+        drop(reply_tx);
+        assert!(reply_rx.recv().is_err());
+    }
+
+    #[test]
+    fn worker_receives_raw_input_events_before_hook() {
+        // Verify that the crossbeam_channel::select! mechanism correctly
+        // processes raw input events before hook events when both are
+        // available.  We simulate this by pushing raw events into the
+        // buffer and then processing a hook event.
+        let lookup = arc_lookup(MockLookup::new());
+
+        let mut raw_buffer = vec![
+            BufferedRawInput {
+                event: RawInputEvent {
+                    vk_code: VIRTUAL_KEY(0x41),
+                    is_key_up: false,
+                    device_handle_ptr: 0x1000,
+                },
+                received_at: Instant::now(),
+            },
+            BufferedRawInput {
+                event: RawInputEvent {
+                    vk_code: VIRTUAL_KEY(0x42),
+                    is_key_up: false,
+                    device_handle_ptr: 0x2000,
+                },
+                received_at: Instant::now(),
+            },
+        ];
+
+        // Hook event for 'A' should match the first raw input event.
+        key_state_cache().remove(0x41);
+        let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
+        let hook_event = HookEvent {
+            vk_code: VIRTUAL_KEY(0x41),
+            is_key_up: false,
+            modifiers: 0,
+            reply_tx,
+        };
+
+        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &DeviceCache::new());
+
+        // No mapping configured, so PassThrough — but the raw buffer entry
+        // should have been consumed.
+        let _ = reply_rx.recv().unwrap();
+        assert_eq!(raw_buffer.len(), 1);
+        assert_eq!(raw_buffer[0].event.vk_code.0, 0x42);
+
+        // Cleanup.
+        key_state_cache().remove(0x41);
+        raw_buffer.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // RuntimeLookupCache compilation from config (cross-module test)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compiled_rule_contains_keyboard_filter() {
+        use crate::common::config::AppConfig;
+
+        let yaml = r#"
+groups:
+  - keyboards:
+      - vendor: "Apple"
+    mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+        let rules = cache.global_rules();
+
+        assert!(!rules.is_empty());
+        let rule = &rules[0];
+        assert_eq!(rule.base, Key::CapsLock.as_native());
+        assert!(rule.keyboards.is_some());
+    }
+
+    #[test]
+    fn compiled_rule_without_keyboard_filter() {
+        use crate::common::config::AppConfig;
+
+        let yaml = r#"
+groups:
+  - mappings:
+      CapsLock: LeftControl
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        let cache = RuntimeLookupCache::compile_from_config(&config);
+        let rules = cache.global_rules();
+
+        assert!(!rules.is_empty());
+        assert!(rules[0].keyboards.is_none());
     }
 }

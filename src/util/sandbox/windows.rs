@@ -397,4 +397,87 @@ mod tests {
         let e = SandboxError::NotSupported("test".to_string());
         assert!(format!("{e}").contains("not supported"));
     }
+
+    #[test]
+    fn sandbox_error_is_standard_error() {
+        let e = SandboxError::DeviceCreationFailed("test".to_string());
+        // Verify that SandboxError implements std::error::Error.
+        let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn event_queue_concurrent_push() {
+        use std::thread;
+
+        let queue = Arc::new(EventQueue::new());
+        let num_threads = 10;
+        let pushes_per_thread = 100;
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|i| {
+                let queue = Arc::clone(&queue);
+                thread::spawn(move || {
+                    for j in 0..pushes_per_thread {
+                        queue.push((i * 1000 + j) as u16, j % 2 == 0);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let events = queue.drain();
+        assert_eq!(events.len(), num_threads * pushes_per_thread);
+    }
+
+    #[test]
+    fn event_queue_multiple_drains() {
+        let queue = Arc::new(EventQueue::new());
+
+        queue.push(0x41, true);
+        assert_eq!(queue.drain().len(), 1);
+
+        // Second drain is empty.
+        assert!(queue.drain().is_empty());
+
+        // Push again after drain.
+        queue.push(0x42, false);
+        assert_eq!(queue.drain().len(), 1);
+    }
+
+    #[test]
+    fn sandbox_teardown_without_setup() {
+        let mut sandbox = WindowsSandbox::new().unwrap().unwrap();
+        // Call teardown without calling setup — should not panic.
+        sandbox.teardown();
+    }
+
+    #[test]
+    fn sandbox_drop_without_teardown() {
+        // Create a sandbox, set it up, and let it drop without explicit
+        // teardown.  This verifies that Drop cleans up correctly.
+        let sandbox = WindowsSandbox::new().unwrap().unwrap();
+        // Don't call setup or teardown — just drop.
+        // No assertion needed; if this panics, the test fails.
+        drop(sandbox);
+    }
+
+    #[test]
+    fn captured_event_debug_format() {
+        let event = CapturedEvent {
+            code: 0xA2,
+            is_down: true,
+        };
+        let debug_str = format!("{event:?}");
+        assert!(debug_str.contains("CapturedEvent"));
+    }
+
+    #[test]
+    fn sandbox_input_device_id_returns_none() {
+        // Windows hooks are global; no specific device targeting.
+        let sandbox = WindowsSandbox::new().unwrap().unwrap();
+        assert!(sandbox.input_device_id().is_none());
+    }
 }
