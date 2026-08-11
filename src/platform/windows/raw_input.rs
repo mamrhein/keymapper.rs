@@ -71,7 +71,9 @@ pub struct RawInputEvent {
 
 /// Handle to the background message loop thread.  Dropping this does NOT
 /// stop the thread; call [`stop_raw_input_loop`] to terminate it gracefully.
+#[allow(dead_code)]
 pub struct RawInputLoop {
+    #[allow(dead_code)]
     hwnd: HWND,
 }
 
@@ -317,13 +319,16 @@ pub fn start_raw_input_loop(
 }
 
 /// Runs the Windows message pump for the message-only window.  Blocks until
-/// a `WM_QUIT` message is received.
-fn run_message_loop(_hwnd: HWND) {
+/// a `WM_QUIT` or `WM_STOP` message is received.
+///
+/// Uses `GetMessageW` with the specific `HWND` so that only messages destined
+/// for this window are processed.  This avoids competing with the main thread's
+/// message loop, which handles the `WH_KEYBOARD_LL` hook callbacks.
+fn run_message_loop(hwnd: HWND) {
     let mut msg = MSG::default();
 
-    // Standard Windows message loop.
     loop {
-        let got_message = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+        let got_message = unsafe { GetMessageW(&mut msg, Some(hwnd), 0, 0) };
 
         // `GetMessageW` returns FALSE (BOOL(0)) on WM_QUIT, or FALSE on error.
         if !got_message.as_bool() {
@@ -341,6 +346,7 @@ fn run_message_loop(_hwnd: HWND) {
 ///
 /// The background thread will exit its `GetMessageW` loop after processing
 /// this message.
+#[allow(dead_code)]
 pub fn stop_raw_input_loop(hwnd: HWND) {
     unsafe {
         let _ = PostMessageW(Some(hwnd), WM_STOP, WPARAM(0), LPARAM(0));

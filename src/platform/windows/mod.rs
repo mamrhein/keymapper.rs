@@ -8,10 +8,10 @@
 // $Revision$
 
 mod active_app;
+mod dispatch;
 mod key;
 mod keyboard;
 mod mapping;
-#[allow(dead_code)]
 pub(crate) mod raw_input;
 
 pub(crate) use active_app::get_active_app_name;
