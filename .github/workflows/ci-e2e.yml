@@ -62,7 +62,7 @@ jobs:
           sudo modprobe uinput || true
           # The ubuntu-latest runner has /dev/uinput with root:root 0660.
           # Running tests as root grants the required write access.
-          sudo -E PATH="$PATH" cargo nextest run --no-capture --test e2e_sandbox
+          sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_sandbox
 
   # -----------------------------------------------------------------------
   # macOS — e2e sandbox tests
