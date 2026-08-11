@@ -18,7 +18,12 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::{
-    env, path::{Path, PathBuf}, process::Command, sync::mpsc, thread, time::Duration,
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 
 use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
@@ -85,34 +90,18 @@ impl E2eFileLock {
 }
 
 // ---------------------------------------------------------------------------
-// Platform-specific key codes
+// Platform-specific key codes — sourced from the platform Key enum
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
 mod codes {
-    // CGKeyCode values (see src/platform/macos/key.rs)
-    pub const CAPSLOCK: u16 = 57;
-    pub const LEFT_CONTROL: u16 = 59;
-    pub const A: u16 = 0;
-    pub const B: u16 = 11;
-}
+    use keymapper::platform::Key;
 
-#[cfg(target_os = "linux")]
-mod codes {
-    // Linux evdev key codes (see include/uapi/linux/input-event-codes.h)
-    pub const CAPSLOCK: u16 = 58; // KEY_CAPSLOCK
-    pub const LEFT_CONTROL: u16 = 29; // KEY_LEFTCTRL
-    pub const A: u16 = 30; // KEY_A
-    pub const B: u16 = 31; // KEY_B
-}
-
-#[cfg(target_os = "windows")]
-mod codes {
-    // Windows virtual-key codes (see WinUser.h)
-    pub const CAPSLOCK: u16 = 0x14; // VK_CAPITAL
-    pub const LEFT_CONTROL: u16 = 0xA2; // VK_LCONTROL
-    pub const A: u16 = 0x41; // VK_A
-    pub const B: u16 = 0x42; // VK_B
+    pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
+    pub const ESC: u16 = Key::Escape.as_native();
+    pub const LEFT_ALT: u16 = Key::LeftAlt.as_native();
+    pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
+    pub const A: u16 = Key::A.as_native();
+    pub const B: u16 = Key::B.as_native();
 }
 
 // ---------------------------------------------------------------------------
@@ -166,6 +155,11 @@ impl DaemonGuard {
     fn kill(&mut self) {
         self.child.kill().ok();
         self.child.wait().ok();
+
+        // Allow the kernel time to clean up uinput device nodes after the
+        // daemon's file descriptors are closed.  Without this delay the
+        // next test's monitor may discover a stale /dev/input/event* entry.
+        thread::sleep(Duration::from_millis(50));
     }
 
     /// Block until the daemon logs a hot-reload success message, or timeout.
@@ -214,15 +208,25 @@ impl Drop for DaemonGuard {
 
 /// Spawn the `keymapperd` binary in *config_dir* and return a guard that
 /// ensures the child is killed on `Drop`.
-fn start_daemon_in_dir(config_dir: &PathBuf) -> DaemonGuard {
+///
+/// When *device_path* is `Some`, passes it as `--device` to the daemon so it
+/// captures from the specified input device instead of auto-discovering.
+fn start_daemon_in_dir(
+    config_dir: &PathBuf,
+    device_path: Option<&str>,
+) -> DaemonGuard {
     use std::process::Stdio;
 
-    let mut child = Command::new(daemon_bin_path())
-        .current_dir(config_dir)
+    let mut cmd = Command::new(daemon_bin_path());
+    cmd.current_dir(config_dir)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("failed to spawn keymapperd");
+        .stderr(Stdio::inherit());
+
+    if let Some(path) = device_path {
+        cmd.arg("--device").arg(path);
+    }
+
+    let mut child = cmd.spawn().expect("failed to spawn keymapperd");
 
     let stdout = child.stdout.take().expect("failed to capture stdout");
 
@@ -306,7 +310,8 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -405,7 +410,8 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -732,7 +738,6 @@ fn e2e_keyboard_filter() {
     sandbox.create_secondary_device().unwrap_or_else(|e| {
         eprintln!("failed to create secondary device: {e}");
         sandbox.teardown();
-        return;
     });
 
     // Get device paths for identification.
@@ -767,8 +772,10 @@ fn e2e_keyboard_filter() {
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    // Spawn the daemon.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    // Spawn the daemon, passing the primary device path so it captures from
+    // the sandbox virtual keyboard.
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -954,7 +961,8 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let device_path = sandbox.input_device_id().map(|s| s.to_string());
+    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1199,68 +1207,76 @@ groups:
 #[test]
 fn e2e_config_hot_reload() {
     let initial_config = r#"- mappings:
-    CapsLock: LeftControl"#;
+    CapsLock: LeftAlt+A"#;
 
     run_e2e_test_with_reload(initial_config, |sandbox, config_dir, daemon| {
         // --- Phase 1: verify initial mapping (CapsLock → LeftControl) ---
         sandbox
             .inject_key_down(codes::CAPSLOCK)
-            .expect("inject key down");
+            .expect("Inject key down");
         sandbox
             .inject_key_up(codes::CAPSLOCK)
-            .expect("inject key up");
+            .expect("Inject key up");
 
         let events = sandbox.drain_output_events();
         assert_eq!(
             events,
             vec![
                 CapturedEvent {
-                    code: codes::LEFT_CONTROL,
+                    code: codes::LEFT_ALT,
                     is_down: true,
                 },
                 CapturedEvent {
-                    code: codes::LEFT_CONTROL,
+                    code: codes::A,
+                    is_down: true,
+                },
+                CapturedEvent {
+                    code: codes::A,
+                    is_down: false,
+                },
+                CapturedEvent {
+                    code: codes::LEFT_ALT,
                     is_down: false,
                 },
             ],
-            "initial mapping: CapsLock should be remapped to LeftControl"
+            "Initial mapping: CapsLock should be remapped to LeftAlt+A"
         );
 
-        // --- Phase 2: hot-reload config to CapsLock → A ---
+        // --- Phase 2: hot-reload config to CapsLock → Escape ---
         let new_config = r#"- mappings:
-    CapsLock: A"#;
+    CapsLock: Escape"#;
         update_config(config_dir, new_config);
 
         // Block until the daemon reports a successful hot-swap.
         daemon.await_reload().expect(
-            "daemon should have hot-reloaded the configuration within timeout",
+            "Daemon should have hot-reloaded the configuration within timeout",
         );
 
         // Small grace period after reload for the new cache to be used.
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // --- Phase 3: verify new mapping takes effect (CapsLock → A) ---
+        // --- Phase 3: verify new mapping takes effect (CapsLock → Escape) ---
         sandbox
             .inject_key_down(codes::CAPSLOCK)
-            .expect("inject key down");
+            .expect("Inject key down");
         sandbox
             .inject_key_up(codes::CAPSLOCK)
-            .expect("inject key up");
+            .expect("Inject key up");
 
         let events = sandbox.drain_output_events();
         assert_eq!(
             events,
             vec![
                 CapturedEvent {
-                    code: codes::A,
+                    code: codes::ESC,
                     is_down: true
                 },
                 CapturedEvent {
-                    code: codes::A,
+                    code: codes::ESC,
                     is_down: false
                 },
             ],
-            "reloaded mapping: CapsLock should be remapped to A"
+            "Reloaded mapping: CapsLock should be remapped to Escape"
         );
     });
 }

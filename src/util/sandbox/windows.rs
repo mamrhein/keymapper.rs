@@ -20,14 +20,12 @@ use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::HHOOK;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, KBDLLHOOKSTRUCT, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, KBDLLHOOKSTRUCT, SetWindowsHookExW, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use super::{CapturedEvent, Sandbox, SandboxError};
@@ -176,8 +174,9 @@ impl Sandbox for WindowsSandbox {
 
         set_monitor_queue(Some(Arc::clone(&self.queue)));
 
-        let h_instance: HINSTANCE =
-            unsafe { GetModuleHandleW(None) }.expect("Failed to get module handle").into();
+        let h_instance: HINSTANCE = unsafe { GetModuleHandleW(None) }
+            .expect("Failed to get module handle")
+            .into();
 
         let handle: HHOOK = unsafe {
             SetWindowsHookExW(

@@ -364,10 +364,10 @@ extern "system" fn low_level_keyboard_proc(
 /// Starts the keyboard mapping engine.
 ///
 /// Initialises the raw input thread, spawns the worker thread, installs the
-/// \`WH_KEYBOARD_LL\` hook, and runs the message loop.  Blocks the calling
-/// thread until the message loop exits (i.e. on \`WM_QUIT\`).
+/// `WH_KEYBOARD_LL` hook, and runs the message loop.  Blocks the calling
+/// thread until the message loop exits (i.e. on `WM_QUIT`).
 ///
-/// This is the entry point called by \`keymapperd.rs\` and replaces the
+/// This is the entry point called by `keymapperd.rs` and replaces the
 /// previous single-threaded static-mutex architecture.
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,

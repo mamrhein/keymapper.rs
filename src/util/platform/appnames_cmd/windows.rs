@@ -20,8 +20,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     TH32CS_SNAPMODULE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetDesktopWindow, GetWindowThreadProcessId,
-    IsWindowVisible,
+    EnumWindows, GetDesktopWindow, GetWindowThreadProcessId, IsWindowVisible,
 };
 
 
@@ -188,7 +187,6 @@ extern "system" fn enum_windows_proc(
     hwnd: windows::Win32::Foundation::HWND,
     param: LPARAM,
 ) -> BOOL {
-
     if unsafe { IsWindowVisible(hwnd) }.as_bool() {
         let mut pid: u32 = 0;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
@@ -218,7 +216,10 @@ pub fn list_app_names() -> Vec<String> {
     // EnumWindows returns FALSE on failure, which leaves the collector partially
     // populated.  This is tolerated — the caller simply gets fewer app names.
     unsafe {
-        let _ = EnumWindows(Some(enum_windows_proc), LPARAM(&mut collector as *mut _ as isize));
+        let _ = EnumWindows(
+            Some(enum_windows_proc),
+            LPARAM(&mut collector as *mut _ as isize),
+        );
     };
 
     let mut app_names: Vec<String> = Vec::new();

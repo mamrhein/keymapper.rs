@@ -120,6 +120,7 @@ pub struct LinuxSandbox {
     is_setup: bool,
 }
 
+#[allow(dead_code)]
 impl LinuxSandbox {
     /// Check that `/dev/uinput` is accessible and writable.
     fn check_uinput() -> Result<(), SandboxError> {
@@ -135,7 +136,7 @@ impl LinuxSandbox {
 
         let metadata = fs::metadata(path).map_err(|e| {
             SandboxError::PermissionDenied(format!(
-                "cannot stat /dev/uinput: {e}"
+                "annot stat /dev/uinput: {e}"
             ))
         })?;
 
@@ -152,7 +153,32 @@ impl LinuxSandbox {
         // Bitmasks from stat(2): owner, group, other permission bits.
         let r_w_x = 0o7;
         let owner_ok = dev_uid == uid && (mode & (r_w_x << 6)) != 0;
-        let group_ok = dev_gid == gid && (mode & (r_w_x << 3)) != 0;
+
+        // Check group membership against both the effective GID and all
+        // supplementary groups.  `getgroups(0, NULL)` returns the number of
+        // supplementary groups without filling a buffer.
+        let group_ok = if mode & (r_w_x << 3) == 0 {
+            // No group permission bits set, short-circuit.
+            false
+        } else if dev_gid == gid {
+            // Effective GID matches.
+            true
+        } else {
+            // Check supplementary groups.  See getgroups(2).
+            let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+            if count <= 0 {
+                false
+            } else {
+                let mut groups = vec![0; count as usize];
+                let filled =
+                    unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+                if filled < 0 {
+                    false
+                } else {
+                    groups[..filled as usize].contains(&dev_gid)
+                }
+            }
+        };
         let other_ok = (mode & r_w_x) != 0;
 
         // We only need write access, but checking execute as well catches the
@@ -160,11 +186,15 @@ impl LinuxSandbox {
         // only the write bit (0o2), but that misses the fact that character
         // devices also require some form of access permission.
         if !owner_ok && !group_ok && !other_ok {
-            return Err(SandboxError::PermissionDenied(
-                "cannot write to /dev/uinput. Add your user to the 'input' \
-                 group or run with elevated privileges."
+            return Err(SandboxError::PermissionDenied(match dev_gid {
+                0 => "Only root can access /dev/uinput. Change the group or \
+                      run with eleviated privileges."
                     .to_string(),
-            ));
+                _ => "Cannot write to /dev/uinput. Add your user to the its \
+                      group (usually 'input') or run with elevated \
+                      privileges."
+                    .to_string(),
+            }));
         }
 
         Ok(())
@@ -210,11 +240,17 @@ impl LinuxSandbox {
             .spawn({
                 let shutdown = Arc::clone(&shutdown);
                 move || {
-                    // Wait briefly for the daemon to create its output device,
-                    // then start polling.  The monitor thread re-tries
-                    // discovery in case the daemon hasn't
+                    // Wait briefly for the daemon to create its output
+                    // device, then start polling.  The monitor thread
+                    // re-tries discovery in case the daemon hasn't
                     // started yet.
-                    let mut device: Option<Device> = None;
+                    let mut device: Option<(Device, u64)> = None;
+                    // Track rdevs of devices that were destroyed while
+                    // we were reading from them.  We skip these during
+                    // rediscovery to avoid re-opening stale nodes that
+                    // haven't been cleaned up by udev yet.
+                    let mut stale_rdevs: std::collections::HashSet<u64> =
+                        std::collections::HashSet::new();
 
                     loop {
                         if shutdown.load(Ordering::Acquire) {
@@ -223,17 +259,22 @@ impl LinuxSandbox {
 
                         // Try to discover the daemon's output device.
                         if device.is_none() {
-                            if let Some(mon) =
-                                find_device_by_name(DAEMON_OUTPUT_DEVICE_NAME)
-                            {
-                                device = Some(mon);
+                            if let Some((mon, rdev)) = find_device_by_name(
+                                DAEMON_OUTPUT_DEVICE_NAME,
+                                &stale_rdevs,
+                            ) {
+                                device = Some((mon, rdev));
                             } else {
                                 thread::sleep(Duration::from_millis(50));
                                 continue;
                             }
                         }
 
-                        if let Some(ref mut dev) = device {
+                        // Fetch events from the currently tracked device.
+                        let mut lost_device = false;
+                        let mut dead_rdev: Option<u64> = None;
+
+                        if let Some((ref mut dev, rdev)) = device {
                             // Fetch all pending events from the evdev device.
                             match dev.fetch_events() {
                                 Ok(events) => {
@@ -265,11 +306,35 @@ impl LinuxSandbox {
                                     // No events available; sleep and retry.
                                 }
                                 Err(e) => {
+                                    // The output device was destroyed (e.g.
+                                    // daemon killed between tests).  Record
+                                    // its
+                                    // rdev so we don't reopen the same stale
+                                    // node during rediscovery.
                                     eprintln!(
-                                        "sandbox monitor: read error: {e}"
+                                        "sandbox monitor: read error: {e}, \
+                                         rediscovering device"
                                     );
+                                    dead_rdev = Some(rdev);
+                                    lost_device = true;
                                 }
                             }
+                        }
+
+                        // Clear the stale device reference outside the borrow
+                        // scope so discovery can find a replacement on the
+                        // next iteration.
+                        if lost_device {
+                            if let Some(rdev) = dead_rdev {
+                                stale_rdevs.insert(rdev);
+                            }
+
+                            device = None;
+
+                            // Brief pause to let udev clean up stale event
+                            // nodes
+                            // before retrying discovery.
+                            thread::sleep(Duration::from_millis(50));
                         }
 
                         thread::sleep(Duration::from_millis(10));
@@ -283,34 +348,6 @@ impl LinuxSandbox {
             thread_handle: Some(thread_handle),
         });
     }
-}
-
-impl Sandbox for LinuxSandbox {
-    fn new() -> Result<Option<Self>, SandboxError> {
-        Self::check_uinput()?;
-
-        Ok(Some(Self {
-            device: None,
-            input_device_path: None,
-            secondary_device: None,
-            secondary_device_path: None,
-            queue: Arc::new(EventQueue::new()),
-            monitor: None,
-            is_setup: false,
-        }))
-    }
-
-    fn setup(&mut self) -> Result<(), SandboxError> {
-        let device_name =
-            format!("{INPUT_DEVICE_NAME_PREFIX}-{}", process::id());
-        let (device, path) = create_uinput_device(&device_name)?;
-
-        self.device = Some(Arc::new(Mutex::new(device)));
-        self.input_device_path = Some(path);
-        self.is_setup = true;
-
-        Ok(())
-    }
 
     /// Create a secondary virtual input device for injecting events from a
     /// different source.  This device has a distinct name so the daemon's
@@ -319,7 +356,7 @@ impl Sandbox for LinuxSandbox {
     /// The secondary device is NOT grabbed by the daemon.  Events injected
     /// into it pass through directly to the system and are captured by the
     /// sandbox monitor.
-    fn create_secondary_device(&mut self) -> Result<(), SandboxError> {
+    pub fn create_secondary_device(&mut self) -> Result<(), SandboxError> {
         let device_name = format!("{SECONDARY_DEVICE_NAME}-{}", process::id());
         let (device, path) = create_uinput_device(&device_name)?;
 
@@ -330,12 +367,12 @@ impl Sandbox for LinuxSandbox {
 
     /// Return the device path of the secondary virtual keyboard, if one was
     /// created.
-    fn secondary_device_path(&self) -> Option<&str> {
+    pub fn secondary_device_path(&self) -> Option<&str> {
         self.secondary_device_path.as_deref()
     }
 
     /// Inject a key-down event into the secondary virtual input device.
-    fn inject_key_down_secondary(
+    pub fn inject_key_down_secondary(
         &self,
         code: u16,
     ) -> Result<(), SandboxError> {
@@ -343,7 +380,7 @@ impl Sandbox for LinuxSandbox {
     }
 
     /// Inject a key-up event into the secondary virtual input device.
-    fn inject_key_up_secondary(
+    pub fn inject_key_up_secondary(
         &self,
         code: u16,
     ) -> Result<(), SandboxError> {
@@ -351,7 +388,7 @@ impl Sandbox for LinuxSandbox {
     }
 
     /// Inject a keyboard event into the secondary virtual input device.
-    fn inject_key_to_secondary(
+    pub fn inject_key_to_secondary(
         &self,
         code: u16,
         value: i32,
@@ -377,6 +414,39 @@ impl Sandbox for LinuxSandbox {
         // Allow the kernel to propagate the event to readers of the event
         // node.
         thread::sleep(Duration::from_millis(5));
+
+        Ok(())
+    }
+}
+
+impl Sandbox for LinuxSandbox {
+    fn new() -> Result<Option<Self>, SandboxError> {
+        Self::check_uinput()?;
+
+        Ok(Some(Self {
+            device: None,
+            input_device_path: None,
+            secondary_device: None,
+            secondary_device_path: None,
+            queue: Arc::new(EventQueue::new()),
+            monitor: None,
+            is_setup: false,
+        }))
+    }
+
+    fn setup(&mut self) -> Result<(), SandboxError> {
+        let device_name =
+            format!("{INPUT_DEVICE_NAME_PREFIX}-{}", process::id());
+        let (device, path) = create_uinput_device(&device_name)?;
+
+        self.device = Some(Arc::new(Mutex::new(device)));
+        self.input_device_path = Some(path);
+
+        // Start the monitor thread so it can discover the daemon's output
+        // device once it is created and begin capturing events.
+        self.ensure_monitor();
+
+        self.is_setup = true;
 
         Ok(())
     }
@@ -485,7 +555,15 @@ fn open_device_nonblock(path: &Path) -> std::io::Result<Device> {
 
 /// Find a `/dev/input/event*` node whose device name matches `name`. Open
 /// in non-blocking mode so the monitor thread can poll without blocking.
-fn find_device_by_name(name: &str) -> Option<Device> {
+///
+/// Returns `(Device, rdev)` on success.  Devices whose rdev is in
+/// `stale_rdevs` are skipped.  This prevents the monitor from reopening a
+/// recently destroyed device whose `/dev/input/` entry hasn't been cleaned up
+/// by udev yet.
+fn find_device_by_name(
+    name: &str,
+    stale_rdevs: &HashSet<u64>,
+) -> Option<(Device, u64)> {
     let Ok(entries) = fs::read_dir("/dev/input") else {
         return None;
     };
@@ -493,10 +571,18 @@ fn find_device_by_name(name: &str) -> Option<Device> {
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if path.to_string_lossy().starts_with("/dev/input/event")
-            && let Ok(device) = open_device_nonblock(&path)
-            && device.name() == Some(name)
+            && let Ok(metadata) = fs::metadata(&path)
         {
-            return Some(device);
+            let rdev = metadata.rdev();
+            // Skip devices we know are stale.
+            if stale_rdevs.contains(&rdev) {
+                continue;
+            }
+            if let Ok(device) = open_device_nonblock(&path)
+                && device.name() == Some(name)
+            {
+                return Some((device, rdev));
+            }
         }
     }
 

@@ -116,9 +116,7 @@ pub fn list_app_names() -> Vec<String> {
         };
 
         if let Some(app_id) =
-            super::super::linux::desktop::resolve_app_id_from_cmdline(
-                &cmdline,
-            )
+            super::super::linux::desktop::resolve_app_id_from_cmdline(&cmdline)
         {
             app_ids.push(app_id);
         }
