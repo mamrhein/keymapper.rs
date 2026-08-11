@@ -93,31 +93,12 @@ impl E2eFileLock {
 // Platform-specific key codes — sourced from the platform Key enum
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
 mod codes {
     use keymapper::platform::Key;
 
     pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
-    pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
-    pub const A: u16 = Key::A.as_native();
-    pub const B: u16 = Key::B.as_native();
-}
-
-#[cfg(target_os = "linux")]
-mod codes {
-    use keymapper::platform::Key;
-
-    pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
-    pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
-    pub const A: u16 = Key::A.as_native();
-    pub const B: u16 = Key::B.as_native();
-}
-
-#[cfg(target_os = "windows")]
-mod codes {
-    use keymapper::platform::Key;
-
-    pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
+    pub const ESC: u16 = Key::Escape.as_native();
+    pub const LEFT_ALT: u16 = Key::LeftAlt.as_native();
     pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
     pub const A: u16 = Key::A.as_native();
     pub const B: u16 = Key::B.as_native();
@@ -1051,68 +1032,76 @@ groups:
 #[test]
 fn e2e_config_hot_reload() {
     let initial_config = r#"- mappings:
-    CapsLock: LeftControl"#;
+    CapsLock: LeftAlt+A"#;
 
     run_e2e_test_with_reload(initial_config, |sandbox, config_dir, daemon| {
         // --- Phase 1: verify initial mapping (CapsLock → LeftControl) ---
         sandbox
             .inject_key_down(codes::CAPSLOCK)
-            .expect("inject key down");
+            .expect("Inject key down");
         sandbox
             .inject_key_up(codes::CAPSLOCK)
-            .expect("inject key up");
+            .expect("Inject key up");
 
         let events = sandbox.drain_output_events();
         assert_eq!(
             events,
             vec![
                 CapturedEvent {
-                    code: codes::LEFT_CONTROL,
+                    code: codes::LEFT_ALT,
                     is_down: true,
                 },
                 CapturedEvent {
-                    code: codes::LEFT_CONTROL,
+                    code: codes::A,
+                    is_down: true,
+                },
+                CapturedEvent {
+                    code: codes::A,
+                    is_down: false,
+                },
+                CapturedEvent {
+                    code: codes::LEFT_ALT,
                     is_down: false,
                 },
             ],
-            "initial mapping: CapsLock should be remapped to LeftControl"
+            "Initial mapping: CapsLock should be remapped to LeftAlt+A"
         );
 
-        // --- Phase 2: hot-reload config to CapsLock → A ---
+        // --- Phase 2: hot-reload config to CapsLock → Escape ---
         let new_config = r#"- mappings:
-    CapsLock: A"#;
+    CapsLock: Escape"#;
         update_config(config_dir, new_config);
 
         // Block until the daemon reports a successful hot-swap.
         daemon.await_reload().expect(
-            "daemon should have hot-reloaded the configuration within timeout",
+            "Daemon should have hot-reloaded the configuration within timeout",
         );
 
         // Small grace period after reload for the new cache to be used.
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        // --- Phase 3: verify new mapping takes effect (CapsLock → A) ---
+        // --- Phase 3: verify new mapping takes effect (CapsLock → Escape) ---
         sandbox
             .inject_key_down(codes::CAPSLOCK)
-            .expect("inject key down");
+            .expect("Inject key down");
         sandbox
             .inject_key_up(codes::CAPSLOCK)
-            .expect("inject key up");
+            .expect("Inject key up");
 
         let events = sandbox.drain_output_events();
         assert_eq!(
             events,
             vec![
                 CapturedEvent {
-                    code: codes::A,
+                    code: codes::ESC,
                     is_down: true
                 },
                 CapturedEvent {
-                    code: codes::A,
+                    code: codes::ESC,
                     is_down: false
                 },
             ],
-            "reloaded mapping: CapsLock should be remapped to A"
+            "Reloaded mapping: CapsLock should be remapped to Escape"
         );
     });
 }
