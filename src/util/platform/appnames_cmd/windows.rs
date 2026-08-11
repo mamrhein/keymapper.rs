@@ -15,16 +15,14 @@
 
 use std::{collections::HashSet, path::Path};
 
-use windows_sys::Win32::{
-    Foundation::HANDLE,
-    System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
-        TH32CS_SNAPMODULE,
-    },
-    UI::WindowsAndMessaging::{
-        EnumWindows, GetDesktopWindow, GetWindowThreadProcessId,
-        IsWindowVisible,
-    },
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
+    TH32CS_SNAPMODULE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetDesktopWindow, GetWindowThreadProcessId,
+    IsWindowVisible,
 };
 
 /// SAFETY: Handle type alias for ToolHelp snapshot handles.
@@ -49,14 +47,15 @@ unsafe fn ver_query_value(buffer: &[u8], sub_block: &str) -> Option<Vec<u16>> {
     let mut lplp_buffer: *const u8 = std::ptr::null();
     let mut pu_len: u32 = 0;
 
-    if unsafe {
-        windows_sys::Win32::Storage::FileSystem::VerQueryValueW(
+    if !unsafe {
+        windows::Win32::Storage::FileSystem::VerQueryValueW(
             buffer.as_ptr() as _,
-            sub_block_utf16.as_ptr() as _,
+            windows::core::PCWSTR(sub_block_utf16.as_ptr()),
             &mut lplp_buffer as *const _ as *mut _,
             &mut pu_len,
         )
-    } == 0
+    }
+    .as_bool()
     {
         return None;
     }
@@ -92,21 +91,22 @@ fn get_file_description(path: &str) -> Option<String> {
 
     unsafe {
         let size =
-            windows_sys::Win32::Storage::FileSystem::GetFileVersionInfoSizeW(
-                path_utf16.as_ptr(),
-                std::ptr::null_mut(),
+            windows::Win32::Storage::FileSystem::GetFileVersionInfoSizeW(
+                windows::core::PCWSTR::from_raw(path_utf16.as_ptr()),
+                None,
             );
         if size == 0 {
             return None;
         }
 
         let mut buffer = vec![0u8; size as usize];
-        if windows_sys::Win32::Storage::FileSystem::GetFileVersionInfoW(
-            path_utf16.as_ptr(),
+        if windows::Win32::Storage::FileSystem::GetFileVersionInfoW(
+            windows::core::PCWSTR::from_raw(path_utf16.as_ptr()),
             0,
             size,
             buffer.as_mut_ptr() as _,
-        ) == 0
+        )
+        .is_err()
         {
             return None;
         }
@@ -149,24 +149,30 @@ fn file_stem(path: &str) -> String {
 
 /// Get the executable path for a process by enumerating its modules.
 fn get_process_exe_path(pid: u32) -> Option<String> {
-    unsafe {
-        let mod_snap: SnapshotHandle =
-            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | pid, pid);
-        if mod_snap.is_null() {
-            return None;
-        }
+    let Ok(mod_snap) = (unsafe {
+        CreateToolhelp32Snapshot(
+            TH32CS_SNAPMODULE | windows::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS(pid),
+            pid,
+        )
+    }) else {
+        return None;
+    };
+    if mod_snap.is_invalid() {
+        return None;
+    }
 
+    unsafe {
         let mut me = std::mem::zeroed::<MODULEENTRY32W>();
         me.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
 
-        let result = if Module32FirstW(mod_snap, &mut me) == 1 {
+        let result = if Module32FirstW(mod_snap, &mut me).is_ok() {
             let path = utf16_to_string(&me.szExePath);
             if path.is_empty() { None } else { Some(path) }
         } else {
             None
         };
 
-        windows_sys::Win32::Foundation::CloseHandle(mod_snap);
+        windows::Win32::Foundation::CloseHandle(mod_snap);
         result
     }
 }
@@ -176,15 +182,18 @@ struct WindowCollector {
     pids: HashSet<u32>,
 }
 
+use windows::Win32::Foundation::{BOOL, LPARAM};
+
 extern "system" fn enum_windows_proc(
-    hwnd: *mut std::ffi::c_void,
-    param: isize,
-) -> i32 {
-    if unsafe { IsWindowVisible(hwnd as _) } == 1 {
+    hwnd: windows::Win32::Foundation::HWND,
+    param: LPARAM,
+) -> BOOL {
+
+    if unsafe { IsWindowVisible(hwnd) }.as_bool() {
         let mut pid: u32 = 0;
-        unsafe { GetWindowThreadProcessId(hwnd as _, &mut pid) };
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         if pid != 0 {
-            let collector = param as *mut WindowCollector;
+            let collector = param.0 as *mut WindowCollector;
             unsafe {
                 if !collector.is_null() {
                     (*collector).pids.insert(pid);
@@ -192,7 +201,7 @@ extern "system" fn enum_windows_proc(
             }
         }
     }
-    1 // continue enumeration
+    BOOL(1) // continue enumeration
 }
 
 /// Enumerate all visible top-level windows and extract unique app names.
@@ -207,8 +216,8 @@ pub fn list_app_names() -> Vec<String> {
     };
 
     unsafe {
-        EnumWindows(Some(enum_windows_proc), &mut collector as *mut _ as _);
-    }
+        EnumWindows(Some(enum_windows_proc), LPARAM(&mut collector as *mut _ as isize));
+    };
 
     let mut app_names: Vec<String> = Vec::new();
 

@@ -7,12 +7,10 @@
 // $Source$
 // $Revision$
 
-use windows_sys::Win32::{
-    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
-    System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
-        Process32NextW, TH32CS_SNAPPROCESS,
-    },
+use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
+    Process32NextW, TH32CS_SNAPPROCESS,
 };
 
 /// Creation flag to suppress console window creation.
@@ -84,8 +82,9 @@ pub fn is_daemon_running(name: &str) -> bool {
     };
     let target = to_wide(&target_name);
 
-    let snapshot: HANDLE =
-        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return false;
+    };
     if snapshot == INVALID_HANDLE_VALUE {
         return false;
     }
@@ -95,14 +94,14 @@ pub fn is_daemon_running(name: &str) -> bool {
 
     let mut found = false;
 
-    // Process32First returns 1 on success, 0 on failure.
-    if unsafe { Process32FirstW(snapshot, &mut entry) } == 1 {
+    // Process32First returns TRUE on success, FALSE on failure.
+    if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
         loop {
             if wide_eq(&entry.szExeFile, &target) {
                 found = true;
                 break;
             }
-            if unsafe { Process32NextW(snapshot, &mut entry) } != 1 {
+            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
                 break;
             }
         }

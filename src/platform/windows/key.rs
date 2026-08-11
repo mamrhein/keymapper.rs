@@ -8,7 +8,6 @@
 // $Revision$
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 
 use crate::common::modifier::ModifierRole;
 
@@ -125,8 +124,8 @@ pub enum Key {
 }
 
 impl Key {
-    pub const fn as_native(self) -> VIRTUAL_KEY {
-        self as VIRTUAL_KEY
+    pub const fn as_native(self) -> u16 {
+        self as u16
     }
 
     pub const fn as_modifier_bit(self) -> Option<u8> {
