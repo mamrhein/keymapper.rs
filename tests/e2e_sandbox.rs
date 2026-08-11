@@ -18,7 +18,7 @@ use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::{
-    env, path::PathBuf, process::Command, sync::mpsc, thread, time::Duration,
+    env, path::{Path, PathBuf}, process::Command, sync::mpsc, thread, time::Duration,
 };
 
 use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
@@ -358,7 +358,7 @@ fn create_sandbox() -> Result<Option<Box<dyn Sandbox>>, SandboxError> {
 /// Uses `std::fs::write` which truncates and rewrites the same file path,
 /// triggering `notify::EventKind::Modify` on the watched file. The watcher
 /// debounces multiple events, so rapid successive writes are safe.
-fn update_config(config_dir: &PathBuf, content: &str) {
+fn update_config(config_dir: &Path, content: &str) {
     std::fs::write(config_dir.join("config.yaml"), content)
         .expect("failed to write updated config");
 }
@@ -744,7 +744,6 @@ fn e2e_keyboard_filter() {
     sandbox.create_secondary_device().unwrap_or_else(|e| {
         eprintln!("failed to create secondary device: {e}");
         sandbox.teardown();
-        return;
     });
 
     // Get device paths for identification.
