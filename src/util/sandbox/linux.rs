@@ -136,7 +136,7 @@ impl LinuxSandbox {
 
         let metadata = fs::metadata(path).map_err(|e| {
             SandboxError::PermissionDenied(format!(
-                "cannot stat /dev/uinput: {e}"
+                "annot stat /dev/uinput: {e}"
             ))
         })?;
 
@@ -153,7 +153,32 @@ impl LinuxSandbox {
         // Bitmasks from stat(2): owner, group, other permission bits.
         let r_w_x = 0o7;
         let owner_ok = dev_uid == uid && (mode & (r_w_x << 6)) != 0;
-        let group_ok = dev_gid == gid && (mode & (r_w_x << 3)) != 0;
+
+        // Check group membership against both the effective GID and all
+        // supplementary groups.  `getgroups(0, NULL)` returns the number of
+        // supplementary groups without filling a buffer.
+        let group_ok = if mode & (r_w_x << 3) == 0 {
+            // No group permission bits set, short-circuit.
+            false
+        } else if dev_gid == gid {
+            // Effective GID matches.
+            true
+        } else {
+            // Check supplementary groups.  See getgroups(2).
+            let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+            if count <= 0 {
+                false
+            } else {
+                let mut groups = vec![0; count as usize];
+                let filled =
+                    unsafe { libc::getgroups(count, groups.as_mut_ptr()) };
+                if filled < 0 {
+                    false
+                } else {
+                    groups[..filled as usize].contains(&dev_gid)
+                }
+            }
+        };
         let other_ok = (mode & r_w_x) != 0;
 
         // We only need write access, but checking execute as well catches the
@@ -161,11 +186,15 @@ impl LinuxSandbox {
         // only the write bit (0o2), but that misses the fact that character
         // devices also require some form of access permission.
         if !owner_ok && !group_ok && !other_ok {
-            return Err(SandboxError::PermissionDenied(
-                "cannot write to /dev/uinput. Add your user to the 'input' \
-                 group or run with elevated privileges."
+            return Err(SandboxError::PermissionDenied(match dev_gid {
+                0 => "Only root can access /dev/uinput. Change the group or \
+                      run with eleviated privileges."
                     .to_string(),
-            ));
+                _ => "Cannot write to /dev/uinput. Add your user to the its \
+                      group (usually 'input') or run with elevated \
+                      privileges."
+                    .to_string(),
+            }));
         }
 
         Ok(())
@@ -316,7 +345,10 @@ impl LinuxSandbox {
     }
 
     /// Inject a key-up event into the secondary virtual input device.
-    pub fn inject_key_up_secondary(&self, code: u16) -> Result<(), SandboxError> {
+    pub fn inject_key_up_secondary(
+        &self,
+        code: u16,
+    ) -> Result<(), SandboxError> {
         self.inject_key_to_secondary(code, 0)
     }
 
