@@ -241,16 +241,9 @@ impl LinuxSandbox {
                 let shutdown = Arc::clone(&shutdown);
                 move || {
                     // Wait briefly for the daemon to create its output
-                    // device, then start polling.  The monitor thread
-                    // re-tries discovery in case the daemon hasn't
-                    // started yet.
-                    let mut device: Option<(Device, u64)> = None;
-                    // Track rdevs of devices that were destroyed while
-                    // we were reading from them.  We skip these during
-                    // rediscovery to avoid re-opening stale nodes that
-                    // haven't been cleaned up by udev yet.
-                    let mut stale_rdevs: std::collections::HashSet<u64> =
-                        std::collections::HashSet::new();
+                    // device, then start polling.  The monitor re-tries
+                    // discovery in case the daemon hasn't started yet.
+                    let mut device: Option<Device> = None;
 
                     loop {
                         if shutdown.load(Ordering::Acquire) {
@@ -259,11 +252,10 @@ impl LinuxSandbox {
 
                         // Try to discover the daemon's output device.
                         if device.is_none() {
-                            if let Some((mon, rdev)) = find_device_by_name(
-                                DAEMON_OUTPUT_DEVICE_NAME,
-                                &stale_rdevs,
-                            ) {
-                                device = Some((mon, rdev));
+                            if let Some(mon) =
+                                find_device_by_name(DAEMON_OUTPUT_DEVICE_NAME)
+                            {
+                                device = Some(mon);
                             } else {
                                 thread::sleep(Duration::from_millis(50));
                                 continue;
@@ -271,10 +263,7 @@ impl LinuxSandbox {
                         }
 
                         // Fetch events from the currently tracked device.
-                        let mut lost_device = false;
-                        let mut dead_rdev: Option<u64> = None;
-
-                        if let Some((ref mut dev, rdev)) = device {
+                        if let Some(ref mut dev) = device {
                             // Fetch all pending events from the evdev device.
                             match dev.fetch_events() {
                                 Ok(events) => {
@@ -286,8 +275,7 @@ impl LinuxSandbox {
 
                                             // Skip the dummy KEY_0 (code 0)
                                             // events that sometimes appear
-                                            // from
-                                            // synchronization.
+                                            // from synchronization.
                                             if code == 0 {
                                                 continue;
                                             }
@@ -307,34 +295,15 @@ impl LinuxSandbox {
                                 }
                                 Err(e) => {
                                     // The output device was destroyed (e.g.
-                                    // daemon killed between tests).  Record
-                                    // its
-                                    // rdev so we don't reopen the same stale
-                                    // node during rediscovery.
+                                    // daemon killed).  Reset and rediscover
+                                    // on the next iteration.
                                     eprintln!(
                                         "sandbox monitor: read error: {e}, \
                                          rediscovering device"
                                     );
-                                    dead_rdev = Some(rdev);
-                                    lost_device = true;
+                                    device = None;
                                 }
                             }
-                        }
-
-                        // Clear the stale device reference outside the borrow
-                        // scope so discovery can find a replacement on the
-                        // next iteration.
-                        if lost_device {
-                            if let Some(rdev) = dead_rdev {
-                                stale_rdevs.insert(rdev);
-                            }
-
-                            device = None;
-
-                            // Brief pause to let udev clean up stale event
-                            // nodes
-                            // before retrying discovery.
-                            thread::sleep(Duration::from_millis(50));
                         }
 
                         thread::sleep(Duration::from_millis(10));
@@ -555,15 +524,7 @@ fn open_device_nonblock(path: &Path) -> std::io::Result<Device> {
 
 /// Find a `/dev/input/event*` node whose device name matches `name`. Open
 /// in non-blocking mode so the monitor thread can poll without blocking.
-///
-/// Returns `(Device, rdev)` on success.  Devices whose rdev is in
-/// `stale_rdevs` are skipped.  This prevents the monitor from reopening a
-/// recently destroyed device whose `/dev/input/` entry hasn't been cleaned up
-/// by udev yet.
-fn find_device_by_name(
-    name: &str,
-    stale_rdevs: &HashSet<u64>,
-) -> Option<(Device, u64)> {
+fn find_device_by_name(name: &str) -> Option<Device> {
     let Ok(entries) = fs::read_dir("/dev/input") else {
         return None;
     };
@@ -571,18 +532,10 @@ fn find_device_by_name(
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
         if path.to_string_lossy().starts_with("/dev/input/event")
-            && let Ok(metadata) = fs::metadata(&path)
+            && let Ok(device) = open_device_nonblock(&path)
+            && device.name() == Some(name)
         {
-            let rdev = metadata.rdev();
-            // Skip devices we know are stale.
-            if stale_rdevs.contains(&rdev) {
-                continue;
-            }
-            if let Ok(device) = open_device_nonblock(&path)
-                && device.name() == Some(name)
-            {
-                return Some((device, rdev));
-            }
+            return Some(device);
         }
     }
 
