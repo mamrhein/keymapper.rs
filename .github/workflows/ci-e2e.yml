@@ -2,9 +2,10 @@
 # name:     ci-e2e
 # triggers: push to main, pull requests
 #
-# Runs the end-to-end sandbox tests on Linux.  macOS requires TCC
-# Accessibility permission for CGEventTap, which cannot be granted on
-# CI runners, so macOS e2e tests must be run manually on a desktop.
+# Runs the end-to-end sandbox tests on Linux, macOS, and Windows.  Linux
+# requires root for /dev/uinput access.  macOS requires root to bypass
+# TCC Accessibility permission.  Windows runs without elevation since
+# SendInput and WH_KEYBOARD_LL work at session level.
 # ---------------------------------------------------------------------------
 
 name: ci-e2e
@@ -19,6 +20,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CI: true
 
 jobs:
   # -----------------------------------------------------------------------
@@ -65,24 +67,47 @@ jobs:
           sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_sandbox
 
   # -----------------------------------------------------------------------
-  # macOS — e2e sandbox tests
-  #
-  # Disabled: CGEventTap requires TCC Accessibility permission, which cannot
-  # be granted on CI runners (SIP enabled, no user interaction). Tests must
-  # be run manually on a macOS desktop with the test binary in the
-  # Accessibility list.
+  # macOS — e2e sandbox tests (root bypasses TCC Accessibility)
   # -----------------------------------------------------------------------
-  # macos-e2e:
-  #   runs-on: macos-latest
-  #
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #
-  #     - name: Install Rust stable
-  #       uses: dtolnay/rust-toolchain@stable
-  #
-  #     - name: Install cargo-nextest
-  #       uses: taiki-e/install-action@nextest
-  #
-  #     - name: Run e2e tests as root (for Accessibility permission)
-  #       run: sudo bash scripts/sign-and-test-e2e.sh
+  macos-e2e:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e tests
+        # Build, ad-hoc sign the test binary, and run as root to bypass TCC
+        # Accessibility permission.  Ad-hoc signing (codesign --sign -) is
+        # sufficient; no certificate is needed.
+        run: bash scripts/sign-and-test-e2e.sh
+
+  # -----------------------------------------------------------------------
+  # Windows — e2e sandbox tests (no elevation required)
+  # -----------------------------------------------------------------------
+  windows-e2e:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Build daemon and e2e test binary
+        run: |
+          cargo build --bin keymapperd
+          cargo nextest run --test e2e_sandbox --no-run
+
+      - name: Run e2e tests
+        # SendInput and WH_KEYBOARD_LL work at session level; no elevation
+        # is required.
+        run: cargo nextest run --no-capture --test e2e_sandbox
