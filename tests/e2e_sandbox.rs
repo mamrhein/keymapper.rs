@@ -209,8 +209,7 @@ impl Drop for DaemonGuard {
 /// Spawn the `keymapperd` binary in *config_dir* and return a guard that
 /// ensures the child is killed on `Drop`.
 ///
-/// When *device_path* is `Some`, passes it as `--device` to the daemon so it
-/// captures from the specified input device instead of auto-discovering.
+/// Starts the daemon binary with the given config directory.
 fn start_daemon(config_dir: &PathBuf) -> DaemonGuard {
     use std::process::Stdio;
 
