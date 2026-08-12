@@ -11,25 +11,28 @@
 
 use std::ptr;
 
-use windows::Win32::Devices::{
-    DeviceAndDriverInstallation::{
-        DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
-        SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
-        SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
-        SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
-        SetupDiGetDeviceInterfaceDetailW, SetupDiGetDeviceRegistryPropertyW,
+use windows::Win32::{
+    Devices::{
+        DeviceAndDriverInstallation::{
+            DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO,
+            SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W,
+            SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList,
+            SetupDiEnumDeviceInfo, SetupDiEnumDeviceInterfaces,
+            SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+            SetupDiGetDeviceRegistryPropertyW,
+        },
+        HumanInterfaceDevice::{
+            HIDP_CAPS, HIDP_LINK_COLLECTION_NODE, HidD_FreePreparsedData,
+            HidD_GetManufacturerString, HidD_GetPreparsedData,
+            HidD_GetProductString, HidD_GetSerialNumberString, HidP_GetCaps,
+            HidP_GetLinkCollectionNodes, PHIDP_PREPARSED_DATA,
+        },
     },
-    HumanInterfaceDevice::{
-        HIDP_CAPS, HIDP_LINK_COLLECTION_NODE, HidD_FreePreparsedData,
-        HidD_GetManufacturerString, HidD_GetPreparsedData,
-        HidD_GetProductString, HidD_GetSerialNumberString, HidP_GetCaps,
-        HidP_GetLinkCollectionNodes, PHIDP_PREPARSED_DATA,
+    Foundation::{GENERIC_READ, HANDLE},
+    Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        OPEN_EXISTING,
     },
-};
-use windows::Win32::Foundation::{GENERIC_READ, HANDLE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING,
 };
 
 use crate::common::keyboard::KeyboardInfo;
@@ -302,9 +305,9 @@ fn read_hid_strings(handle: HANDLE) -> (String, String, String) {
 
 /// Checks if the device is a keyboard by examining HID usage information.
 ///
-/// Returns `Some(true)` if the device is confirmed as a keyboard, `Some(false)`
-/// if confirmed as non-keyboard, and `None` if the HID preparsed data could
-/// not be read (caller should use a fallback check).
+/// Returns `Some(true)` if the device is confirmed as a keyboard,
+/// `Some(false)` if confirmed as non-keyboard, and `None` if the HID preparsed
+/// data could not be read (caller should use a fallback check).
 fn check_keyboard_via_hid(handle: HANDLE) -> Option<bool> {
     let mut preparsed_data: PHIDP_PREPARSED_DATA = PHIDP_PREPARSED_DATA(0);
 
@@ -445,7 +448,8 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
     let _guard = SetupDiGuard(h_dev_info);
 
     let mut keyboards = Vec::new();
-    // Track diagnostics for a useful error message when no keyboards are found.
+    // Track diagnostics for a useful error message when no keyboards are
+    // found.
     let mut total_interfaces = 0u32;
     let mut open_failed = 0u32;
     let mut not_keyboard = 0u32;
@@ -596,7 +600,8 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         }
         .unwrap_or_default();
 
-        // Open the device to query HID attributes, and check if it's a keyboard.
+        // Open the device to query HID attributes, and check if it's a
+        // keyboard.
         let is_keyboard = match open_hid_device(&interface_path) {
             Some(handle) => {
                 // Try HID usage check first; fall back to keyword matching
@@ -646,7 +651,8 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             match open_hid_device(&interface_path) {
                 Some(handle) => {
                     let strings = read_hid_strings(handle);
-                    // CloseHandle fails only with an invalid handle, which would be a bug.
+                    // CloseHandle fails only with an invalid handle, which
+                    // would be a bug.
                     let _ = unsafe {
                         windows::Win32::Foundation::CloseHandle(handle)
                     };

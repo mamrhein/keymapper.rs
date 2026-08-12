@@ -7,10 +7,12 @@
 // $Source$
 // $Revision$
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
-    Process32NextW, TH32CS_SNAPPROCESS,
+use windows::Win32::{
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
+    System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
+        Process32NextW, TH32CS_SNAPPROCESS,
+    },
 };
 
 /// Creation flag to suppress console window creation.
@@ -52,7 +54,8 @@ struct PROCESS_INFORMATION {
     dwThreadId: u32,
 }
 
-// Declare `CreateProcessW` directly, since it is not exposed by our feature set.
+// Declare `CreateProcessW` directly, since it is not exposed by our feature
+// set.
 #[allow(non_snake_case)]
 unsafe extern "system" {
     fn CreateProcessW(
@@ -154,15 +157,18 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
     // executable name (including path lookup) is parsed from lpCommandLine.
     let result = unsafe {
         CreateProcessW(
-            std::ptr::null_mut(), // lpApplicationName: parse from command line
-            cmd_wide.as_ptr() as *mut u16, // lpCommandLine: mutable per API contract
-            std::ptr::null_mut(),          // lpProcessAttributes
-            std::ptr::null_mut(),          // lpThreadAttributes
-            0,                             // bInheritHandles
-            CREATE_NO_WINDOW, // dwCreationFlags: no console window
+            std::ptr::null_mut(), /* lpApplicationName: parse from command
+                                   * line */
+            cmd_wide.as_ptr() as *mut u16, /* lpCommandLine: mutable per
+                                            * API contract */
+            std::ptr::null_mut(), // lpProcessAttributes
+            std::ptr::null_mut(), // lpThreadAttributes
+            0,                    // bInheritHandles
+            CREATE_NO_WINDOW,     // dwCreationFlags: no console window
             std::ptr::null_mut(), // lpEnvironment
             std::ptr::null_mut(), // lpCurrentDirectory
-            &si as *const _ as *mut STARTUPINFOW, // lpStartupInfo: mutable per API contract
+            &si as *const _ as *mut STARTUPINFOW, /* lpStartupInfo: mutable
+                                                   * per API contract */
             &mut pi,
         )
     };

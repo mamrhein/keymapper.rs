@@ -17,15 +17,19 @@
 
 use std::sync::{Arc, Mutex};
 
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, SendInput, VIRTUAL_KEY,
-};
-use windows::Win32::UI::WindowsAndMessaging::HHOOK;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, KBDLLHOOKSTRUCT, SetWindowsHookExW, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+use windows::Win32::{
+    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
+    System::LibraryLoader::GetModuleHandleW,
+    UI::{
+        Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, SendInput, VIRTUAL_KEY,
+        },
+        WindowsAndMessaging::{
+            CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, SetWindowsHookExW,
+            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+            WM_SYSKEYDOWN, WM_SYSKEYUP,
+        },
+    },
 };
 
 use super::{CapturedEvent, Sandbox, SandboxError};
@@ -299,9 +303,7 @@ extern "system" fn monitor_keyboard_proc(
     }
 
     // Always pass the event through — we are only monitoring.
-    unsafe {
-        CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
-    }
+    unsafe { CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param) }
 }
 
 // ---------------------------------------------------------------------------

@@ -23,19 +23,26 @@
 use std::ptr;
 
 use crossbeam_channel::Sender;
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::{
-    GetRawInputData, RegisterRawInputDevices, HRAWINPUT, RAWINPUT,
-    RAWINPUTDEVICE, RAWINPUTHEADER, RIDEV_INPUTSINK, RID_INPUT,
-};
-use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
-    PostQuitMessage, PostMessageW, RegisterClassExW, TranslateMessage,
-    WNDCLASSEXW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HCURSOR, HICON,
-    HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CREATE, WM_DESTROY,
-    WM_INPUT, WM_KEYUP, WM_SYSKEYUP, WM_USER,
+use windows::{
+    Win32::{
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+        UI::{
+            Input::{
+                GetRawInputData, HRAWINPUT, KeyboardAndMouse::VIRTUAL_KEY,
+                RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
+                RIDEV_INPUTSINK, RegisterRawInputDevices,
+            },
+            WindowsAndMessaging::{
+                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
+                DefWindowProcW, DispatchMessageW, GetMessageW, HCURSOR, HICON,
+                HWND_MESSAGE, MSG, PostMessageW, PostQuitMessage,
+                RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE,
+                WINDOW_STYLE, WM_CREATE, WM_DESTROY, WM_INPUT, WM_KEYUP,
+                WM_SYSKEYUP, WM_USER, WNDCLASSEXW,
+            },
+        },
+    },
+    core::PCWSTR,
 };
 
 /// HID usage page for Generic Desktop.
@@ -53,8 +60,9 @@ const WM_STOP: u32 = WM_USER + 1;
 /// A keyboard event extracted from a Raw Input `WM_INPUT` message.
 ///
 /// The `device_handle_ptr` can be used to correlate the event with a specific
-/// physical keyboard.  Convert it to a string (e.g. via `GetRawInputDeviceInfo`)
-/// to match against the `KeyboardInfo::device` path populated at startup.
+/// physical keyboard.  Convert it to a string (e.g. via
+/// `GetRawInputDeviceInfo`) to match against the `KeyboardInfo::device` path
+/// populated at startup.
 #[derive(Debug)]
 pub struct RawInputEvent {
     /// Virtual-key code of the event.
@@ -245,7 +253,7 @@ fn create_message_only_window() -> Result<HWND, Box<dyn std::error::Error>> {
 
     if hwnd.is_invalid() {
         return Err(
-            "Failed to create message-only window for Raw Input".into(),
+            "Failed to create message-only window for Raw Input".into()
         );
     }
 
@@ -289,11 +297,14 @@ fn register_keyboards(hwnd: HWND) -> Result<(), Box<dyn std::error::Error>> {
 /// events are sent through the returned channel receiver.
 ///
 /// Returns a tuple of:
-/// - `RawInputLoop`: holds the `HWND` and must be kept alive while receiving events.
-/// - `crossbeam_channel::Receiver<RawInputEvent>`: receives raw keyboard events.
-pub fn start_raw_input_loop(
-) -> Result<(RawInputLoop, crossbeam_channel::Receiver<RawInputEvent>), Box<dyn std::error::Error>>
-{
+/// - `RawInputLoop`: holds the `HWND` and must be kept alive while receiving
+///   events.
+/// - `crossbeam_channel::Receiver<RawInputEvent>`: receives raw keyboard
+///   events.
+pub fn start_raw_input_loop() -> Result<
+    (RawInputLoop, crossbeam_channel::Receiver<RawInputEvent>),
+    Box<dyn std::error::Error>,
+> {
     let (tx, rx) = crossbeam_channel::unbounded();
 
     let hwnd = create_message_only_window()?;
@@ -322,8 +333,8 @@ pub fn start_raw_input_loop(
 /// a `WM_QUIT` or `WM_STOP` message is received.
 ///
 /// Uses `GetMessageW` with the specific `HWND` so that only messages destined
-/// for this window are processed.  This avoids competing with the main thread's
-/// message loop, which handles the `WH_KEYBOARD_LL` hook callbacks.
+/// for this window are processed.  This avoids competing with the main
+/// thread's message loop, which handles the `WH_KEYBOARD_LL` hook callbacks.
 fn run_message_loop(hwnd: HWND) {
     let mut msg = MSG::default();
 
@@ -536,7 +547,8 @@ mod tests {
         } else {
             // Create a new bounded channel and drop the receiver immediately,
             // so the sender is in a "disconnected" state similar to None.
-            let (dummy_tx, dummy_rx) = crossbeam_channel::bounded::<RawInputEvent>(1);
+            let (dummy_tx, dummy_rx) =
+                crossbeam_channel::bounded::<RawInputEvent>(1);
             drop(dummy_rx);
             set_raw_input_tx(dummy_tx);
         }

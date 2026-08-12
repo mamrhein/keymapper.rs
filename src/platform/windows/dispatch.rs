@@ -35,21 +35,23 @@ use std::{
 
 use crossbeam_channel::{self, Receiver, Sender};
 use parking_lot::RwLock;
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::UI::Input::{
-    GetRawInputDeviceInfoW, RIDI_DEVICENAME,
+use windows::Win32::{
+    Foundation::HANDLE,
+    UI::Input::{
+        GetRawInputDeviceInfoW, KeyboardAndMouse::VIRTUAL_KEY, RIDI_DEVICENAME,
+    },
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY;
 
-use crate::daemon::state::Lookup;
-use crate::platform::windows::raw_input::RawInputEvent;
+use crate::{
+    daemon::state::Lookup, platform::windows::raw_input::RawInputEvent,
+};
 
 /// Result of a mapping lookup sent from the worker back to the hook thread.
 ///
 /// The \`Swallow\` variant carries the resolved output events so that the hook
 /// proc can emit them directly without performing its own lookup.  This avoids
-/// a mismatch: the worker decides with device identification, but the hook proc
-/// would lookup without it.
+/// a mismatch: the worker decides with device identification, but the hook
+/// proc would lookup without it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     /// Swallow the event and emit the given output keys.
@@ -69,7 +71,8 @@ pub struct HookEvent {
     /// \`true\` for key-up, \`false\` for key-down.
     pub is_key_up: bool,
 
-    /// Bitmask of currently pressed modifier keys (excluding the current key).
+    /// Bitmask of currently pressed modifier keys (excluding the current
+    /// key).
     pub modifiers: u8,
 
     /// Reply channel — the worker sends the decision and drops the sender.
@@ -185,10 +188,11 @@ fn key_state_cache() -> &'static KeyStateCache {
 
 /// Spawns the worker thread that mediates between the hook and raw input.
 ///
-/// The worker receives \`HookEvent\`s from the hook thread and \`RawInputEvent\`s
-/// from the raw input message loop.  It matches raw input events against hook
-/// events to identify the source keyboard, performs the mapping lookup, and
-/// replies to the hook thread with \`Swallow\` or \`PassThrough\`.
+/// The worker receives \`HookEvent\`s from the hook thread and
+/// \`RawInputEvent\`s from the raw input message loop.  It matches raw input
+/// events against hook events to identify the source keyboard, performs the
+/// mapping lookup, and replies to the hook thread with \`Swallow\` or
+/// \`PassThrough\`.
 pub fn spawn_worker(
     lookup: Arc<RwLock<dyn Lookup>>,
     raw_rx: Receiver<RawInputEvent>,
@@ -262,8 +266,6 @@ fn worker_loop(
     }
 }
 
-
-
 /// Processes a hook event and sends the decision back via the reply channel.
 fn process_hook_event(
     event: &HookEvent,
@@ -291,7 +293,12 @@ fn process_hook_event(
             Some(handle_ptr) => {
                 // Found a raw input event — resolve device path and lookup.
                 let device_path = device_cache.get_or_resolve(handle_ptr);
-                decide(lookup, event.vk_code, event.modifiers, device_path.as_deref())
+                decide(
+                    lookup,
+                    event.vk_code,
+                    event.modifiers,
+                    device_path.as_deref(),
+                )
             }
             None => {
                 // No match yet.  Wait briefly for raw input to arrive, then
@@ -377,7 +384,10 @@ fn decide_with_delay(
 // ---------------------------------------------------------------------------
 
 /// Removes entries older than \`max_age\` from the buffer.
-fn evict_stale(buffer: &mut Vec<BufferedRawInput>, max_age: std::time::Duration) {
+fn evict_stale(
+    buffer: &mut Vec<BufferedRawInput>,
+    max_age: std::time::Duration,
+) {
     buffer.retain(|entry| entry.received_at.elapsed() < max_age);
 }
 
@@ -480,11 +490,16 @@ fn resolve_device_path(handle_ptr: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::daemon::mapping_cache::{NativeKey, RuntimeLookupCache};
-    use crate::daemon::state::Lookup;
-    use crate::platform::Key;
     use std::collections::HashMap;
+
+    use super::*;
+    use crate::{
+        daemon::{
+            mapping_cache::{NativeKey, RuntimeLookupCache},
+            state::Lookup,
+        },
+        platform::Key,
+    };
 
     // -----------------------------------------------------------------------
     // Mock Lookup for testing process_hook_event and decide
@@ -764,7 +779,9 @@ mod tests {
     #[test]
     fn find_match_in_buffer_empty() {
         let mut buffer: Vec<BufferedRawInput> = Vec::new();
-        assert!(find_match_in_buffer(VIRTUAL_KEY(0x41), &mut buffer).is_none());
+        assert!(
+            find_match_in_buffer(VIRTUAL_KEY(0x41), &mut buffer).is_none()
+        );
     }
 
     #[test]
@@ -807,15 +824,20 @@ mod tests {
     #[test]
     fn decide_returns_swallow_when_mapping_found() {
         let outputs = vec![nk(Key::LeftControl)];
-        let lookup = arc_lookup(
-            MockLookup::new()
-                .with_global(Key::CapsLock.as_native(), 0, None, outputs),
-        );
+        let lookup = arc_lookup(MockLookup::new().with_global(
+            Key::CapsLock.as_native(),
+            0,
+            None,
+            outputs,
+        ));
 
-        let decision = decide(&lookup, VIRTUAL_KEY(Key::CapsLock.as_native()), 0, None);
+        let decision =
+            decide(&lookup, VIRTUAL_KEY(Key::CapsLock.as_native()), 0, None);
 
         match &decision {
-            Decision::Swallow(v) => assert_eq!(v[0].base, Key::LeftControl.as_native()),
+            Decision::Swallow(v) => {
+                assert_eq!(v[0].base, Key::LeftControl.as_native())
+            }
             _ => panic!("expected Swallow, got {decision:?}"),
         }
     }
@@ -839,14 +861,12 @@ mod tests {
     #[test]
     fn decide_with_device_id_returns_mapping_when_configured() {
         let outputs = vec![nk(Key::A)];
-        let lookup = arc_lookup(
-            MockLookup::new().with_global(
-                Key::B.as_native(),
-                0,
-                Some(r"\\?\hid#vid_046d#..."),
-                outputs,
-            ),
-        );
+        let lookup = arc_lookup(MockLookup::new().with_global(
+            Key::B.as_native(),
+            0,
+            Some(r"\\?\hid#vid_046d#..."),
+            outputs,
+        ));
 
         let decision = decide(
             &lookup,
@@ -865,12 +885,19 @@ mod tests {
     fn decide_with_modifiers_returns_mapping_when_configured() {
         let outputs = vec![nk(Key::LeftControl)];
         // Modifier bit 0 = LeftControl held
-        let lookup = arc_lookup(
-            MockLookup::new()
-                .with_global(Key::A.as_native(), 0b0000_0001, None, outputs),
-        );
+        let lookup = arc_lookup(MockLookup::new().with_global(
+            Key::A.as_native(),
+            0b0000_0001,
+            None,
+            outputs,
+        ));
 
-        let decision = decide(&lookup, VIRTUAL_KEY(Key::A.as_native()), 0b0000_0001, None);
+        let decision = decide(
+            &lookup,
+            VIRTUAL_KEY(Key::A.as_native()),
+            0b0000_0001,
+            None,
+        );
 
         assert!(matches!(&decision, Decision::Swallow(_)));
     }
@@ -884,14 +911,12 @@ mod tests {
         // Clean key state cache first.
         key_state_cache().remove(Key::CapsLock.as_native());
 
-        let lookup = arc_lookup(
-            MockLookup::new().with_global(
-                Key::CapsLock.as_native(),
-                0,
-                Some(r"\\?\hid#vid_046d#..."),
-                vec![nk(Key::LeftControl)],
-            ),
-        );
+        let lookup = arc_lookup(MockLookup::new().with_global(
+            Key::CapsLock.as_native(),
+            0,
+            Some(r"\\?\hid#vid_046d#..."),
+            vec![nk(Key::LeftControl)],
+        ));
 
         let mut raw_buffer = vec![BufferedRawInput {
             event: RawInputEvent {
@@ -917,11 +942,18 @@ mod tests {
             reply_tx,
         };
 
-        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+        process_hook_event(
+            &hook_event,
+            &lookup,
+            &mut raw_buffer,
+            &device_cache,
+        );
 
         let decision = reply_rx.recv().unwrap();
         match &decision {
-            Decision::Swallow(v) => assert_eq!(v[0].base, Key::LeftControl.as_native()),
+            Decision::Swallow(v) => {
+                assert_eq!(v[0].base, Key::LeftControl.as_native())
+            }
             _ => panic!("expected Swallow, got {decision:?}"),
         }
 
@@ -958,10 +990,16 @@ mod tests {
             reply_tx,
         };
 
-        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+        process_hook_event(
+            &hook_event,
+            &lookup,
+            &mut raw_buffer,
+            &device_cache,
+        );
 
         let decision = reply_rx.recv().unwrap();
-        // Key-up Swallow should have empty outputs (emission only on key-down).
+        // Key-up Swallow should have empty outputs (emission only on
+        // key-down).
         assert!(matches!(decision, Decision::Swallow(ref v) if v.is_empty()));
 
         // Cache entry was removed.
@@ -985,7 +1023,12 @@ mod tests {
             reply_tx,
         };
 
-        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+        process_hook_event(
+            &hook_event,
+            &lookup,
+            &mut raw_buffer,
+            &device_cache,
+        );
 
         let decision = reply_rx.recv().unwrap();
         assert!(matches!(decision, Decision::PassThrough));
@@ -1011,7 +1054,12 @@ mod tests {
         // Use a very short timeout to avoid waiting for decide_with_delay.
         // Since there's no raw buffer entry and no mapping, the worker
         // falls back to lookup without device ID, which also returns None.
-        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &device_cache);
+        process_hook_event(
+            &hook_event,
+            &lookup,
+            &mut raw_buffer,
+            &device_cache,
+        );
 
         let decision = reply_rx.recv().unwrap();
         assert!(matches!(decision, Decision::PassThrough));
@@ -1127,11 +1175,17 @@ mod tests {
 
         assert!(matches!(
             cache.get(0x41),
-            Some(CachedKeyState { decision: Decision::Swallow(_), .. })
+            Some(CachedKeyState {
+                decision: Decision::Swallow(_),
+                ..
+            })
         ));
         assert!(matches!(
             cache.get(0x42),
-            Some(CachedKeyState { decision: Decision::PassThrough, .. })
+            Some(CachedKeyState {
+                decision: Decision::PassThrough,
+                ..
+            })
         ));
 
         // Remove one, the other remains.
@@ -1232,7 +1286,12 @@ mod tests {
             reply_tx,
         };
 
-        process_hook_event(&hook_event, &lookup, &mut raw_buffer, &DeviceCache::new());
+        process_hook_event(
+            &hook_event,
+            &lookup,
+            &mut raw_buffer,
+            &DeviceCache::new(),
+        );
 
         // No mapping configured, so PassThrough — but the raw buffer entry
         // should have been consumed.

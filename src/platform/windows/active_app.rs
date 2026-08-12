@@ -9,13 +9,13 @@
 
 //! Synchronous foreground application query via Win32 APIs.
 
-use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-    QueryFullProcessImageNameW,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId,
+use windows::Win32::{
+    Foundation::CloseHandle,
+    System::Threading::{
+        OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
+    },
+    UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
 };
 
 /// Synchronously query the current foreground application name.

@@ -15,15 +15,16 @@
 
 use std::{collections::HashSet, path::Path};
 
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
-    TH32CS_SNAPMODULE,
+use windows::Win32::{
+    System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
+        TH32CS_SNAPMODULE,
+    },
+    UI::WindowsAndMessaging::{
+        EnumWindows, GetDesktopWindow, GetWindowThreadProcessId,
+        IsWindowVisible,
+    },
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetDesktopWindow, GetWindowThreadProcessId, IsWindowVisible,
-};
-
-
 
 /// Convert a null-terminated UTF-16 slice to a Rust String.
 fn utf16_to_string(data: &[u16]) -> String {
@@ -180,8 +181,7 @@ struct WindowCollector {
     pids: HashSet<u32>,
 }
 
-use windows::core::BOOL;
-use windows::Win32::Foundation::LPARAM;
+use windows::{Win32::Foundation::LPARAM, core::BOOL};
 
 extern "system" fn enum_windows_proc(
     hwnd: windows::Win32::Foundation::HWND,
@@ -213,8 +213,9 @@ pub fn list_app_names() -> Vec<String> {
         pids: HashSet::new(),
     };
 
-    // EnumWindows returns FALSE on failure, which leaves the collector partially
-    // populated.  This is tolerated — the caller simply gets fewer app names.
+    // EnumWindows returns FALSE on failure, which leaves the collector
+    // partially populated.  This is tolerated — the caller simply gets
+    // fewer app names.
     unsafe {
         let _ = EnumWindows(
             Some(enum_windows_proc),

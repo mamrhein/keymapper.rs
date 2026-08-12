@@ -17,38 +17,45 @@
 //!
 //! Thread layout:
 //!
-//! 1. **Hook thread** — \`WH_KEYBOARD_LL\` hook + \`GetMessageW\` loop.
-//!    Sends \`HookEvent\` to worker, blocks on reply.
-//! 2. **Raw input thread** — Message-only window + \`GetMessageW\` loop
-//!    for \`WM_INPUT\`.  Sends \`RawInputEvent\` to worker.
+//! 1. **Hook thread** — \`WH_KEYBOARD_LL\` hook + \`GetMessageW\` loop. Sends
+//!    \`HookEvent\` to worker, blocks on reply.
+//! 2. **Raw input thread** — Message-only window + \`GetMessageW\` loop for
+//!    \`WM_INPUT\`.  Sends \`RawInputEvent\` to worker.
 //! 3. **Worker thread** — Receives from both channels, matches events,
 //!    resolves devices, performs lookups, sends decisions back.
 
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
     Arc,
+    atomic::{AtomicU32, Ordering},
 };
 
 use crossbeam_channel;
 use parking_lot::RwLock;
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG,
-    SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WM_KEYDOWN, WM_SYSKEYDOWN,
+use windows::Win32::{
+    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
+    System::LibraryLoader::GetModuleHandleW,
+    UI::{
+        Input::KeyboardAndMouse::{
+            GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+        },
+        WindowsAndMessaging::{
+            CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG,
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+            WM_KEYDOWN, WM_SYSKEYDOWN,
+        },
+    },
 };
 
-use super::dispatch::{Decision, HookEvent, spawn_worker};
-use super::key::Key;
-use super::raw_input::start_raw_input_loop;
-use crate::common::modifier::ModifierRole;
-use crate::daemon::mapping_cache::NativeKey;
-use crate::daemon::state::Lookup;
+use super::{
+    dispatch::{Decision, HookEvent, spawn_worker},
+    key::Key,
+    raw_input::start_raw_input_loop,
+};
+use crate::{
+    common::modifier::ModifierRole,
+    daemon::{mapping_cache::NativeKey, state::Lookup},
+};
 
 // ---------------------------------------------------------------------------
 // Static state for the hook procedure
@@ -56,8 +63,9 @@ use crate::daemon::state::Lookup;
 
 /// Shared sender for hook events.  Accessed from the hook proc so that
 /// events can be pushed to the worker thread.
-static HOOK_TX: parking_lot::Mutex<Option<crossbeam_channel::Sender<HookEvent>>> =
-    parking_lot::Mutex::new(None);
+static HOOK_TX: parking_lot::Mutex<
+    Option<crossbeam_channel::Sender<HookEvent>>,
+> = parking_lot::Mutex::new(None);
 
 /// Stores the sender that the hook procedure uses to push events.
 fn set_hook_tx(tx: crossbeam_channel::Sender<HookEvent>) {
@@ -115,7 +123,8 @@ fn is_injected_key(vk: u16, is_down: bool) -> bool {
 /// Removes a single matching entry from the injected key tracker.
 fn clear_injected(vk: u16, is_down: bool) {
     let keys = INJECTED_KEYS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(pos) = keys.iter().position(|(v, d)| *v == vk && *d == is_down) {
+    if let Some(pos) = keys.iter().position(|(v, d)| *v == vk && *d == is_down)
+    {
         let mut keys = INJECTED_KEYS.lock().unwrap_or_else(|e| e.into_inner());
         keys.remove(pos);
     }
@@ -184,11 +193,7 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
     // Mark this key as injected so the hook proc can skip it.
     mark_injected(vk.0, is_down);
 
-    let mut flags: u32 = if is_key_up {
-        KEYEVENTF_KEYUP.0
-    } else {
-        0
-    };
+    let mut flags: u32 = if is_key_up { KEYEVENTF_KEYUP.0 } else { 0 };
     if is_extended_key(vk) {
         flags |= KEYEVENTF_EXTENDEDKEY.0;
     }
@@ -265,15 +270,11 @@ extern "system" fn low_level_keyboard_proc(
     l_param: LPARAM,
 ) -> LRESULT {
     if code < 0 {
-        return unsafe {
-            CallNextHookEx(None, code, w_param, l_param)
-        };
+        return unsafe { CallNextHookEx(None, code, w_param, l_param) };
     }
 
     let Some(tx) = get_hook_tx() else {
-        return unsafe {
-            CallNextHookEx(None, code, w_param, l_param)
-        };
+        return unsafe { CallNextHookEx(None, code, w_param, l_param) };
     };
 
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
@@ -287,9 +288,7 @@ extern "system" fn low_level_keyboard_proc(
     // output as new input, which would create duplicate or recursive mappings.
     if is_injected_key(vk_code.0, is_key_down) {
         clear_injected(vk_code.0, is_key_down);
-        return unsafe {
-            CallNextHookEx(None, code, w_param, l_param)
-        };
+        return unsafe { CallNextHookEx(None, code, w_param, l_param) };
     }
 
     // Clear the current key's modifier bit from the polled state so that
@@ -352,9 +351,7 @@ extern "system" fn low_level_keyboard_proc(
         }
     };
 
-    unsafe {
-        CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
-    }
+    unsafe { CallNextHookEx(Some(hook_handle()), code, w_param, l_param) }
 }
 
 // ---------------------------------------------------------------------------
@@ -389,8 +386,7 @@ pub fn start_mapping(
     set_hook_tx(hook_tx);
 
     // Install the low-level keyboard hook.
-    let h_instance: HINSTANCE =
-        unsafe { GetModuleHandleW(None)?.into() };
+    let h_instance: HINSTANCE = unsafe { GetModuleHandleW(None)?.into() };
 
     let handle = unsafe {
         SetWindowsHookExW(

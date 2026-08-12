@@ -9,15 +9,20 @@
 
 //! Windows implementation of `keymapper keys probe`.
 
-use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, MapVirtualKeyW, VIRTUAL_KEY, VK_CONTROL,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT,
-    MSG, PostQuitMessage, SetWindowsHookExW, TranslateMessage,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+use windows::Win32::{
+    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
+    System::LibraryLoader::GetModuleHandleW,
+    UI::{
+        Input::KeyboardAndMouse::{
+            GetKeyState, MapVirtualKeyW, VIRTUAL_KEY, VK_CONTROL,
+        },
+        WindowsAndMessaging::{
+            CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK,
+            KBDLLHOOKSTRUCT, MSG, PostQuitMessage, SetWindowsHookExW,
+            TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN,
+            WM_SYSKEYDOWN,
+        },
+    },
 };
 
 use crate::platform::Key;
@@ -60,8 +65,9 @@ pub fn probe() {
     unsafe {
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            // TranslateMessage's return value is not used; the message is always
-            // dispatched regardless of whether it was translated.
+            // TranslateMessage's return value is not used; the message is
+            // always dispatched regardless of whether it was
+            // translated.
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -119,7 +125,5 @@ extern "system" fn probe_keyboard_proc(
         println!("{name}: {code_str}");
     }
 
-    unsafe {
-        CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param)
-    }
+    unsafe { CallNextHookEx(Some(HHOOK::default()), code, w_param, l_param) }
 }

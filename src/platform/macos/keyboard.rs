@@ -10,8 +10,8 @@
 //! macOS keyboard enumeration via `ioreg` subprocess.
 //!
 //! IOKit HID Manager FFI is fragile on modern macOS (symbols are split across
-//! sub-frameworks, APIs have been deprecated).  Using `ioreg` to query the IOService
-//! registry is a reliable, dependency-free alternative.
+//! sub-frameworks, APIs have been deprecated).  Using `ioreg` to query the
+//! IOService registry is a reliable, dependency-free alternative.
 
 use std::process::Command;
 
@@ -66,8 +66,8 @@ fn run_ioreg() -> Result<String, Box<dyn std::error::Error>> {
 
 /// Parse a single device block from ioreg output.
 ///
-/// ioreg with `-w 0` produces a semi-structured output where each device starts
-/// with a line like:
+/// ioreg with `-w 0` produces a semi-structured output where each device
+/// starts with a line like:
 /// ```text
 /// +-o Keyboard  <class IOHIDKeyboardDevice, ...>
 /// ```
@@ -116,7 +116,8 @@ fn parse_ioreg_output(output: &str) -> Vec<KeyboardInfo> {
             if let Some((key, value)) = parse_property_line(trimmed) {
                 match key {
                     "Product" => {
-                        // Override the device-class name with the actual product name.
+                        // Override the device-class name with the actual
+                        // product name.
                         if !value.is_empty() {
                             kb.name = value.clone();
                         }
@@ -124,7 +125,8 @@ fn parse_ioreg_output(output: &str) -> Vec<KeyboardInfo> {
                     "Vendor ID" => {
                         if let Some(vid) = parse_hex_u32(&value) {
                             kb.vendor = vendor_id_to_name(vid);
-                            // Build model from vendor:product if product ID is available.
+                            // Build model from vendor:product if product ID is
+                            // available.
                             kb.model = format!("0x{:04x}", vid);
                         }
                     }
@@ -164,7 +166,8 @@ fn parse_ioreg_output(output: &str) -> Vec<KeyboardInfo> {
     keyboards
 }
 
-/// Parse an ioreg property line like `"Product" = "Magic Keyboard"` or `"Vendor ID" = 0x05ac`.
+/// Parse an ioreg property line like `"Product" = "Magic Keyboard"` or
+/// `"Vendor ID" = 0x05ac`.
 fn parse_property_line(line: &str) -> Option<(&str, String)> {
     // Lines look like: `"Key" = "Value"` or `"Key" = 0x1234`
     let line = line.trim_start().strip_prefix('|')?.trim_start();
@@ -310,12 +313,11 @@ mod tests {
 
     #[test]
     fn parse_ioreg_multiple_devices() {
-        let output = "+-o Keyboard  <class IOHIDKeyboardDevice, id 0x100000200>\n\
-            |   \"Product\" = \"Magic Keyboard\"\n\
-            |   \"Vendor ID\" = 0x05ac\n\
-            +-o Keyboard  <class IOHIDKeyboardDevice, id 0x100000300>\n\
-            |   \"Product\" = \"Logitech K845\"\n\
-            |   \"Vendor ID\" = 0x046d";
+        let output = "+-o Keyboard  <class IOHIDKeyboardDevice, id \
+                      0x100000200>\n|   \"Product\" = \"Magic Keyboard\"\n|   \
+                      \"Vendor ID\" = 0x05ac\n+-o Keyboard  <class \
+                      IOHIDKeyboardDevice, id 0x100000300>\n|   \"Product\" \
+                      = \"Logitech K845\"\n|   \"Vendor ID\" = 0x046d";
         let result = parse_ioreg_output(output);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "Magic Keyboard");
