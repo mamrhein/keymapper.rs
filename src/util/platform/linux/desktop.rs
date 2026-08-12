@@ -13,10 +13,12 @@
 //! Only the `[Desktop Entry]` main group is parsed, and only the keys we need:
 //! `Type`, `Exec`, `Hidden`, and `NoDisplay`.
 
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 /// Directories that contain system-wide and user `.desktop` files.
 const DESKTOP_DIRS: &[&str] =
@@ -315,7 +317,8 @@ fn split_key_value(line: &str) -> Option<(&str, &str)> {
 ///
 /// The Exec value may contain:
 /// - An absolute or relative path (possibly quoted).
-/// - `--flag` arguments before the executable (some desktop files put flags first).
+/// - `--flag` arguments before the executable (some desktop files put flags
+///   first).
 /// - `%` specifiers (`%f`, `%u`, `%F`, `%U`, etc.).
 fn parse_exec_value(value: &str) -> Option<String> {
     let value = value.trim();
@@ -460,7 +463,8 @@ mod tests {
 
     #[test]
     fn resolve_cmdline_absolute_path_required() {
-        // Non-absolute paths in cmdline are skipped (handled by exe-name cache).
+        // Non-absolute paths in cmdline are skipped (handled by exe-name
+        // cache).
         let cmdline = b"firefox\0--flag\0";
         // No absolute paths, so no match from app root cache.
         let result = resolve_app_id_from_cmdline(cmdline);

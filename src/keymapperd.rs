@@ -9,11 +9,11 @@
 
 use std::sync::Arc;
 
-use parking_lot::RwLock;
-
-// Import Lookup so read-only trait methods are in scope, and MutableLookup so
-// mutation methods are callable on the concrete RuntimeState type.
+// Import Lookup so read-only trait methods are in scope, and
+// MutableLookup so mutation methods are callable on the concrete
+// RuntimeState type.
 use keymapper::daemon::state::{Lookup, MutableLookup};
+use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config_path = keymapper::common::config_path::find_config_path_strict(
@@ -34,17 +34,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &config_path,
         )?;
 
-    // Discover connected keyboards to populate the device registry.
-    // Used for keyboard filtering at runtime.
-    let keyboards = keymapper::platform::list_keyboards().unwrap_or_default();
+    // Discover connected keyboards to populate the device registry.  The
+    // registry gets ALL keyboards so that filtering at rule-level can resolve
+    // any device.
+    let all_keyboards =
+        keymapper::platform::list_keyboards().unwrap_or_default();
+
+    // Determine which keyboards to actually grab based on the global filter.
+    // Only matching keyboards are captured; others work normally.
+    let keyboards_to_grab: Vec<keymapper::common::keyboard::KeyboardInfo> =
+        keymapper::common::keyboard::filter_keyboards_by_specifiers(
+            &all_keyboards,
+            initial_cache.global_keyboards().map(Vec::as_slice),
+        );
+
+    if !keyboards_to_grab.is_empty() {
+        println!(
+            "Grabbing {} keyboard(s) ({} total discovered):",
+            keyboards_to_grab.len(),
+            all_keyboards.len()
+        );
+        for kb in &keyboards_to_grab {
+            println!("  - {} ({})", kb.name, kb.device);
+        }
+    }
 
     // Coerce to dyn MutableLookup at creation time.  The daemon-internal code
     // (watcher) can call mutation methods via MutableLookup.  A pointer cast
     // produces a dyn Lookup Arc for platform code, which only needs the
     // read-only interface.  Both Arcs share the same allocation.
-    let state: Arc<RwLock<dyn MutableLookup>> = Arc::new(RwLock::new(
-        keymapper::daemon::state::RuntimeState::new(initial_cache, keyboards),
-    ));
+    let state: Arc<RwLock<dyn MutableLookup>> =
+        Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
+            initial_cache,
+            all_keyboards,
+        )));
 
     // Start hot-reloader thread
     let _watcher = keymapper::daemon::watcher::start_config_watcher(
@@ -62,5 +85,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::from_raw(ptr as *const RwLock<dyn Lookup>)
     };
 
-    keymapper::platform::start_mapping(platform_state)
+    // On Linux, pass the filtered keyboard list for device-level capture.
+    // On macOS and Windows, all keyboards are captured globally.
+    #[cfg(target_os = "linux")]
+    return keymapper::platform::start_mapping(
+        platform_state,
+        keyboards_to_grab,
+    );
+
+    #[cfg(not(target_os = "linux"))]
+    return keymapper::platform::start_mapping(platform_state);
 }

@@ -17,9 +17,9 @@ use crate::common::keyboard::KeyboardInfo;
 /// Enumerate all keyboard input devices on the system.
 ///
 /// Uses udev to discover devices tagged as keyboards belonging to the current
-/// user seat.  Devices that also support absolute (pointer) events are excluded
-/// because they are typically pointing devices that happen to announce keyboard
-/// capabilities (e.g. touchpads with integrated buttons).
+/// user seat.  Devices that also support absolute (pointer) events are
+/// excluded because they are typically pointing devices that happen to
+/// announce keyboard capabilities (e.g. touchpads with integrated buttons).
 pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 {
     let mut enumerator = Enumerator::new()?;
@@ -41,7 +41,8 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             continue;
         };
 
-        // Skip pointing devices announced as keyboards (touchpads, touchscreens).
+        // Skip pointing devices announced as keyboards (touchpads,
+        // touchscreens).
         if device.supported_events().contains(EventType::ABSOLUTE) {
             continue;
         }

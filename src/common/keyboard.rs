@@ -123,6 +123,30 @@ fn str_matches_ignore_case(pattern: &str, value: &str) -> bool {
     pattern.eq_ignore_ascii_case(value)
 }
 
+/// Filter a list of discovered keyboards against the global keyboard
+/// specifiers.
+///
+/// Returns all keyboards when `filter` is `None` or empty.  When set, returns
+/// only keyboards that match at least one specifier.  Keyboards that are not
+/// in the resulting list will not be grabbed by the daemon.
+pub fn filter_keyboards_by_specifiers(
+    keyboards: &[KeyboardInfo],
+    filter: Option<&[KeyboardSpecifier]>,
+) -> Vec<KeyboardInfo> {
+    let Some(specs) = filter else {
+        return keyboards.to_vec();
+    };
+    if specs.is_empty() {
+        return keyboards.to_vec();
+    }
+
+    keyboards
+        .iter()
+        .filter(|kb| specs.iter().any(|spec| spec.matches(kb)))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +293,112 @@ mod tests {
         let deserialized: KeyboardSpecifier =
             serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(spec, deserialized);
+    }
+
+    #[test]
+    fn filter_none_returns_all() {
+        let keyboards = vec![
+            build_keyboard("K1", "VendorA", "ModelA", "dev1", Some("USB")),
+            build_keyboard("K2", "VendorB", "ModelB", "dev2", None),
+        ];
+        let result = filter_keyboards_by_specifiers(&keyboards, None);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn filter_empty_slice_returns_all() {
+        let keyboards = vec![
+            build_keyboard("K1", "VendorA", "ModelA", "dev1", Some("USB")),
+            build_keyboard("K2", "VendorB", "ModelB", "dev2", None),
+        ];
+        let result = filter_keyboards_by_specifiers(&keyboards, Some(&[]));
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn filter_returns_matching_only() {
+        let keyboards = vec![
+            build_keyboard("K1", "VendorA", "ModelA", "dev1", Some("USB")),
+            build_keyboard("K2", "VendorB", "ModelB", "dev2", None),
+            build_keyboard(
+                "K3",
+                "VendorA",
+                "ModelC",
+                "dev3",
+                Some("Bluetooth"),
+            ),
+        ];
+        let specs = vec![KeyboardSpecifier {
+            name: None,
+            vendor: Some("VendorA".to_string()),
+            model: None,
+            port: None,
+        }];
+        let result = filter_keyboards_by_specifiers(&keyboards, Some(&specs));
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "K1");
+        assert_eq!(result[1].name, "K3");
+    }
+
+    #[test]
+    fn filter_or_logic_multiple_specifiers() {
+        let keyboards = vec![
+            build_keyboard("K1", "VendorA", "ModelA", "dev1", Some("USB")),
+            build_keyboard("K2", "VendorB", "ModelB", "dev2", None),
+            build_keyboard(
+                "K3",
+                "VendorC",
+                "ModelC",
+                "dev3",
+                Some("Bluetooth"),
+            ),
+        ];
+        let specs = vec![
+            KeyboardSpecifier {
+                name: None,
+                vendor: Some("VendorA".to_string()),
+                model: None,
+                port: None,
+            },
+            KeyboardSpecifier {
+                name: None,
+                vendor: Some("VendorC".to_string()),
+                model: None,
+                port: None,
+            },
+        ];
+        let result = filter_keyboards_by_specifiers(&keyboards, Some(&specs));
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "K1");
+        assert_eq!(result[1].name, "K3");
+    }
+
+    #[test]
+    fn filter_no_matches_returns_empty() {
+        let keyboards = vec![
+            build_keyboard("K1", "VendorA", "ModelA", "dev1", Some("USB")),
+            build_keyboard("K2", "VendorB", "ModelB", "dev2", None),
+        ];
+        let specs = vec![KeyboardSpecifier {
+            name: None,
+            vendor: Some("NonExistent".to_string()),
+            model: None,
+            port: None,
+        }];
+        let result = filter_keyboards_by_specifiers(&keyboards, Some(&specs));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_empty_input_returns_empty() {
+        let keyboards: Vec<KeyboardInfo> = vec![];
+        let specs = vec![KeyboardSpecifier {
+            name: Some("K1".to_string()),
+            vendor: None,
+            model: None,
+            port: None,
+        }];
+        let result = filter_keyboards_by_specifiers(&keyboards, Some(&specs));
+        assert!(result.is_empty());
     }
 }

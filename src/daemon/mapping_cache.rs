@@ -83,7 +83,7 @@ impl RuntimeLookupCache {
         &self.global_rules
     }
 
-    pub(crate) fn global_keyboards(&self) -> Option<&Vec<KeyboardSpecifier>> {
+    pub fn global_keyboards(&self) -> Option<&Vec<KeyboardSpecifier>> {
         self.global_keyboards.as_ref()
     }
 }

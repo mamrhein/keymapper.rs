@@ -15,4 +15,4 @@ mod mapping;
 pub(crate) use active_app::get_active_app_name;
 pub use key::Key;
 pub use keyboard::list_keyboards;
-pub use mapping::{find_keyboard_device, start_mapping};
+pub use mapping::start_mapping;

@@ -17,8 +17,6 @@ mod windows;
 // Only the public API surface is re-exported.  Internal helpers (signal
 // handlers, static flags) stay private to the platform module.
 #[cfg(target_os = "linux")]
-pub(crate) use linux::find_keyboard_device;
-#[cfg(target_os = "linux")]
 pub(crate) use linux::get_active_app_name;
 #[cfg(target_os = "linux")]
 pub use linux::{Key, list_keyboards, start_mapping};

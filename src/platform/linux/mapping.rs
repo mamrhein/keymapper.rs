@@ -8,6 +8,7 @@
 // $Revision$
 
 use std::{
+    os::unix::io::AsRawFd,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,19 +17,34 @@ use std::{
     time::Duration,
 };
 
-use evdev::{Device, EventType, KeyCode};
+use evdev::{Device, EventType};
+use nix::sys::epoll::{
+    Epoll, EpollCreateFlags, EpollEvent, EpollFlags, EpollTimeout,
+};
 use parking_lot::RwLock;
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
     flag::register,
 };
-use udev::Enumerator;
 
 use super::key::Key;
 use crate::{
-    common::modifier::ModifierRole,
+    common::{keyboard::KeyboardInfo, modifier::ModifierRole},
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
+
+// ---------------------------------------------------------------------------
+// Per-device state
+// ---------------------------------------------------------------------------
+
+/// A single managed keyboard device, tracking its own modifier state.
+struct ManagedDevice {
+    device: Device,
+    /// Device node path (e.g. `/dev/input/event3`), used for rule lookup.
+    path: String,
+    /// Bitmask of currently active modifiers for this device only.
+    modifiers: u8,
+}
 
 // ---------------------------------------------------------------------------
 // Modifier handling
@@ -145,130 +161,161 @@ fn emit_key_event(
 }
 
 // ---------------------------------------------------------------------------
-// evdev event loop
+// Per-device event processing
 // ---------------------------------------------------------------------------
 
-const DEFAULT_SEAT: &str = "seat0";
-
-/// Determine the seat of the current user session.
+/// Process all pending events for a single managed device.
 ///
-/// Strategy (first match wins):
-/// 1. `XDG_SEAT` environment variable.
-/// 2. Parse the session file under `/run/systemd/sessions/<id>` and read the
-///    `SEAT=` line.
-/// 3. Fallback to `seat0`.
-fn determine_seat() -> String {
-    // Check the environment first.
-    if let Ok(seat) = std::env::var("XDG_SEAT")
-        && !seat.is_empty()
-    {
-        return seat;
-    }
-
-    // Resolve the session id and look up the seat in its systemd session file.
-    if let Ok(session_id) = std::fs::read_to_string("/proc/self/sessionid") {
-        let session_id = session_id.trim();
-        let path = format!("/run/systemd/sessions/{session_id}");
-        if let Ok(contents) = std::fs::read_to_string(&path) {
-            for line in contents.lines() {
-                if let Some(seat) = line.strip_prefix("SEAT=")
-                    && !seat.is_empty()
-                {
-                    return seat.to_string();
-                }
-            }
+/// Uses the device's own modifier state and path for rule lookup, ensuring
+/// that modifier state on one keyboard does not affect another.
+fn process_device_events(
+    managed: &mut ManagedDevice,
+    virtual_device: &mut uinput::Device,
+    lookup: &Arc<RwLock<dyn Lookup>>,
+) {
+    // Drain all pending events from this non-blocking device.
+    let events = match managed.device.fetch_events() {
+        Ok(events) => events,
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            return;
         }
-    }
-
-    // Default fallback.
-    DEFAULT_SEAT.to_string()
-}
-
-/// Find the first keyboard input device that belongs to the current user seat.
-///
-/// This uses `udevrs` to enumerate devices tagged for the seat and filtered to
-/// keyboards.  If udev enumeration fails or returns no candidates it falls
-/// back to the legacy approach of scanning `/dev/input/event*`.
-pub fn find_keyboard_device()
--> Result<(Device, String), Box<dyn std::error::Error>> {
-    let seat = determine_seat();
-
-    // Try seat-aware udev enumeration first.
-    match find_keyboard_device_udev(&seat) {
-        Ok(device) => Ok(device),
         Err(e) => {
             eprintln!(
-                "Warning: udev keyboard discovery failed ({e}), falling back \
-                 to /dev/input scan"
+                "Linux: error reading events from {}: {}",
+                managed.path, e
             );
-            find_keyboard_device_fallback()
+            return;
+        }
+    };
+
+    for event in events {
+        if event.event_type() != EventType::KEY {
+            continue;
+        }
+
+        let code = event.code();
+        let value = event.value();
+
+        // Capture the modifier state to use for rule matching.  For modifier
+        // keys this is the pre-update snapshot so that bare-modifier triggers
+        // (e.g. "LeftControl: A") match correctly against the concurrent
+        // modifier set.
+        let lookup_modifiers = managed.modifiers;
+
+        if let Some(bit) = keycode_to_modifier_bit(code) {
+            if value == 1 {
+                managed.modifiers |= 1 << bit;
+            } else if value == 0 {
+                managed.modifiers &= !(1 << bit);
+            }
+        }
+
+        let device_path = &managed.path;
+
+        let guard = lookup.read();
+        let active_outputs = guard
+            .for_app(
+                &guard.active_app(),
+                code,
+                lookup_modifiers,
+                Some(device_path),
+            )
+            .or_else(|| {
+                guard.global(code, lookup_modifiers, Some(device_path))
+            })
+            .map(|v| v.to_vec());
+        drop(guard);
+
+        if let Some(outputs) = active_outputs {
+            // Emit mapped outputs and swallow the original event.  This
+            // applies to modifier keys as well: if a bare modifier
+            // (e.g. LeftControl alone) is mapped, its outputs are emitted
+            // and the original modifier press is NOT forwarded to the
+            // virtual device, preventing double emission.
+            if value == 1 {
+                for native_key in &outputs {
+                    if let Err(e) = emit_key_event(virtual_device, native_key)
+                    {
+                        eprintln!("emit error: {}", e);
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Forward the event to the virtual device.
+        if value == 1 {
+            if let Err(e) =
+                virtual_device.write(EventType::KEY.0 as _, code as _, 1)
+            {
+                eprintln!("write error: {}", e);
+            }
+        } else if value == 0 {
+            if let Err(e) =
+                virtual_device.write(EventType::KEY.0 as _, code as _, 0)
+            {
+                eprintln!("write error: {}", e);
+            }
+        } else {
+            // Repeat event (value == 2): emit as press+release to avoid
+            // key-stick on the virtual device.
+            if let Err(e) =
+                virtual_device.write(EventType::KEY.0 as _, code as _, 1)
+            {
+                eprintln!("write error: {}", e);
+            }
+            if let Err(e) =
+                virtual_device.write(EventType::KEY.0 as _, code as _, 0)
+            {
+                eprintln!("write error: {}", e);
+            }
+        }
+        if let Err(e) = virtual_device.synchronize() {
+            eprintln!("sync error: {}", e);
         }
     }
 }
 
-/// Find a keyboard device for `seat` using udev.
-fn find_keyboard_device_udev(
-    seat: &str,
-) -> Result<(Device, String), Box<dyn std::error::Error>> {
-    let mut enumerator = Enumerator::new()?;
+// ---------------------------------------------------------------------------
+// evdev event loop (epoll-based, multi-device)
+// ---------------------------------------------------------------------------
 
-    enumerator.match_subsystem("input")?;
-    enumerator.match_property("ID_INPUT_KEYBOARD", "1")?;
-    enumerator.scan_devices()?;
+/// Open a keyboard device, grab it, and prepare it for epoll monitoring.
+fn open_and_grab_device(
+    kb: &KeyboardInfo,
+) -> Result<ManagedDevice, Box<dyn std::error::Error>> {
+    let mut device = Device::open(&kb.device)?;
+    device.grab()?;
+    device.set_nonblocking(true)?;
 
-    for udev_device in enumerator.scan_devices()? {
-        // Note: Only seats other than 'seat0' are tagged with 'ID_SEAT'.
-        let dev_seat = udev_device
-            .property_value("ID_SEAT")
-            .map(|s| s.to_string_lossy())
-            .unwrap_or(DEFAULT_SEAT.into());
-        // Skip devices that do not belong to the target seat.
-        if dev_seat == seat
-            // Resolve the device node (e.g. /dev/input/event3).
-            && let Some(devnode) = udev_device.devnode()
-            // Get evdev::Device
-            && let Ok(device) = Device::open(devnode)
-            // Skip pointing devices announced as keyboards
-            && !device.supported_events().contains(EventType::ABSOLUTE)
-        {
-            return Ok((device, devnode.to_string_lossy().to_string()));
-        }
-    }
-
-    Err(format!("No keyboard device found for seat {seat}").into())
-}
-
-/// Fallback: scan `/dev/input/event*` and return the first keyboard-capable
-/// device.
-fn find_keyboard_device_fallback()
--> Result<(Device, String), Box<dyn std::error::Error>> {
-    use std::{fs, path::Path};
-
-    let input_path = Path::new("/dev/input");
-    if !input_path.exists() {
-        return Err("No /dev/input directory found.".into());
-    }
-
-    for entry in fs::read_dir(input_path)? {
-        let path = entry?.path();
-        if path.to_string_lossy().starts_with("/dev/input/event")
-            && let Ok(device) = Device::open(&path)
-            && device
-                .supported_keys()
-                .is_some_and(|keys| keys.contains(KeyCode::KEY_ENTER))
-        {
-            return Ok((device, path.to_string_lossy().to_string()));
-        }
-    }
-
-    Err("No keyboard device found. Try: sudo usermod -aG input $USER".into())
+    Ok(ManagedDevice {
+        device,
+        path: kb.device.clone(),
+        modifiers: 0,
+    })
 }
 
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
+    keyboards_to_grab: Vec<KeyboardInfo>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut raw_device, device_path) = find_keyboard_device()?;
-    raw_device.grab()?;
+    if keyboards_to_grab.is_empty() {
+        println!("No keyboards to grab. Waiting for events...");
+    }
+
+    // Open, grab and register all keyboards.
+    let mut managed_devices: Vec<ManagedDevice> = Vec::new();
+    for kb in &keyboards_to_grab {
+        match open_and_grab_device(kb) {
+            Ok(managed) => {
+                println!("Grabbed keyboard: {} ({})", managed.path, kb.name);
+                managed_devices.push(managed);
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to open/grab {}: {}", kb.device, e);
+            }
+        }
+    }
 
     let mut virtual_device = uinput::default()?
         .name("CrossPlatform_Virtual_Keyboard")?
@@ -284,101 +331,48 @@ pub fn start_mapping(
     register(SIGTERM, shutdown.clone())
         .expect("failed to register SIGTERM handler");
 
-    let mut active_modifiers: u8 = 0;
+    // Set up epoll for multiplexing across all managed devices.
+    let epoll = Epoll::new(EpollCreateFlags::empty())?;
+
+    for managed in &managed_devices {
+        let fd = managed.device.as_raw_fd();
+        epoll.add(
+            &managed.device,
+            EpollEvent::new(
+                EpollFlags::EPOLLIN | EpollFlags::EPOLLET,
+                fd as u64,
+            ),
+        )?;
+    }
+
+    let mut events = vec![EpollEvent::empty(); 64];
 
     while !shutdown.load(Ordering::Acquire) {
-        match raw_device.fetch_events() {
-            Ok(events) => {
-                for event in events {
-                    if event.event_type() == EventType::KEY {
-                        let code = event.code();
-                        let value = event.value();
+        match epoll.wait(&mut events, EpollTimeout::NONE) {
+            Ok(n) => {
+                for event in &events[..n] {
+                    let fd = event.data() as i32;
 
-                        // Capture the modifier state to use for rule matching.
-                        // For modifier keys this is the pre-update snapshot so
-                        // that bare-modifier triggers (e.g. "LeftControl: A")
-                        // match correctly against the concurrent modifier set.
-                        let lookup_modifiers = active_modifiers;
-
-                        if let Some(bit) = keycode_to_modifier_bit(code) {
-                            if value == 1 {
-                                active_modifiers |= 1 << bit;
-                            } else if value == 0 {
-                                active_modifiers &= !(1 << bit);
-                            }
-                        }
-
-                        let guard = lookup.read();
-                        let active_outputs = guard
-                            .for_app(
-                                &guard.active_app(),
-                                code,
-                                lookup_modifiers,
-                                Some(&device_path),
-                            )
-                            .or_else(|| {
-                                guard.global(
-                                    code,
-                                    lookup_modifiers,
-                                    Some(&device_path),
-                                )
-                            })
-                            .map(|v| v.to_vec());
-                        drop(guard);
-
-                        if let Some(outputs) = active_outputs {
-                            // Emit mapped outputs and swallow the original
-                            // event.  This applies to modifier keys as well:
-                            // if a bare modifier (e.g. LeftControl alone) is
-                            // mapped, its outputs are emitted and the original
-                            // modifier press is NOT forwarded to the virtual
-                            // device, preventing double emission.
-                            if value == 1 {
-                                for native_key in &outputs {
-                                    if let Err(e) = emit_key_event(
-                                        &mut virtual_device,
-                                        native_key,
-                                    ) {
-                                        eprintln!("emit error: {}", e);
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-
-                        if value == 1 {
-                            virtual_device.write(
-                                EventType::KEY.0 as _,
-                                code as _,
-                                1,
-                            )?;
-                        } else if value == 0 {
-                            virtual_device.write(
-                                EventType::KEY.0 as _,
-                                code as _,
-                                0,
-                            )?;
-                        } else {
-                            virtual_device.write(
-                                EventType::KEY.0 as _,
-                                code as _,
-                                1,
-                            )?;
-                            virtual_device.write(
-                                EventType::KEY.0 as _,
-                                code as _,
-                                0,
-                            )?;
-                        }
-                        virtual_device.synchronize()?;
+                    // Find the managed device for this file descriptor and
+                    // process its events.
+                    if let Some(managed) = managed_devices
+                        .iter_mut()
+                        .find(|m| m.device.as_raw_fd() == fd)
+                    {
+                        process_device_events(
+                            managed,
+                            &mut virtual_device,
+                            &lookup,
+                        );
                     }
                 }
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
+            Err(nix::errno::Errno::EINTR) => {
+                // Signal interruption — normal, just loop again.
+                continue;
             }
             Err(e) => {
-                eprintln!("Linux: error reading events: {}", e);
+                eprintln!("Linux: epoll wait error: {}", e);
                 thread::sleep(Duration::from_millis(100));
             }
         }
