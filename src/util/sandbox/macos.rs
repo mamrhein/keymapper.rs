@@ -143,13 +143,19 @@ impl MacoSandbox {
         let mask =
             (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::KeyUp.0);
 
+        // IMPORTANT: `tap_create` with a nil transformer returns a *listing*
+        // of existing taps, not a new tap. On a fresh system where no apps
+        // have Accessibility permissions, that list is empty and the call
+        // returns `None` regardless of whether *we* could create a tap.
+        // To actually probe our own permission, we must pass a real callback
+        // so the function creates a temporary probe tap.
         let probe = unsafe {
             CGEvent::tap_create(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 objc2_core_graphics::CGEventTapOptions::Default,
                 mask,
-                None,
+                Some(monitor_callback_ffi),
                 std::ptr::null_mut(),
             )
         };
