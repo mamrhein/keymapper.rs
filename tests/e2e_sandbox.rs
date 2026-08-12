@@ -28,6 +28,39 @@ use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
 // CI gate — e2e tests require elevated privileges and a clean environment
 // ---------------------------------------------------------------------------
 
+/// Cache the result of the e2e capability check.  We probe once at startup
+/// rather than per-test, because the result is a global property of the CI
+/// environment (Accessibility permission, HID driver availability, etc.).
+static CAN_RUN_E2E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+fn can_run_e2e() -> bool {
+    *CAN_RUN_E2E.get_or_init(|| {
+        if !should_run_e2e_raw() {
+            return false;
+        }
+
+        // Check that the sandbox can be created (probes Accessibility
+        // permission on macOS, root on Linux, etc.).
+        if !create_sandbox().is_ok_and(|opt| opt.is_some()) {
+            return false;
+        }
+
+        // When the driverkit feature is enabled, the virtual HID driver must
+        // also be available.
+        #[cfg(all(target_os = "macos", feature = "driverkit"))]
+        if keymapper::platform::HidSocket::discover_and_open().is_err() {
+            return false;
+        }
+
+        true
+    })
+}
+
+/// Raw check: is the `CI` env-var set?
+fn should_run_e2e_raw() -> bool {
+    env::var("CI").is_ok()
+}
+
 /// Check whether e2e tests should run.
 ///
 /// These tests require elevated rights (root on Linux for /dev/uinput,
@@ -35,8 +68,11 @@ use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
 /// on Windows) and are brittle outside CI due to interference from other
 /// applications' event hooks and taps.  The `CI` environment variable is
 /// set by GitHub Actions, GitLab CI, and most other CI systems.
+///
+/// The result is cached after the first call so we only probe system
+/// permissions once.
 fn should_run_e2e() -> bool {
-    env::var("CI").is_ok()
+    can_run_e2e()
 }
 
 // ---------------------------------------------------------------------------
@@ -205,30 +241,18 @@ where
     F: FnOnce(&dyn Sandbox),
 {
     if !should_run_e2e() {
-        eprintln!("skipping e2e test: not running in CI. Set CI=1 to enable.");
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
         return;
-    }
-
-    // When the driverkit feature is enabled, check for the virtual HID driver.
-    // Skip gracefully if it's not loaded — the CGEvent fallback is not
-    // sufficient for reliable e2e verification on modern macOS.
-    #[cfg(all(target_os = "macos", feature = "driverkit"))]
-    {
-        use keymapper::platform::HidSocket;
-        if let Err(e) = HidSocket::discover_and_open() {
-            eprintln!(
-                "skipping e2e test: virtual HID driver not connected \
-                 ({e}).\nRun `keymapper driver install` and approve in \
-                 System Settings."
-            );
-            return;
-        }
     }
 
     // Create config directory.
     let config_dir = write_config_dir(config);
 
-    // Create the sandbox — skip gracefully if not available.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match create_sandbox() {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -236,11 +260,17 @@ where
             std::fs::remove_dir_all(&config_dir).ok();
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -309,28 +339,18 @@ where
     F: FnOnce(&dyn Sandbox, &PathBuf, &mut DaemonGuard),
 {
     if !should_run_e2e() {
-        eprintln!("skipping e2e test: not running in CI. Set CI=1 to enable.");
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
         return;
-    }
-
-    // When the driverkit feature is enabled, check for the virtual HID driver.
-    #[cfg(all(target_os = "macos", feature = "driverkit"))]
-    {
-        use keymapper::platform::HidSocket;
-        if let Err(e) = HidSocket::discover_and_open() {
-            eprintln!(
-                "skipping e2e test: virtual HID driver not connected \
-                 ({e}).\nRun `keymapper driver install` and approve in \
-                 System Settings."
-            );
-            return;
-        }
     }
 
     // Create config directory.
     let config_dir = write_config_dir(initial_config);
 
-    // Create the sandbox — skip gracefully if not available.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match create_sandbox() {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -338,11 +358,17 @@ where
             std::fs::remove_dir_all(&config_dir).ok();
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -659,21 +685,28 @@ fn e2e_keyboard_filter() {
 
     // Only run in CI — requires elevated privileges.
     if !should_run_e2e() {
-        eprintln!("skipping e2e test: not running in CI. Set CI=1 to enable.");
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
         return;
     }
 
-    // Create the sandbox.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match LinuxSandbox::new() {
         Ok(Some(s)) => s,
         Ok(None) => {
             eprintln!("sandbox not available, skipping test");
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                return;
+            }
+            _ => panic!("sandbox creation failed unexpectedly: {e}"),
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -820,7 +853,10 @@ fn e2e_keyboard_filter() {
 fn e2e_keyboard_filter() {
     // Only run in CI — requires elevated privileges.
     if !should_run_e2e() {
-        eprintln!("skipping e2e test: not running in CI. Set CI=1 to enable.");
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
         return;
     }
 
@@ -883,7 +919,8 @@ groups:
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    // Create the sandbox — skip gracefully if not available.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match create_sandbox() {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -891,11 +928,17 @@ groups:
             std::fs::remove_dir_all(&config_dir).ok();
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -997,7 +1040,10 @@ groups:
 fn e2e_keyboard_filter() {
     // Only run in CI — restricts to CI per policy.
     if !should_run_e2e() {
-        eprintln!("skipping e2e test: not running in CI. Set CI=1 to enable.");
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
         return;
     }
 
@@ -1060,7 +1106,8 @@ groups:
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    // Create the sandbox — skip gracefully if not available.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match create_sandbox() {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -1068,11 +1115,17 @@ groups:
             std::fs::remove_dir_all(&config_dir).ok();
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
