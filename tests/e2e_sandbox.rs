@@ -211,7 +211,7 @@ impl Drop for DaemonGuard {
 ///
 /// When *device_path* is `Some`, passes it as `--device` to the daemon so it
 /// captures from the specified input device instead of auto-discovering.
-fn start_daemon_in_dir(config_dir: &PathBuf) -> DaemonGuard {
+fn start_daemon(config_dir: &PathBuf) -> DaemonGuard {
     use std::process::Stdio;
 
     let mut cmd = Command::new(daemon_bin_path());
@@ -303,7 +303,7 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let mut daemon = start_daemon(&config_dir);
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -402,7 +402,7 @@ where
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let mut daemon = start_daemon(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -763,10 +763,7 @@ fn e2e_keyboard_filter() {
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    // Spawn the daemon, passing the primary device path so it captures from
-    // the sandbox virtual keyboard.
-    let device_path = sandbox.input_device_id().map(|s| s.to_string());
-    let mut daemon = start_daemon_in_dir(&config_dir, device_path.as_deref());
+    let mut daemon = start_daemon(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -952,7 +949,7 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let mut daemon = start_daemon(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1128,7 +1125,7 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon_in_dir(&config_dir);
+    let mut daemon = start_daemon(&config_dir);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
