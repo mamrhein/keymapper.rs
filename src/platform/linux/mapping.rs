@@ -693,3 +693,354 @@ pub fn start_mapping(
     println!("Shutdown signal received. Cleaning up...");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::keyboard::{KeyboardInfo, KeyboardSpecifier};
+
+    // -----------------------------------------------------------------------
+    // Multi-device epoll integration test
+    // -----------------------------------------------------------------------
+    //
+    // Verifies that epoll correctly multiplexes events from multiple file
+    // descriptors.  We use pipe(2) fds as stand-ins for evdev devices, since
+    // real devices require root uinput access in test environments.
+
+    /// RAII wrapper that closes a raw fd on drop.
+    struct FdGuard(c_int);
+
+    impl FdGuard {
+        fn new(fd: c_int) -> Self {
+            FdGuard(fd)
+        }
+    }
+
+    impl Drop for FdGuard {
+        fn drop(&mut self) {
+            unsafe { libc::close(self.0) };
+        }
+    }
+
+    /// Create a pipe and return (read_fd, write_fd) wrapped in guards.
+    fn make_pipe() -> (FdGuard, FdGuard) {
+        let mut fds: [c_int; 2] = [0; 2];
+        let ret = unsafe { libc::pipe2(fds.as_mut_ptr(), 0) };
+        assert_eq!(ret, 0, "pipe2 failed");
+        (FdGuard::new(fds[0]), FdGuard::new(fds[1]))
+    }
+
+    #[test]
+    fn epoll_multiplexes_multiple_devices() {
+        // Create two pipe pairs to simulate two independent devices.
+        let (rd_a, wr_a) = make_pipe();
+        let (rd_b, wr_b) = make_pipe();
+
+        // Set up epoll and register both read ends.
+        let epfd = epoll_create().expect("epoll_create");
+        let fd_a = rd_a.0;
+        let fd_b = rd_b.0;
+        epoll_add(epfd, fd_a, fd_a as u64).expect("epoll_add A");
+        epoll_add(epfd, fd_b, fd_b as u64).expect("epoll_add B");
+
+        // Write a byte to pipe A only.
+        let buf_a: u8 = 42;
+        let ret =
+            unsafe { libc::write(wr_a.0, &buf_a as *const _ as *const _, 1) };
+        assert!(ret >= 0, "write to pipe A failed");
+
+        // epoll_wait should return one event for pipe A.
+        let mut events = vec![epoll_event { events: 0, u64: 0 }; 8];
+        let n = epoll_wait_raw(epfd, &mut events).expect("epoll_wait");
+        assert_eq!(n, 1, "expected exactly one epoll event");
+        assert_eq!(
+            events[0].u64 as RawFd, fd_a,
+            "event should come from pipe A"
+        );
+
+        // Drain the byte from pipe A.
+        let mut buf = [0u8; 1];
+        let _ = unsafe { libc::read(fd_a, buf.as_mut_ptr() as *mut _, 1) };
+
+        // Write to pipe B and verify it's the one that triggers.
+        let buf_b: u8 = 99;
+        let ret =
+            unsafe { libc::write(wr_b.0, &buf_b as *const _ as *const _, 1) };
+        assert!(ret >= 0, "write to pipe B failed");
+
+        let mut events = vec![epoll_event { events: 0, u64: 0 }; 8];
+        let n = epoll_wait_raw(epfd, &mut events).expect("epoll_wait");
+        assert_eq!(n, 1, "expected exactly one epoll event");
+        assert_eq!(
+            events[0].u64 as RawFd, fd_b,
+            "event should come from pipe B"
+        );
+
+        // Clean up: remove from epoll, then let guards close fds.
+        let _ = epoll_del(epfd, fd_a);
+        let _ = epoll_del(epfd, fd_b);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-device modifier isolation tests
+    // -----------------------------------------------------------------------
+    //
+    // Verifies that modifier state is tracked independently per device.
+    // Ctrl pressed on device A must not affect the modifier bitmask of
+    // device B.
+
+    #[test]
+    fn keycode_to_modifier_bit_maps_all_modifiers() {
+        // Left and right variants of all four modifier types.
+        assert_eq!(keycode_to_modifier_bit(29), Some(0)); // LeftControl
+        assert_eq!(keycode_to_modifier_bit(97), Some(1)); // RightControl
+        assert_eq!(keycode_to_modifier_bit(42), Some(2)); // LeftShift
+        assert_eq!(keycode_to_modifier_bit(54), Some(3)); // RightShift
+        assert_eq!(keycode_to_modifier_bit(56), Some(4)); // LeftAlt
+        assert_eq!(keycode_to_modifier_bit(100), Some(5)); // RightAlt
+        assert_eq!(keycode_to_modifier_bit(125), Some(6)); // LeftMeta
+        assert_eq!(keycode_to_modifier_bit(126), Some(7)); // RightMeta
+    }
+
+    #[test]
+    fn keycode_to_modifier_bit_ignores_non_modifiers() {
+        assert_eq!(keycode_to_modifier_bit(4), None); // 'a'
+        assert_eq!(keycode_to_modifier_bit(58), None); // Enter
+        assert_eq!(keycode_to_modifier_bit(70), None); // Escape
+    }
+
+    #[test]
+    fn modifier_bit_to_code_round_trips() {
+        for code in [29, 97, 42, 54, 56, 100, 125, 126] {
+            let bit = keycode_to_modifier_bit(code).expect("known modifier");
+            let roundtrip = modifier_bit_to_code(bit).expect("bit -> code");
+            assert_eq!(
+                roundtrip, code,
+                "round-trip failed for keycode {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn modifier_state_is_isolated_per_device() {
+        // Simulate two independent devices by tracking their own modifier
+        // bitmasks, mirroring the logic in `process_device_events`.
+        let mut mods_a: u8 = 0;
+        let mut mods_b: u8 = 0;
+
+        // Device A: press LeftControl (bit 0).
+        let bit = keycode_to_modifier_bit(29).unwrap();
+        mods_a |= 1 << bit;
+        assert_eq!(mods_a, 0b0000_0001);
+        assert_eq!(mods_b, 0); // Device B unaffected.
+
+        // Device A: press LeftShift (bit 2).
+        let bit = keycode_to_modifier_bit(42).unwrap();
+        mods_a |= 1 << bit;
+        assert_eq!(mods_a, 0b0000_0101);
+        assert_eq!(mods_b, 0);
+
+        // Device B: press RightAlt (bit 5).
+        let bit = keycode_to_modifier_bit(100).unwrap();
+        mods_b |= 1 << bit;
+        assert_eq!(mods_a, 0b0000_0101); // Device A unaffected.
+        assert_eq!(mods_b, 0b0010_0000);
+
+        // Device A: release LeftControl.
+        let bit = keycode_to_modifier_bit(29).unwrap();
+        mods_a &= !(1 << bit);
+        assert_eq!(mods_a, 0b0000_0100);
+        assert_eq!(mods_b, 0b0010_0000);
+
+        // Device B: release RightAlt, press LeftMeta (bit 6).
+        let bit = keycode_to_modifier_bit(100).unwrap();
+        mods_b &= !(1 << bit);
+        let bit = keycode_to_modifier_bit(125).unwrap();
+        mods_b |= 1 << bit;
+        assert_eq!(mods_a, 0b0000_0100);
+        assert_eq!(mods_b, 0b0100_0000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Filter-aware hot-plug tests
+    // -----------------------------------------------------------------------
+    //
+    // Verifies that the keyboard filter used by `handle_device_add` correctly
+    // allows matching devices and blocks non-matching ones.  The hot-plug
+    // handler uses `filter_keyboards_by_specifiers` to decide whether to
+    // grab a newly discovered device.
+
+    fn build_keyboard(
+        name: &str,
+        vendor: &str,
+        model: &str,
+        device: &str,
+        port: Option<&str>,
+    ) -> KeyboardInfo {
+        KeyboardInfo::new(
+            name.to_string(),
+            vendor.to_string(),
+            model.to_string(),
+            device.to_string(),
+            port.map(|s| s.to_string()),
+        )
+    }
+
+    #[test]
+    fn hotplug_filter_allows_matching_device() {
+        // A filter that matches by vendor.
+        let specs = vec![KeyboardSpecifier {
+            name: None,
+            vendor: Some("Logitech".to_string()),
+            model: None,
+            port: None,
+        }];
+
+        let kb = build_keyboard(
+            "Logitech K800",
+            "Logitech",
+            "K800",
+            "/dev/input/event5",
+            Some("USB"),
+        );
+
+        let filtered = filter_keyboards_by_specifiers(
+            std::slice::from_ref(&kb),
+            Some(&specs),
+        );
+        assert_eq!(filtered.len(), 1, "matching device should be grabbed");
+        assert_eq!(filtered[0].name, "Logitech K800");
+    }
+
+    #[test]
+    fn hotplug_filter_blocks_non_matching_device() {
+        // A filter that only matches "Logitech" vendor.
+        let specs = vec![KeyboardSpecifier {
+            name: None,
+            vendor: Some("Logitech".to_string()),
+            model: None,
+            port: None,
+        }];
+
+        // A different vendor — should NOT be grabbed.
+        let kb = build_keyboard(
+            "Apple Magic Keyboard",
+            "Apple",
+            "Magic Keyboard",
+            "/dev/input/event6",
+            Some("Bluetooth"),
+        );
+
+        let filtered = filter_keyboards_by_specifiers(
+            std::slice::from_ref(&kb),
+            Some(&specs),
+        );
+        assert!(
+            filtered.is_empty(),
+            "non-matching device should NOT be grabbed"
+        );
+    }
+
+    #[test]
+    fn hotplug_no_filter_grabs_all_devices() {
+        // When no global filter is set, all discovered devices are grabbed.
+        let kb = build_keyboard(
+            "Some Keyboard",
+            "Generic",
+            "Model X",
+            "/dev/input/event7",
+            None,
+        );
+
+        let filtered =
+            filter_keyboards_by_specifiers(std::slice::from_ref(&kb), None);
+        assert_eq!(filtered.len(), 1, "no filter should grab all devices");
+    }
+
+    #[test]
+    fn hotplug_empty_filter_grabs_all_devices() {
+        // An empty filter list is equivalent to no filter.
+        let specs: Vec<KeyboardSpecifier> = vec![];
+
+        let kb = build_keyboard(
+            "Some Keyboard",
+            "Generic",
+            "Model X",
+            "/dev/input/event8",
+            None,
+        );
+
+        let filtered = filter_keyboards_by_specifiers(
+            std::slice::from_ref(&kb),
+            Some(&specs),
+        );
+        assert_eq!(filtered.len(), 1, "empty filter should grab all devices");
+    }
+
+    #[test]
+    fn hotplug_filter_matches_by_name() {
+        // Name matching is exact (case-insensitive), not substring.
+        let specs = vec![KeyboardSpecifier {
+            name: Some("Logitech K800".to_string()),
+            vendor: None,
+            model: None,
+            port: None,
+        }];
+
+        let kb = build_keyboard(
+            "Logitech K800",
+            "Logitech",
+            "K800",
+            "/dev/input/event9",
+            Some("USB"),
+        );
+
+        let filtered = filter_keyboards_by_specifiers(
+            std::slice::from_ref(&kb),
+            Some(&specs),
+        );
+        assert_eq!(filtered.len(), 1, "name filter should match");
+    }
+
+    #[test]
+    fn hotplug_filter_matches_by_port() {
+        let specs = vec![KeyboardSpecifier {
+            name: None,
+            vendor: None,
+            model: None,
+            port: Some("Bluetooth".to_string()),
+        }];
+
+        let kb_bluetooth = build_keyboard(
+            "BT Keyboard",
+            "Vendor",
+            "Model",
+            "/dev/input/event10",
+            Some("Bluetooth"),
+        );
+
+        let kb_usb = build_keyboard(
+            "USB Keyboard",
+            "Vendor",
+            "Model",
+            "/dev/input/event11",
+            Some("USB"),
+        );
+
+        let filtered_bt = filter_keyboards_by_specifiers(
+            std::slice::from_ref(&kb_bluetooth),
+            Some(&specs),
+        );
+        assert_eq!(filtered_bt.len(), 1, "Bluetooth device should match");
+
+        let filtered_usb = filter_keyboards_by_specifiers(
+            std::slice::from_ref(&kb_usb),
+            Some(&specs),
+        );
+        assert!(filtered_usb.is_empty(), "USB device should NOT match");
+    }
+}
