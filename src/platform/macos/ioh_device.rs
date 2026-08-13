@@ -418,6 +418,20 @@ impl IOHidFunctions {
 }
 
 // ---------------------------------------------------------------------------
+// IOHIDManager availability probe
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when all required IOHIDManager symbols can be resolved from
+/// IOKit at runtime.
+///
+/// This is a lightweight probe used by the e2e test harness to skip tests
+/// when IOHIDManager is not available in the current environment (e.g. a
+/// sandboxed runner where `dlopen`/`dlsym` on IOKit fails).
+pub fn iohid_available() -> bool {
+    IOHidFunctions::resolve()
+}
+
+// ---------------------------------------------------------------------------
 // IOHIDManager driver — high-level API
 // ---------------------------------------------------------------------------
 

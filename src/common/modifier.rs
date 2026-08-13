@@ -65,6 +65,7 @@ impl ModifierRole {
 
     /// Try to create a `ModifierRole` from a bit position.  Returns `None`
     /// for values outside 0..8.
+    #[allow(dead_code)]
     pub(crate) const fn try_from_bit(bit: u8) -> Option<Self> {
         match bit {
             0 => Some(Self::LeftControl),

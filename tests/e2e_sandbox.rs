@@ -13,10 +13,6 @@
 //! synthetic keyboard events via the platform sandbox, and verify that
 //! the daemon's remapped output matches expectations.
 
-#[cfg(unix)]
-use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::{
     env,
     path::{Path, PathBuf},
@@ -27,66 +23,64 @@ use std::{
 };
 
 use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
-#[cfg(unix)]
-use libc::{LOCK_EX, LOCK_NB, LOCK_UN};
 
-#[cfg(unix)]
-/// Cross-process serialization guard for e2e tests.
-///
-/// Nextest spawns separate processes per test (each with "6 filtered out"), so
-/// a Rust `static Mutex` won't coordinate across them.  macOS event taps are
-/// session-global — parallel daemons and monitors interfere with each other.
-/// We use a POSIX `flock`-based file lock to ensure only one e2e test runs
-/// at a time across all nextest worker processes.
-struct E2eFileLock {
-    file: std::fs::File,
-}
+// ---------------------------------------------------------------------------
+// CI gate — e2e tests require elevated privileges and a clean environment
+// ---------------------------------------------------------------------------
 
-#[cfg(unix)]
-impl E2eFileLock {
-    fn acquire() -> std::io::Result<Self> {
-        let lock_path = env::temp_dir().join("keymapper_e2e.lock");
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .read(true)
-            .write(true)
-            .open(&lock_path)?;
+/// Cache the result of the e2e capability check.  We probe once at startup
+/// rather than per-test, because the result is a global property of the CI
+/// environment (Accessibility permission, HID driver availability, etc.).
+static CAN_RUN_E2E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-        // Retry until we acquire the exclusive lock.  Other e2e test processes
-        // will block here until the current holder finishes.
-        loop {
-            let rc =
-                unsafe { libc::flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
-            if rc == 0 {
-                return Ok(Self { file });
-            }
-            // flock returned -1 on error.  Check if it's EWOULDBLOCK (another
-            // process holds the lock) — if so, retry.  Otherwise propagate.
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(err);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+fn can_run_e2e() -> bool {
+    *CAN_RUN_E2E.get_or_init(|| {
+        if !should_run_e2e_raw() {
+            return false;
         }
-    }
+
+        // Check that the sandbox can be created (probes Accessibility
+        // permission on macOS, root on Linux, etc.).
+        if !create_sandbox().is_ok_and(|opt| opt.is_some()) {
+            return false;
+        }
+
+        // On macOS, IOHIDManager symbols must be resolvable from IOKit.
+        // In some environments (sandboxed runners, certain CI configs) dlsym
+        // on IOKit fails even though the framework exists on disk.
+        #[cfg(target_os = "macos")]
+        if !keymapper::platform::iohid_available() {
+            return false;
+        }
+
+        // When the driverkit feature is enabled, the virtual HID driver must
+        // also be available.
+        #[cfg(all(target_os = "macos", feature = "driverkit"))]
+        if keymapper::platform::HidSocket::discover_and_open().is_err() {
+            return false;
+        }
+
+        true
+    })
 }
 
-#[cfg(unix)]
-impl Drop for E2eFileLock {
-    fn drop(&mut self) {
-        let _ = unsafe { libc::flock(self.file.as_raw_fd(), LOCK_UN) };
-    }
+/// Raw check: is the `CI` env-var set?
+fn should_run_e2e_raw() -> bool {
+    env::var("CI").is_ok()
 }
 
-#[cfg(not(unix))]
-struct E2eFileLock;
-
-#[cfg(not(unix))]
-impl E2eFileLock {
-    fn acquire() -> std::io::Result<Self> {
-        Ok(Self)
-    }
+/// Check whether e2e tests should run.
+///
+/// These tests require elevated rights (root on Linux for /dev/uinput,
+/// root on macOS to bypass TCC Accessibility, and a clean desktop session
+/// on Windows) and are brittle outside CI due to interference from other
+/// applications' event hooks and taps.  The `CI` environment variable is
+/// set by GitHub Actions, GitLab CI, and most other CI systems.
+///
+/// The result is cached after the first call so we only probe system
+/// permissions once.
+fn should_run_e2e() -> bool {
+    can_run_e2e()
 }
 
 // ---------------------------------------------------------------------------
@@ -209,14 +203,28 @@ impl Drop for DaemonGuard {
 /// Spawn the `keymapperd` binary in *config_dir* and return a guard that
 /// ensures the child is killed on `Drop`.
 ///
-/// Starts the daemon binary with the given config directory.
-fn start_daemon(config_dir: &PathBuf) -> DaemonGuard {
+/// When *events_file* is `Some`, passes it as `KEYMAPPER_TEST_OUTPUT` to the
+/// daemon so that output events are written to the file instead of injected
+/// via `SendInput`. This works around the Windows limitation where `SendInput`
+/// from within a hook callback does not trigger other hooks.
+#[allow(unused_variables)]
+fn start_daemon(
+    config_dir: &PathBuf,
+    events_file: Option<&Path>,
+) -> DaemonGuard {
     use std::process::Stdio;
 
     let mut cmd = Command::new(daemon_bin_path());
     cmd.current_dir(config_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+
+    // On Windows, pass the events file path to the daemon so it writes
+    // outputs to a file instead of calling `SendInput`.
+    #[cfg(target_os = "windows")]
+    if let Some(path) = events_file {
+        cmd.env("KEYMAPPER_TEST_OUTPUT", path);
+    }
 
     let mut child = cmd.spawn().expect("failed to spawn keymapperd");
 
@@ -253,30 +261,19 @@ fn run_e2e_test<F>(config: &str, test_fn: F)
 where
     F: FnOnce(&dyn Sandbox),
 {
-    // Serialize e2e tests across nextest worker processes.  macOS event taps
-    // are session-global, so parallel daemons/monitors interfere.
-    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
-
-    // When the driverkit feature is enabled, check for the virtual HID driver.
-    // Skip gracefully if it's not loaded — the CGEvent fallback is not
-    // sufficient for reliable e2e verification on modern macOS.
-    #[cfg(all(target_os = "macos", feature = "driverkit"))]
-    {
-        use keymapper::platform::HidSocket;
-        if let Err(e) = HidSocket::discover_and_open() {
-            eprintln!(
-                "skipping e2e test: virtual HID driver not connected \
-                 ({e}).\nRun `keymapper driver install` and approve in \
-                 System Settings."
-            );
-            return;
-        }
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
+        return;
     }
 
     // Create config directory.
     let config_dir = write_config_dir(config);
 
-    // Create the sandbox — skip gracefully if not available.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match create_sandbox() {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -284,11 +281,17 @@ where
             std::fs::remove_dir_all(&config_dir).ok();
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -301,14 +304,33 @@ where
     // so it captures all events from the beginning.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
+    // On Windows, create an events file for the daemon to write outputs to.
+    // This works around the limitation where `SendInput` from within a hook
+    // callback does not trigger other hooks.
+    #[cfg(target_os = "windows")]
+    let events_file = config_dir.join("events.txt");
+    #[cfg(target_os = "windows")]
+    std::fs::write(&events_file, "").expect("failed to create events file");
+
     // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    let mut daemon = start_daemon(&config_dir);
+    #[cfg(target_os = "windows")]
+    let mut daemon = start_daemon(&config_dir, Some(&events_file));
+    #[cfg(not(target_os = "windows"))]
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     std::thread::sleep(std::time::Duration::from_millis(500));
 
+    // On Windows, set the env var so the sandbox reads events from the file.
+    #[cfg(target_os = "windows")]
+    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
+
     // Run the test body.
     test_fn(&*sandbox);
+
+    // Clear the env var after the test.
+    #[cfg(target_os = "windows")]
+    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
 
     // Teardown: kill the daemon and clean up the sandbox.
     daemon.kill();
@@ -356,27 +378,19 @@ fn run_e2e_test_with_reload<F>(initial_config: &str, test_fn: F)
 where
     F: FnOnce(&dyn Sandbox, &PathBuf, &mut DaemonGuard),
 {
-    // Serialize e2e tests across nextest worker processes.
-    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
-
-    // When the driverkit feature is enabled, check for the virtual HID driver.
-    #[cfg(all(target_os = "macos", feature = "driverkit"))]
-    {
-        use keymapper::platform::HidSocket;
-        if let Err(e) = HidSocket::discover_and_open() {
-            eprintln!(
-                "skipping e2e test: virtual HID driver not connected \
-                 ({e}).\nRun `keymapper driver install` and approve in \
-                 System Settings."
-            );
-            return;
-        }
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
+        return;
     }
 
     // Create config directory.
     let config_dir = write_config_dir(initial_config);
 
-    // Create the sandbox — skip gracefully if not available.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match create_sandbox() {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -384,11 +398,17 @@ where
             std::fs::remove_dir_all(&config_dir).ok();
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -400,17 +420,34 @@ where
     // Give the monitor tap a moment to stabilize.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
+    // On Windows, create an events file for the daemon to write outputs to.
+    #[cfg(target_os = "windows")]
+    let events_file = config_dir.join("events.txt");
+    #[cfg(target_os = "windows")]
+    std::fs::write(&events_file, "").expect("failed to create events file");
+
     // Spawn the daemon.
-    let mut daemon = start_daemon(&config_dir);
+    #[cfg(target_os = "windows")]
+    let mut daemon = start_daemon(&config_dir, Some(&events_file));
+    #[cfg(not(target_os = "windows"))]
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // On Windows, set the env var so the sandbox reads events from the file.
+    #[cfg(target_os = "windows")]
+    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
 
     // Drain any events captured during startup.
     let _ = sandbox.drain_output_events();
 
     // Run the multi-phase test body.
     test_fn(&*sandbox, &config_dir, &mut daemon);
+
+    // Clear the env var after the test.
+    #[cfg(target_os = "windows")]
+    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
 
     // Teardown.
     daemon.kill();
@@ -703,20 +740,30 @@ fn e2e_keyboard_filter() {
         LinuxSandbox, linux::INPUT_DEVICE_NAME_PREFIX,
     };
 
-    // Serialize e2e tests.
-    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
+    // Only run in CI — requires elevated privileges.
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
+        return;
+    }
 
-    // Create the sandbox.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match LinuxSandbox::new() {
         Ok(Some(s)) => s,
         Ok(None) => {
             eprintln!("sandbox not available, skipping test");
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                return;
+            }
+            _ => panic!("sandbox creation failed unexpectedly: {e}"),
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -762,7 +809,7 @@ fn e2e_keyboard_filter() {
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    let mut daemon = start_daemon(&config_dir);
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -861,8 +908,14 @@ fn e2e_keyboard_filter() {
 #[cfg(target_os = "macos")]
 #[test]
 fn e2e_keyboard_filter() {
-    // Serialize e2e tests across nextest worker processes.
-    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
+    // Only run in CI — requires elevated privileges.
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
+        return;
+    }
 
     // Discover attached keyboards.
     let keyboards = match keymapper::platform::list_keyboards() {
@@ -923,7 +976,8 @@ groups:
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    // Create the sandbox — skip gracefully if not available.
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
     let mut sandbox = match create_sandbox() {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -931,11 +985,17 @@ groups:
             std::fs::remove_dir_all(&config_dir).ok();
             return;
         }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
     };
 
     sandbox.setup().unwrap_or_else(|e| {
@@ -948,183 +1008,7 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon(&config_dir);
-
-    // Allow the daemon to initialize.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Drain any events captured during startup.
-    let _ = sandbox.drain_output_events();
-
-    // Inject CapsLock via CGEvent.  On macOS, CGEvent injection bypasses
-    // IOHIDManager, so the daemon never sees this event. The monitor tap
-    // captures it at the HIDEventTap layer, so it always appears in output.
-    // This validates that the sandbox infrastructure works, but cannot
-    // verify that keyboard filtering suppresses mapped keys from real
-    // keyboards.
-    sandbox
-        .inject_key_down(codes::CAPSLOCK)
-        .expect("inject key down");
-    sandbox
-        .inject_key_up(codes::CAPSLOCK)
-        .expect("inject key up");
-
-    let events = sandbox.drain_output_events();
-
-    // CGEvent-injected events always reach the monitor tap, regardless of
-    // daemon mappings. We verify that the injection and capture infrastructure
-    // works correctly.
-    assert_eq!(
-        events,
-        vec![
-            CapturedEvent {
-                code: codes::CAPSLOCK,
-                is_down: true,
-            },
-            CapturedEvent {
-                code: codes::CAPSLOCK,
-                is_down: false,
-            },
-        ],
-        "CGEvent-injected CapsLock should reach the monitor tap. Note: this \
-         does NOT verify keyboard filtering, because CGEvent injection \
-         bypasses IOHIDManager. For real filtering verification, press \
-         CapsLock on an attached keyboard and observe whether it is remapped \
-         to LeftControl."
-    );
-
-    eprintln!(
-        "keyboard filter test: daemon running with filter for '{}' \
-         (vendor={}). CGEvent injection bypasses IOHIDManager, so the \
-         sandbox cannot verify mapped key suppression. To verify filtering, \
-         press CapsLock on the '{}' keyboard and observe whether it is \
-         remapped to LeftControl.",
-        target.name, target.vendor, target.name
-    );
-
-    // Teardown.
-    daemon.kill();
-    sandbox.teardown();
-    std::fs::remove_dir_all(&config_dir).ok();
-}
-
-/// Verify that a keyboard filter restricts mappings to matching devices on
-/// Windows.
-///
-/// Unlike the Linux test, Windows uses Raw Input (`WM_INPUT`) for device
-/// identification. `SendInput` injection does NOT generate `WM_INPUT` events,
-/// so the worker thread has no Raw Input buffer entries to match against.
-/// After a 10 ms delay, the worker falls back to a lookup without device
-/// identification. This means:
-///
-/// 1. Keyboard filtering is effectively bypassed for `SendInput` events.
-/// 2. The mapping still works because the worker finds the rule without device
-///    filtering.
-/// 3. Real physical keyboard events (which DO trigger Raw Input) are subject
-///    to the keyboard filter.
-///
-/// This test validates:
-/// 1. Keyboard discovery via `list_keyboards()` works on Windows.
-/// 2. A keyboard-filtered config is constructed correctly from discovered
-///    device metadata.
-/// 3. The daemon starts and runs with the filtered config.
-/// 4. The mapping still works for `SendInput` events (worker falls back to
-///    no-device-ID lookup).
-///
-/// To fully verify keyboard filtering, a real physical keyboard must be used.
-/// The test logs the discovered keyboards and the filter config so a user can
-/// manually verify filtering by pressing keys on an attached keyboard.
-#[cfg(target_os = "windows")]
-#[test]
-fn e2e_keyboard_filter() {
-    // Serialize e2e tests across nextest worker processes.
-    let _lock = E2eFileLock::acquire().expect("failed to acquire e2e lock");
-
-    // Discover attached keyboards.
-    let keyboards = match keymapper::platform::list_keyboards() {
-        Ok(kbs) => kbs,
-        Err(e) => {
-            eprintln!("keyboard discovery failed: {e}, skipping test");
-            return;
-        }
-    };
-
-    if keyboards.is_empty() {
-        eprintln!("no keyboards discovered, skipping test");
-        return;
-    }
-
-    eprintln!("discovered {} keyboard(s):", keyboards.len());
-    for kb in &keyboards {
-        eprintln!(
-            "  - name={}, vendor={}, model={}, device={}",
-            kb.name, kb.vendor, kb.model, kb.device
-        );
-    }
-
-    // Build a keyboard filter that matches the first discovered keyboard.
-    let target = &keyboards[0];
-    let config_content =
-        if !target.vendor.is_empty() && target.vendor != "0x0000" {
-            // Filter by vendor — the most stable identifier.
-            format!(
-                r#"keyboards:
-  - vendor: "{vendor}"
-groups:
-  - mappings:
-      CapsLock: LeftControl"#,
-                vendor = target.vendor
-            )
-        } else {
-            // Fallback: filter by name if vendor is not available.
-            format!(
-                r#"keyboards:
-  - name: "{name}"
-groups:
-  - mappings:
-      CapsLock: LeftControl"#,
-                name = target.name
-            )
-        };
-
-    eprintln!("keyboard filter config:\n{}", config_content);
-
-    // Create config directory.
-    let seq =
-        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let pid = std::process::id();
-    let config_dir =
-        env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
-    std::fs::create_dir_all(&config_dir).expect("failed to create temp dir");
-    std::fs::write(config_dir.join("config.yaml"), &config_content)
-        .expect("failed to write config");
-
-    // Create the sandbox — skip gracefully if not available.
-    let mut sandbox = match create_sandbox() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            eprintln!("sandbox not available on this platform, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
-        Err(e) => {
-            eprintln!("sandbox creation failed: {e}, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
-    };
-
-    sandbox.setup().unwrap_or_else(|e| {
-        eprintln!("sandbox setup failed: {e}, skipping test");
-        std::fs::remove_dir_all(&config_dir).ok();
-        std::process::exit(0);
-    });
-
-    // Give the monitor tap a moment to stabilize.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon(&config_dir);
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1175,6 +1059,200 @@ groups:
          and observe whether it is remapped to LeftControl.",
         target.name, target.vendor, target.name
     );
+
+    // Teardown.
+    daemon.kill();
+    sandbox.teardown();
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
+/// Verify that a keyboard filter restricts mappings to matching devices on
+/// Windows.
+///
+/// Unlike the Linux test, Windows uses Raw Input (`WM_INPUT`) for device
+/// identification. `SendInput` injection does NOT generate `WM_INPUT` events,
+/// so the worker thread has no Raw Input buffer entries to match against.
+/// After a 10 ms delay, the worker falls back to a lookup without device
+/// identification. This means:
+///
+/// 1. Keyboard filtering is effectively bypassed for `SendInput` events.
+/// 2. The mapping still works because the worker finds the rule without device
+///    filtering.
+/// 3. Real physical keyboard events (which DO trigger Raw Input) are subject
+///    to the keyboard filter.
+///
+/// This test validates:
+/// 1. Keyboard discovery via `list_keyboards()` works on Windows.
+/// 2. A keyboard-filtered config is constructed correctly from discovered
+///    device metadata.
+/// 3. The daemon starts and runs with the filtered config.
+/// 4. The mapping still works for `SendInput` events (worker falls back to
+///    no-device-ID lookup).
+///
+/// To fully verify keyboard filtering, a real physical keyboard must be used.
+/// The test logs the discovered keyboards and the filter config so a user can
+/// manually verify filtering by pressing keys on an attached keyboard.
+#[cfg(target_os = "windows")]
+#[test]
+fn e2e_keyboard_filter() {
+    // Only run in CI — restricts to CI per policy.
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: sandbox not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
+        return;
+    }
+
+    // Discover attached keyboards.
+    let keyboards = match keymapper::platform::list_keyboards() {
+        Ok(kbs) => kbs,
+        Err(e) => {
+            eprintln!("keyboard discovery failed: {e}, skipping test");
+            return;
+        }
+    };
+
+    if keyboards.is_empty() {
+        eprintln!("no keyboards discovered, skipping test");
+        return;
+    }
+
+    eprintln!("discovered {} keyboard(s):", keyboards.len());
+    for kb in &keyboards {
+        eprintln!(
+            "  - name={}, vendor={}, model={}, device={}",
+            kb.name, kb.vendor, kb.model, kb.device
+        );
+    }
+
+    // Build a keyboard filter that matches the first discovered keyboard.
+    let target = &keyboards[0];
+    let config_content =
+        if !target.vendor.is_empty() && target.vendor != "0x0000" {
+            // Filter by vendor — the most stable identifier.
+            format!(
+                r#"keyboards:
+  - vendor: "{vendor}"
+groups:
+  - mappings:
+      CapsLock: LeftControl"#,
+                vendor = target.vendor
+            )
+        } else {
+            // Fallback: filter by name if vendor is not available.
+            format!(
+                r#"keyboards:
+  - name: "{name}"
+groups:
+  - mappings:
+      CapsLock: LeftControl"#,
+                name = target.name
+            )
+        };
+
+    eprintln!("keyboard filter config:\n{}", config_content);
+
+    // Create config directory.
+    let seq =
+        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let config_dir =
+        env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
+    std::fs::create_dir_all(&config_dir).expect("failed to create temp dir");
+    std::fs::write(config_dir.join("config.yaml"), &config_content)
+        .expect("failed to write config");
+
+    // Create the sandbox — at this point permissions were already verified by
+    // `should_run_e2e()`, so a failure indicates a real problem.
+    let mut sandbox = match create_sandbox() {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            eprintln!("sandbox not available on this platform, skipping test");
+            std::fs::remove_dir_all(&config_dir).ok();
+            return;
+        }
+        Err(e) => match &e {
+            SandboxError::PermissionDenied(_) => {
+                eprintln!("sandbox creation failed: {e}, skipping test");
+                std::fs::remove_dir_all(&config_dir).ok();
+                return;
+            }
+            _ => {
+                std::fs::remove_dir_all(&config_dir).ok();
+                panic!("sandbox creation failed unexpectedly: {e}");
+            }
+        },
+    };
+
+    sandbox.setup().unwrap_or_else(|e| {
+        eprintln!("sandbox setup failed: {e}, skipping test");
+        std::fs::remove_dir_all(&config_dir).ok();
+        std::process::exit(0);
+    });
+
+    // Give the monitor hook a moment to stabilize.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Create an events file for the daemon to write outputs to.
+    let events_file = config_dir.join("events.txt");
+    std::fs::write(&events_file, "").expect("failed to create events file");
+
+    // Spawn the daemon.
+    let mut daemon = start_daemon(&config_dir, Some(&events_file));
+
+    // Allow the daemon to initialize.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Set the env var so the sandbox reads events from the file.
+    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
+
+    // Drain any events captured during startup.
+    let _ = sandbox.drain_output_events();
+
+    // Inject CapsLock via SendInput.  On Windows, SendInput does not generate
+    // WM_INPUT events, so the daemon's Raw Input device matching has no
+    // entries to compare against. After a 10 ms delay, the worker falls back
+    // to a lookup without device identification, meaning the mapping IS
+    // applied.
+    sandbox
+        .inject_key_down(codes::CAPSLOCK)
+        .expect("inject key down");
+    sandbox
+        .inject_key_up(codes::CAPSLOCK)
+        .expect("inject key up");
+
+    let events = sandbox.drain_output_events();
+
+    // Because SendInput bypasses Raw Input, the worker falls back to a global
+    // lookup and the mapping is applied.
+    assert_eq!(
+        events,
+        vec![
+            CapturedEvent {
+                code: codes::LEFT_CONTROL,
+                is_down: true,
+            },
+            CapturedEvent {
+                code: codes::LEFT_CONTROL,
+                is_down: false,
+            },
+        ],
+        "SendInput-injected CapsLock should be remapped to LeftControl via \
+         the worker's fallback lookup (Raw Input device matching is bypassed \
+         for synthetic events)"
+    );
+
+    eprintln!(
+        "keyboard filter test: daemon running with filter for '{}' \
+         (vendor={}). SendInput bypasses Raw Input, so the mapping is \
+         applied via fallback lookup. To verify filtering, press CapsLock on \
+         the '{}' keyboard and observe whether it is remapped to LeftControl.",
+        target.name, target.vendor, target.name
+    );
+
+    // Clear the env var.
+    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
 
     // Teardown.
     daemon.kill();
