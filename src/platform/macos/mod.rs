@@ -18,6 +18,7 @@ mod mapping;
 pub(crate) use active_app::get_active_app_name;
 #[cfg(feature = "driverkit")]
 pub use hid_socket::HidSocket;
+pub use ioh_device::iohid_available;
 pub use key::Key;
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;
