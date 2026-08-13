@@ -195,15 +195,28 @@ impl Drop for DaemonGuard {
 /// Spawn the `keymapperd` binary in *config_dir* and return a guard that
 /// ensures the child is killed on `Drop`.
 ///
-/// When *device_path* is `Some`, passes it as `--device` to the daemon so it
-/// captures from the specified input device instead of auto-discovering.
-fn start_daemon(config_dir: &PathBuf) -> DaemonGuard {
+/// When *events_file* is `Some`, passes it as `KEYMAPPER_TEST_OUTPUT` to the
+/// daemon so that output events are written to the file instead of injected
+/// via `SendInput`. This works around the Windows limitation where `SendInput`
+/// from within a hook callback does not trigger other hooks.
+#[allow(unused_variables)]
+fn start_daemon(
+    config_dir: &PathBuf,
+    events_file: Option<&Path>,
+) -> DaemonGuard {
     use std::process::Stdio;
 
     let mut cmd = Command::new(daemon_bin_path());
     cmd.current_dir(config_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
+
+    // On Windows, pass the events file path to the daemon so it writes
+    // outputs to a file instead of calling `SendInput`.
+    #[cfg(target_os = "windows")]
+    if let Some(path) = events_file {
+        cmd.env("KEYMAPPER_TEST_OUTPUT", path);
+    }
 
     let mut child = cmd.spawn().expect("failed to spawn keymapperd");
 
@@ -283,14 +296,33 @@ where
     // so it captures all events from the beginning.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
+    // On Windows, create an events file for the daemon to write outputs to.
+    // This works around the limitation where `SendInput` from within a hook
+    // callback does not trigger other hooks.
+    #[cfg(target_os = "windows")]
+    let events_file = config_dir.join("events.txt");
+    #[cfg(target_os = "windows")]
+    std::fs::write(&events_file, "").expect("failed to create events file");
+
     // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    let mut daemon = start_daemon(&config_dir);
+    #[cfg(target_os = "windows")]
+    let mut daemon = start_daemon(&config_dir, Some(&events_file));
+    #[cfg(not(target_os = "windows"))]
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     std::thread::sleep(std::time::Duration::from_millis(500));
 
+    // On Windows, set the env var so the sandbox reads events from the file.
+    #[cfg(target_os = "windows")]
+    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
+
     // Run the test body.
     test_fn(&*sandbox);
+
+    // Clear the env var after the test.
+    #[cfg(target_os = "windows")]
+    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
 
     // Teardown: kill the daemon and clean up the sandbox.
     daemon.kill();
@@ -380,17 +412,34 @@ where
     // Give the monitor tap a moment to stabilize.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
+    // On Windows, create an events file for the daemon to write outputs to.
+    #[cfg(target_os = "windows")]
+    let events_file = config_dir.join("events.txt");
+    #[cfg(target_os = "windows")]
+    std::fs::write(&events_file, "").expect("failed to create events file");
+
     // Spawn the daemon.
-    let mut daemon = start_daemon(&config_dir);
+    #[cfg(target_os = "windows")]
+    let mut daemon = start_daemon(&config_dir, Some(&events_file));
+    #[cfg(not(target_os = "windows"))]
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // On Windows, set the env var so the sandbox reads events from the file.
+    #[cfg(target_os = "windows")]
+    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
 
     // Drain any events captured during startup.
     let _ = sandbox.drain_output_events();
 
     // Run the multi-phase test body.
     test_fn(&*sandbox, &config_dir, &mut daemon);
+
+    // Clear the env var after the test.
+    #[cfg(target_os = "windows")]
+    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
 
     // Teardown.
     daemon.kill();
@@ -752,7 +801,7 @@ fn e2e_keyboard_filter() {
     std::fs::write(config_dir.join("config.yaml"), &config_content)
         .expect("failed to write config");
 
-    let mut daemon = start_daemon(&config_dir);
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -951,7 +1000,7 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon(&config_dir);
+    let mut daemon = start_daemon(&config_dir, None);
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1137,11 +1186,18 @@ groups:
     // Give the monitor hook a moment to stabilize.
     std::thread::sleep(std::time::Duration::from_millis(100));
 
+    // Create an events file for the daemon to write outputs to.
+    let events_file = config_dir.join("events.txt");
+    std::fs::write(&events_file, "").expect("failed to create events file");
+
     // Spawn the daemon.
-    let mut daemon = start_daemon(&config_dir);
+    let mut daemon = start_daemon(&config_dir, Some(&events_file));
 
     // Allow the daemon to initialize.
     std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Set the env var so the sandbox reads events from the file.
+    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
 
     // Drain any events captured during startup.
     let _ = sandbox.drain_output_events();
@@ -1186,6 +1242,9 @@ groups:
          the '{}' keyboard and observe whether it is remapped to LeftControl.",
         target.name, target.vendor, target.name
     );
+
+    // Clear the env var.
+    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
 
     // Teardown.
     daemon.kill();

@@ -24,6 +24,7 @@
 //! 3. **Worker thread** — Receives from both channels, matches events,
 //!    resolves devices, performs lookups, sends decisions back.
 
+use std::io::Write;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
@@ -180,6 +181,26 @@ fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
     let is_down = !is_key_up;
+
+    // In test mode, write output events to a file instead of calling `SendInput`.
+    // This avoids the issue where `SendInput` from within a `WH_KEYBOARD_LL`
+    // hook callback does not trigger other hooks (Windows prevents recursive
+    // hook invocation). The e2e test reads this file to verify outputs.
+    if let Ok(path) = std::env::var("KEYMAPPER_TEST_OUTPUT") {
+        let line = if is_down {
+            format!("DOWN {}\n", vk.0)
+        } else {
+            format!("UP {}\n", vk.0)
+        };
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()
+            .as_mut()
+            .and_then(|f| f.write_all(line.as_bytes()).ok());
+        return;
+    }
 
     // Mark this key as injected so the hook proc can skip it.
     mark_injected(vk.0, is_down);

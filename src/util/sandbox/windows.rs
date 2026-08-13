@@ -214,6 +214,37 @@ impl Sandbox for WindowsSandbox {
     }
 
     fn drain_output_events(&self) -> Vec<CapturedEvent> {
+        // On Windows, if the test output file is set (via env var), read
+        // events from it instead of the hook queue. This works around the
+        // limitation where `SendInput` from within a `WH_KEYBOARD_LL` hook
+        // callback does not trigger other hooks (Windows prevents recursive
+        // hook invocation). The daemon writes to this file when
+        // `KEYMAPPER_TEST_OUTPUT` is set.
+        if let Ok(path) = std::env::var("KEYMAPPER_TEST_OUTPUT_FILE") {
+            // Truncate the file to drain it.
+            let content = std::fs::read_to_string(&path)
+                .unwrap_or_default();
+            // Clear the file for next drain.
+            std::fs::write(&path, "").ok();
+
+            // Brief pause to allow any pending file writes to complete.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+
+            return content
+                .lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() == 2 {
+                        let is_down = parts[0] == "DOWN";
+                        if let Ok(code) = parts[1].parse::<u16>() {
+                            return Some(CapturedEvent { code, is_down });
+                        }
+                    }
+                    None
+                })
+                .collect();
+        }
+
         // Brief pause to allow the hook chain and any `SendInput` calls from
         // the daemon to complete before draining.
         std::thread::sleep(std::time::Duration::from_millis(50));
