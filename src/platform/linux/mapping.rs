@@ -280,41 +280,26 @@ fn process_device_events(
 // evdev event loop (epoll-based, multi-device)
 // ---------------------------------------------------------------------------
 
-/// Open a keyboard device, grab it, and prepare it for epoll monitoring.
-fn open_and_grab_device(
-    kb: &KeyboardInfo,
-) -> Result<ManagedDevice, Box<dyn std::error::Error>> {
-    let mut device = Device::open(&kb.device)?;
-    device.grab()?;
-    device.set_nonblocking(true)?;
-
-    Ok(ManagedDevice {
-        device,
-        path: kb.device.clone(),
-        modifiers: 0,
-    })
-}
-
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
-    keyboards_to_grab: Vec<KeyboardInfo>,
+    keyboards_to_grab: Vec<(KeyboardInfo, Device)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if keyboards_to_grab.is_empty() {
         println!("No keyboards to grab. Waiting for events...");
     }
 
-    // Open, grab and register all keyboards.
+    // Grab and register all pre-opened keyboards.
     let mut managed_devices: Vec<ManagedDevice> = Vec::new();
-    for kb in &keyboards_to_grab {
-        match open_and_grab_device(kb) {
-            Ok(managed) => {
-                println!("Grabbed keyboard: {} ({})", managed.path, kb.name);
-                managed_devices.push(managed);
-            }
-            Err(e) => {
-                eprintln!("Warning: failed to open/grab {}: {}", kb.device, e);
-            }
-        }
+    for (kb, mut device) in keyboards_to_grab {
+        device.grab()?;
+        device.set_nonblocking(true)?;
+
+        println!("Grabbed keyboard: {} ({})", kb.device, kb.name);
+        managed_devices.push(ManagedDevice {
+            device,
+            path: kb.device,
+            modifiers: 0,
+        });
     }
 
     let mut virtual_device = uinput::default()?

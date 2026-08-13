@@ -20,7 +20,9 @@ use crate::common::keyboard::KeyboardInfo;
 /// user seat.  Devices that also support absolute (pointer) events are
 /// excluded because they are typically pointing devices that happen to
 /// announce keyboard capabilities (e.g. touchpads with integrated buttons).
-pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
+///
+/// Returns both the [`KeyboardInfo`] metadata and the opened [`Device`] handle.
+fn enumerate_keyboards() -> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::error::Error>>
 {
     let mut enumerator = Enumerator::new()?;
 
@@ -28,7 +30,7 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
     enumerator.match_property("ID_INPUT_KEYBOARD", "1")?;
     enumerator.scan_devices()?;
 
-    let mut keyboards = Vec::new();
+    let mut results = Vec::new();
 
     for udev_device in enumerator.scan_devices()? {
         // Resolve the device node (e.g. /dev/input/event3).  Skip if missing.
@@ -95,20 +97,49 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
             }
         });
 
-        keyboards.push(KeyboardInfo::new(
-            name,
-            vendor,
-            model,
-            device_path,
-            port,
+        results.push((
+            KeyboardInfo::new(
+                name,
+                vendor,
+                model,
+                device_path,
+                port,
+            ),
+            device,
         ));
     }
+
+    Ok(results)
+}
+
+/// Enumerate all keyboard input devices on the system.
+///
+/// Uses udev to discover devices tagged as keyboards belonging to the current
+/// user seat.  Devices that also support absolute (pointer) events are
+/// excluded because they are typically pointing devices that happen to
+/// announce keyboard capabilities (e.g. touchpads with integrated buttons).
+pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
+{
+    let results = enumerate_keyboards()?;
+    let keyboards: Vec<KeyboardInfo> = results.into_iter().map(|(info, _)| info).collect();
 
     if keyboards.is_empty() {
         return Err("No keyboard devices found.".into());
     }
 
     Ok(keyboards)
+}
+
+/// Enumerate and open all keyboard devices for the current seat.
+///
+/// Returns both the [`KeyboardInfo`] metadata and the opened [`Device`].
+/// Callers that only need discovery (e.g. the CLI `keyboards` command) should
+/// use [`list_keyboards`] instead.  The daemon uses this function to avoid a
+/// second udev scan and redundant device opens.
+pub fn discover_and_open_keyboards()
+    -> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::error::Error>>
+{
+    enumerate_keyboards()
 }
 
 #[cfg(test)]

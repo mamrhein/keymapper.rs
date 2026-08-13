@@ -19,7 +19,9 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::get_active_app_name;
 #[cfg(target_os = "linux")]
-pub use linux::{Key, list_keyboards, start_mapping};
+pub use linux::{
+    Key, discover_and_open_keyboards, list_keyboards, start_mapping,
+};
 #[cfg(all(target_os = "macos", feature = "driverkit"))]
 pub use macos::HidSocket;
 #[cfg(target_os = "macos")]
