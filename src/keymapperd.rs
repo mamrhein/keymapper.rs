@@ -57,10 +57,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine which keyboards to actually grab based on the global filter.
     // Only matching keyboards are captured; others work normally.
+    //
+    // Clone the global filter before the cache is moved into RuntimeState,
+    // since we also need it for the hot-plug monitor.
+    let global_filter: Option<
+        Vec<keymapper::common::keyboard::KeyboardSpecifier>,
+    > = initial_cache.global_keyboards().cloned();
     let keyboards_to_grab: Vec<keymapper::common::keyboard::KeyboardInfo> =
         keymapper::common::keyboard::filter_keyboards_by_specifiers(
             &all_keyboards,
-            initial_cache.global_keyboards().map(Vec::as_slice),
+            global_filter.as_deref(),
         );
 
     if !keyboards_to_grab.is_empty() {
@@ -115,7 +121,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter(|(info, _)| grab_paths.contains(info.device.as_str()))
             .collect();
 
-        keymapper::platform::start_mapping(platform_state, opened_to_grab)
+        keymapper::platform::start_mapping(
+            platform_state,
+            opened_to_grab,
+            global_filter,
+        )
     }
 
     #[cfg(not(target_os = "linux"))]

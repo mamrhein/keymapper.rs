@@ -30,86 +30,95 @@ fn enumerate_keyboards() -> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::err
     enumerator.match_property("ID_INPUT_KEYBOARD", "1")?;
     enumerator.scan_devices()?;
 
-    let mut results = Vec::new();
-
-    for udev_device in enumerator.scan_devices()? {
-        // Resolve the device node (e.g. /dev/input/event3).  Skip if missing.
-        let Some(devnode) = udev_device.devnode() else {
-            continue;
-        };
-
-        // Open the evdev device to check for pointer-capable devices.
-        let Ok(device) = Device::open(devnode) else {
-            continue;
-        };
-
-        // Skip pointing devices announced as keyboards (touchpads,
-        // touchscreens).
-        if device.supported_events().contains(EventType::ABSOLUTE) {
-            continue;
-        }
-
-        // udev property ID_PRODUCT_NAME is usually the most readable.  Fall
-        // back to the evdev device name, then to a placeholder.
-        let name = udev_device
-            .property_value("ID_PRODUCT_NAME")
-            .map(|s| s.to_string_lossy().into_owned())
-            .or_else(|| device.name().map(str::to_owned))
-            .unwrap_or_else(|| "<unknown>".to_string());
-
-        // Vendor string from udev, derived from the USB/HID vendor descriptor.
-        let vendor = udev_device
-            .property_value("ID_VENDOR")
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "<unknown>".to_string());
-
-        // Model from udev; if absent, construct a compact ID from vendor and
-        // product IDs.
-        let model = udev_device
-            .property_value("ID_MODEL")
-            .map(|s| s.to_string_lossy().into_owned())
-            .or_else(|| {
-                let vid = udev_device
-                    .property_value("ID_VENDOR_ID")
-                    .map(|s| s.to_string_lossy().into_owned());
-                let pid = udev_device
-                    .property_value("ID_MODEL_ID")
-                    .map(|s| s.to_string_lossy().into_owned());
-
-                match (vid, pid) {
-                    (Some(v), Some(p)) => Some(format!("{v}:{p}")),
-                    _ => None,
-                }
-            })
-            .unwrap_or_else(|| "<unknown>".to_string());
-
-        // The device node path is the handle used to open and filter events.
-        let device_path = devnode.to_string_lossy().into_owned();
-
-        // Transport type from udev: "usb", "bluetooth", "virtual", etc.
-        let port = udev_device.property_value("ID_BUS").map(|s| {
-            let bus = s.to_string_lossy();
-            match bus.as_ref() {
-                "usb" => "USB".to_string(),
-                "bluetooth" => "Bluetooth".to_string(),
-                "virtual" => "Virtual".to_string(),
-                other => other.to_string(),
-            }
-        });
-
-        results.push((
-            KeyboardInfo::new(
-                name,
-                vendor,
-                model,
-                device_path,
-                port,
-            ),
-            device,
-        ));
-    }
+    let results: Vec<_> = enumerator
+        .scan_devices()?
+        .filter_map(|udev_device| build_keyboard_from_udev(&udev_device))
+        .collect();
 
     Ok(results)
+}
+
+/// Build a [`KeyboardInfo`] and open an [`evdev::Device`] from a udev
+/// device object.
+///
+/// Returns `None` if the device node is missing, the device cannot be opened,
+/// or the device is not a pure keyboard (e.g. it has absolute/pointer events).
+///
+/// Used by both the startup enumeration and the hot-plug monitor so that
+/// device discovery logic is identical in both paths.
+pub(super) fn build_keyboard_from_udev(
+    udev_device: &udev::Device,
+) -> Option<(KeyboardInfo, Device)> {
+    // Resolve the device node (e.g. /dev/input/event3).  Skip if missing.
+    let devnode = udev_device.devnode()?;
+
+    // Open the evdev device to check for pointer-capable devices.
+    let device = Device::open(devnode).ok()?;
+
+    // Skip pointing devices announced as keyboards (touchpads,
+    // touchscreens).
+    if device.supported_events().contains(EventType::ABSOLUTE) {
+        return None;
+    }
+
+    // udev property ID_PRODUCT_NAME is usually the most readable.  Fall
+    // back to the evdev device name, then to a placeholder.
+    let name = udev_device
+        .property_value("ID_PRODUCT_NAME")
+        .map(|s| s.to_string_lossy().into_owned())
+        .or_else(|| device.name().map(str::to_owned))
+        .unwrap_or_else(|| "<unknown>".to_string());
+
+    // Vendor string from udev, derived from the USB/HID vendor descriptor.
+    let vendor = udev_device
+        .property_value("ID_VENDOR")
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "<unknown>".to_string());
+
+    // Model from udev; if absent, construct a compact ID from vendor and
+    // product IDs.
+    let model = udev_device
+        .property_value("ID_MODEL")
+        .map(|s| s.to_string_lossy().into_owned())
+        .or_else(|| {
+            let vid = udev_device
+                .property_value("ID_VENDOR_ID")
+                .map(|s| s.to_string_lossy().into_owned());
+            let pid = udev_device
+                .property_value("ID_MODEL_ID")
+                .map(|s| s.to_string_lossy().into_owned());
+
+            match (vid, pid) {
+                (Some(v), Some(p)) => Some(format!("{v}:{p}")),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| "<unknown>".to_string());
+
+    // The device node path is the handle used to open and filter events.
+    let device_path = devnode.to_string_lossy().into_owned();
+
+    // Transport type from udev: "usb", "bluetooth", "virtual", etc.
+    let port = udev_device.property_value("ID_BUS").map(|s| {
+        let bus = s.to_string_lossy();
+        match bus.as_ref() {
+            "usb" => "USB".to_string(),
+            "bluetooth" => "Bluetooth".to_string(),
+            "virtual" => "Virtual".to_string(),
+            other => other.to_string(),
+        }
+    });
+
+    Some((
+        KeyboardInfo::new(
+            name,
+            vendor,
+            model,
+            device_path,
+            port,
+        ),
+        device,
+    ))
 }
 
 /// Enumerate all keyboard input devices on the system.
