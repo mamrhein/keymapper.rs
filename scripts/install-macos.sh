@@ -1,9 +1,12 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Installs the keymapperd launchd service on macOS.
+# Installs the keymapperd LaunchDaemon on macOS.
 #
-# Copies the plist template to ~/Library/LaunchAgents/, resolves the binary
-# path, and boots the service.  Idempotent — safe to run multiple times.
+# Copies the plist template to /Library/LaunchDaemons/, resolves the binary
+# path, and boots the service.  The daemon runs as root to perform IOKit
+# device seizure.  This script requires sudo privileges.
+#
+# Idempotent — safe to run multiple times.
 #
 # Usage: scripts/install-macos.sh [binary_path]
 #   binary_path — absolute path to keymapperd (default: found via `which`).
@@ -14,8 +17,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 LABEL="de.adrhinum.keymapperd"
-LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
-LOG_DIR="$HOME/Library/Logs/keymapperd"
+LAUNCH_DAEMONS_DIR="/Library/LaunchDaemons"
+LOG_DIR="/var/log/keymapperd"
 
 # Find the plist template.  It may be alongside the script (DMG layout) or
 # under ../resources/launchd/ (repo layout).
@@ -45,27 +48,37 @@ if [ ! -x "$BINARY_PATH" ]; then
     exit 1
 fi
 
-# Ensure the LaunchAgents directory exists.
-mkdir -p "$LAUNCH_AGENTS_DIR"
+# Require root — LaunchDaemons are system-wide and managed by launchd as root.
+if [ "$EUID" -ne 0 ]; then
+    echo "This script must be run as root (use sudo)." >&2
+    exit 1
+fi
+
+# Ensure directories exist.
+mkdir -p "$LAUNCH_DAEMONS_DIR"
+mkdir -p "$LOG_DIR"
 
 # If the service is already loaded, unload it first so we can replace the plist.
-if launchctl print gui/"$UID" "$LABEL" >/dev/null 2>&1; then
-    launchctl bootout gui/"$UID" "$LABEL" 2>/dev/null || true
+if launchctl print system/"$LABEL" >/dev/null 2>&1; then
+    launchctl bootout system/"$LABEL" 2>/dev/null || true
 fi
 
 # Copy the plist template and substitute placeholders.
-mkdir -p "$LOG_DIR"
 sed \
     -e "s|@BINARY_PATH@|$BINARY_PATH|g" \
     -e "s|@LOG_DIR@|$LOG_DIR|g" \
-    "$PLIST_TEMPLATE" > "$LAUNCH_AGENTS_DIR/${LABEL}.plist"
+    "$PLIST_TEMPLATE" > "$LAUNCH_DAEMONS_DIR/${LABEL}.plist"
 
-echo "Installed ${LABEL}.plist to ${LAUNCH_AGENTS_DIR}/"
+# Set correct ownership and permissions for LaunchDaemons.
+chown root:wheel "$LAUNCH_DAEMONS_DIR/${LABEL}.plist"
+chmod 644 "$LAUNCH_DAEMONS_DIR/${LABEL}.plist"
+
+echo "Installed ${LABEL}.plist to ${LAUNCH_DAEMONS_DIR}/"
 
 # Boot the service.
-launchctl bootstrap gui/"$UID" "$LAUNCH_AGENTS_DIR/${LABEL}.plist"
+launchctl bootstrap system "$LAUNCH_DAEMONS_DIR/${LABEL}.plist"
 
-if launchctl print gui/"$UID" "$LABEL" >/dev/null 2>&1; then
+if launchctl print system/"$LABEL" >/dev/null 2>&1; then
     echo "keymapperd is running via launchd."
 else
     echo "Warning: service was installed but does not appear to be running." >&2

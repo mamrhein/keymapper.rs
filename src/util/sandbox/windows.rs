@@ -226,8 +226,7 @@ impl Sandbox for WindowsSandbox {
         // `KEYMAPPER_TEST_OUTPUT` is set.
         if let Ok(path) = std::env::var("KEYMAPPER_TEST_OUTPUT_FILE") {
             // Truncate the file to drain it.
-            let content = std::fs::read_to_string(&path)
-                .unwrap_or_default();
+            let content = std::fs::read_to_string(&path).unwrap_or_default();
             // Clear the file for next drain.
             std::fs::write(&path, "").ok();
 

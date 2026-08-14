@@ -24,10 +24,12 @@
 //! 3. **Worker thread** — Receives from both channels, matches events,
 //!    resolves devices, performs lookups, sends decisions back.
 
-use std::io::Write;
-use std::sync::{
-    Arc,
-    atomic::{AtomicU32, Ordering},
+use std::{
+    io::Write,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
 };
 
 use crossbeam_channel;
@@ -191,10 +193,11 @@ fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
     let is_down = !is_key_up;
 
-    // In test mode, write output events to a file instead of calling `SendInput`.
-    // This avoids the issue where `SendInput` from within a `WH_KEYBOARD_LL`
-    // hook callback does not trigger other hooks (Windows prevents recursive
-    // hook invocation). The e2e test reads this file to verify outputs.
+    // In test mode, write output events to a file instead of calling
+    // `SendInput`. This avoids the issue where `SendInput` from within a
+    // `WH_KEYBOARD_LL` hook callback does not trigger other hooks (Windows
+    // prevents recursive hook invocation). The e2e test reads this file to
+    // verify outputs.
     if let Ok(path) = std::env::var("KEYMAPPER_TEST_OUTPUT") {
         let line = if is_down {
             format!("DOWN {}\n", vk.0)

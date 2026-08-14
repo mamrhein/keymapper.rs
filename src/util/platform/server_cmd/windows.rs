@@ -168,7 +168,7 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
             std::ptr::null_mut(), // lpEnvironment
             std::ptr::null_mut(), // lpCurrentDirectory
             &si as *const _ as *mut STARTUPINFOW, /* lpStartupInfo: mutable
-                                                   * per API contract */
+                                   * per API contract */
             &mut pi,
         )
     };

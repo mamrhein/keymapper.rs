@@ -1,0 +1,1776 @@
+// ---------------------------------------------------------------------------
+// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
+// License:     This program is part of a larger application. For license
+//              details please read the file LICENSE.TXT provided together
+//              with the application.
+// ---------------------------------------------------------------------------
+// $Source$
+// $Revision$
+
+//! IOKit HID device seizure for keyboard input capture on macOS.
+//!
+//! Follows the Karabiner Elements approach: uses `IOHIDManager` exclusively
+//! for device discovery, then opens individual devices with
+//! `kIOHIDOptionsTypeSeizeDevice` and captures events via per-device
+//! `IOHIDQueue` callbacks.  This avoids the entitlement-gated
+//! `IOHIDManagerRegisterInputCallback` API entirely.
+//!
+//! Requires root privileges for device seizure and the Input Monitoring
+//! permission in System Settings.
+#![allow(dead_code, non_snake_case)]
+
+use std::{ffi::c_void, ptr};
+
+use objc2_core_foundation::{CFRetained, CFRunLoop, kCFRunLoopDefaultMode};
+
+// ---------------------------------------------------------------------------
+// Opaque IOKit HID types
+// ---------------------------------------------------------------------------
+
+/// Opaque `IOHIDManagerRef`.
+#[repr(C)]
+pub struct IOHIDManager {
+    _private: [u8; 0],
+}
+
+/// Opaque `IOHIDDeviceRef`.
+#[repr(C)]
+pub struct IOHIDDevice {
+    _private: [u8; 0],
+}
+
+/// Opaque `IOHIDQueueRef`.
+#[repr(C)]
+pub struct IOHIDQueue {
+    _private: [u8; 0],
+}
+
+/// Opaque `IOHIDElementRef`.
+#[repr(C)]
+pub struct IOHIDElement {
+    _private: [u8; 0],
+}
+
+/// Opaque `IOHIDValueRef`.
+#[repr(C)]
+pub struct IOHIDValue {
+    _private: [u8; 0],
+}
+
+/// Opaque `CFSetRef` (returned by `IOHIDManagerCopyDevices`).
+#[allow(non_camel_case_types)]
+type CFSetRef = *mut c_void;
+
+/// Opaque `CFTypeRef` (iterator element from `CFSet`).
+#[allow(non_camel_case_types)]
+type CFTypeRef = *const c_void;
+
+/// Opaque `CFAllocatorRef` (we use null for `kCFAllocatorDefault`).
+#[allow(non_camel_case_types)]
+type CFAllocatorRef = *mut c_void;
+
+/// Opaque `CFDictionaryRef`.
+#[allow(non_camel_case_types)]
+type CFDictionaryRef = *const c_void;
+
+/// Opaque `CFNumberRef`.
+#[allow(non_camel_case_types)]
+type CFNumberRef = *const c_void;
+
+/// Opaque `CFStringRef`.
+#[allow(non_camel_case_types)]
+type CFStringRef = *const c_void;
+
+/// `kCFAllocatorDefault` is represented as NULL.
+#[allow(non_upper_case_globals)]
+const kCFAllocatorDefault: CFAllocatorRef = ptr::null_mut();
+
+/// `kCFNumberUIntType` — unsigned 32-bit integer CFNumber type.
+#[allow(non_upper_case_globals)]
+const kCFNumberUIntType: u32 = 1;
+
+/// `kCFNumberInt32Type` — signed 32-bit integer CFNumber type.
+#[allow(non_upper_case_globals)]
+const kCFNumberInt32Type: u32 = 3;
+
+/// `kIOHIDOptionsTypeNone`.
+#[allow(non_upper_case_globals)]
+const kIOHIDOptionsTypeNone: u32 = 0;
+
+/// `kIOHIDOptionsTypeSeizeDevice` — exclusive access to the device.
+#[allow(non_upper_case_globals)]
+const kIOHIDOptionsTypeSeizeDevice: u32 = 1;
+
+/// `kIOHIDMapKeyLocationID`.
+#[allow(non_upper_case_globals)]
+const kIOHIDMapKeyLocationID: &str = "Location ID";
+
+/// `kIOHIDMapKeyVendorID`.
+#[allow(non_upper_case_globals)]
+const kIOHIDMapKeyVendorID: &str = "Vendor ID";
+
+/// `kIOHIDMapKeyProductID`.
+#[allow(non_upper_case_globals)]
+const kIOHIDMapKeyProductID: &str = "Product ID";
+
+/// `kIOHIDMapKeyRegistryEntryID`.
+#[allow(non_upper_case_globals)]
+const kIOHIDMapKeyRegistryEntryID: &str = "Registry Entry ID";
+
+/// USB HID usage page for Keyboard/Keypad.
+const HID_USAGE_PAGE_KEYBOARD: u32 = 0x07;
+
+// ---------------------------------------------------------------------------
+// IOReturn constants
+// ---------------------------------------------------------------------------
+
+/// `kIOReturnSuccess`.
+#[allow(non_upper_case_globals)]
+const kIOReturnSuccess: u32 = 0;
+
+/// `kIOReturnNotPermitted`.
+#[allow(non_upper_case_globals)]
+const kIOReturnNotPermitted: u32 = 0xe00002c7;
+
+/// `kIOReturnExclusiveAccess`.
+#[allow(non_upper_case_globals)]
+const kIOReturnExclusiveAccess: u32 = 0xe00002b7;
+
+// ---------------------------------------------------------------------------
+// Error types
+// ---------------------------------------------------------------------------
+
+/// Errors from IOKit HID operations.
+#[derive(Debug)]
+pub enum IoKitError {
+    // The operation requires root privileges.
+    NotPermitted(String),
+    // The device is already seized by another process.
+    ExclusiveAccess(String),
+    // Generic IOKit error with the raw return code.
+    IoReturn(u32, String),
+    // A required FFI symbol could not be resolved.
+    SymbolMissing(String),
+}
+
+impl std::fmt::Display for IoKitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IoKitError::NotPermitted(ctx) => {
+                write!(
+                    f,
+                    "IOKit operation not permitted: {}. Run as root and \
+                     grant Input Monitoring permission.",
+                    ctx,
+                )
+            }
+            IoKitError::ExclusiveAccess(ctx) => {
+                write!(
+                    f,
+                    "IOKit exclusive access denied: {}. Another process may \
+                     have seized this device.",
+                    ctx,
+                )
+            }
+            IoKitError::IoReturn(code, ctx) => {
+                write!(f, "IOKit error 0x{:08x}: {}", code, ctx)
+            }
+            IoKitError::SymbolMissing(sym) => {
+                write!(f, "IOKit symbol not found: {}", sym)
+            }
+        }
+    }
+}
+
+impl std::error::Error for IoKitError {}
+
+/// Convert an `IOReturn` to a result, mapping known error codes.
+fn check_io_return(result: u32, context: &str) -> Result<(), IoKitError> {
+    if result == kIOReturnSuccess {
+        Ok(())
+    } else if result == kIOReturnNotPermitted {
+        Err(IoKitError::NotPermitted(context.to_string()))
+    } else if result == kIOReturnExclusiveAccess {
+        Err(IoKitError::ExclusiveAccess(context.to_string()))
+    } else {
+        Err(IoKitError::IoReturn(result, context.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HID usage → CGKeyCode translation (reused from ioh_device.rs)
+// ---------------------------------------------------------------------------
+
+/// Translate a USB HID Keyboard/Keypad usage code to a macOS CGKeyCode.
+///
+/// Returns `None` for usages that have no known CGKeyCode equivalent.
+pub fn cg_keycode_from_hid_usage(usage: u16) -> Option<u16> {
+    Some(match usage {
+        // --- Letters (HID usage → CGKeyCode) ---
+        0x04 => 0,  // A
+        0x05 => 11, // B
+        0x06 => 8,  // C
+        0x07 => 2,  // D
+        0x08 => 14, // E
+        0x09 => 3,  // F
+        0x0A => 5,  // G
+        0x0B => 4,  // H
+        0x0C => 34, // I
+        0x0D => 38, // J
+        0x0E => 40, // K
+        0x0F => 37, // L
+        0x10 => 46, // M
+        0x11 => 45, // N
+        0x12 => 31, // O
+        0x13 => 35, // P
+        0x14 => 12, // Q
+        0x15 => 15, // R
+        0x16 => 1,  // S
+        0x17 => 17, // T
+        0x18 => 32, // U
+        0x19 => 9,  // V
+        0x1A => 13, // W
+        0x1B => 7,  // X
+        0x1C => 16, // Y
+        0x1D => 6,  // Z
+
+        // --- Numbers ---
+        0x1E => 18, // 1
+        0x1F => 19, // 2
+        0x20 => 20, // 3
+        0x21 => 21, // 4
+        0x22 => 23, // 5
+        0x23 => 22, // 6
+        0x24 => 26, // 7
+        0x25 => 28, // 8
+        0x26 => 25, // 9
+        0x27 => 29, // 0
+
+        // --- Edit keys ---
+        0x28 => 36,  // Return
+        0x29 => 53,  // Escape
+        0x2A => 51,  // Delete (Backspace)
+        0x2B => 48,  // Tab
+        0x2C => 49,  // Spacebar
+        0x30 => 119, // Non-US Backslash
+
+        // --- Modifiers ---
+        0xE0 => 59, // LeftControl
+        0xE1 => 62, // RightControl
+        0xE2 => 56, // LeftShift
+        0xE3 => 60, // RightShift
+        0xE4 => 58, // LeftAlt (LeftOption)
+        0xE5 => 61, // RightAlt (RightOption)
+        0xE6 => 55, // LeftCommand (LeftGui)
+        0xE7 => 54, // RightCommand (RightGui)
+
+        // --- Navigation ---
+        0x4A => 124, // RightArrow (page up on mac)
+        0x4B => 124, // RightArrow
+        0x4C => 123, // LeftArrow
+        0x4D => 125, // DownArrow
+        0x4E => 126, // UpArrow
+
+        // --- Function keys ---
+        0x3A => 122, // F1
+        0x3B => 120, // F2
+        0x3C => 99,  // F3
+        0x3D => 118, // F4
+        0x3E => 96,  // F5
+        0x3F => 97,  // F6
+        0x40 => 98,  // F7
+        0x41 => 100, // F8
+        0x42 => 101, // F9
+        0x43 => 109, // F10
+        0x44 => 103, // F11
+        0x45 => 111, // F12
+
+        // --- Keypad ---
+        0x52 => 124, // Keypad RightArrow
+        0x51 => 125, // Keypad DownArrow
+        0x50 => 123, // Keypad LeftArrow
+        0x53 => 126, // Keypad UpArrow
+
+        _ => return None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// FFI declarations — resolved dynamically via dlsym
+// ---------------------------------------------------------------------------
+
+// On modern macOS with SIP, the IOKit framework is a "stub" — the actual
+// IOHIDLib symbols are only accessible at runtime via dlopen/dlsym, not at
+// link time.  This follows the same pattern as hid_socket.rs.
+
+/// Function pointer types for IOHIDLib symbols.
+type FnIOHIDManagerCreate =
+    unsafe extern "C" fn(CFAllocatorRef, u32) -> *mut IOHIDManager;
+type FnIOHIDManagerSetDeviceMatching = unsafe extern "C" fn(*mut IOHIDManager);
+type FnIOHIDManagerCopyDevices =
+    unsafe extern "C" fn(*mut IOHIDManager) -> CFSetRef;
+type FnIOHIDManagerScheduleWithRunLoop = unsafe extern "C" fn(
+    *mut IOHIDManager,
+    *mut c_void, // CFRunLoopRef
+    *mut c_void, // CFStringRef
+);
+type FnIOHIDManagerOpen = unsafe extern "C" fn(*mut IOHIDManager, u32) -> u32;
+type FnIOHIDManagerClose = unsafe extern "C" fn(*mut IOHIDManager, u32) -> u32;
+type FnIOHIDDeviceOpen = unsafe extern "C" fn(*mut IOHIDDevice, u32) -> u32;
+type FnIOHIDDeviceClose = unsafe extern "C" fn(*mut IOHIDDevice, u32) -> u32;
+type FnIOHIDDeviceGetLocationID =
+    unsafe extern "C" fn(*mut IOHIDDevice) -> u32;
+type FnIOHIDDeviceCreateQueue =
+    unsafe extern "C" fn(*mut IOHIDDevice, CFAllocatorRef) -> *mut IOHIDQueue;
+type FnIOHIDQueueRegisterValueAvailableCallback = unsafe extern "C" fn(
+    *mut IOHIDQueue,
+    Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *mut IOHIDQueue,
+            u32,
+            *mut c_void, // CFArrayRef of IOHIDValueRef
+        ),
+    >,
+    *mut c_void,
+);
+type FnIOHIDQueueScheduleWithRunLoop = unsafe extern "C" fn(
+    *mut IOHIDQueue,
+    *mut c_void, // CFRunLoopRef
+    *mut c_void, // CFStringRef
+);
+type FnIOHIDQueueOpen = unsafe extern "C" fn(*mut IOHIDQueue) -> u32;
+type FnIOHIDQueueClose = unsafe extern "C" fn(*mut IOHIDQueue, u32);
+type FnIOHIDValueGetInteger = unsafe extern "C" fn(*mut IOHIDValue) -> u32;
+type FnIOHIDValueGetElement =
+    unsafe extern "C" fn(*mut IOHIDValue) -> *mut IOHIDElement;
+type FnIOHIDElementGetUsagePage =
+    unsafe extern "C" fn(*mut IOHIDElement) -> u32;
+type FnIOHIDElementGetUsage = unsafe extern "C" fn(*mut IOHIDElement) -> u32;
+type FnCFArrayGetCount = unsafe extern "C" fn(*const c_void) -> usize;
+type FnCFArrayGetValueAtIndex =
+    unsafe extern "C" fn(*const c_void, usize) -> *const c_void;
+type FnCFSetGetCount = unsafe extern "C" fn(CFSetRef) -> usize;
+type FnCFSetCreateIterator =
+    unsafe extern "C" fn(CFSetRef, *mut *mut c_void) -> bool;
+type FnCFSetIteratorGetNext = unsafe extern "C" fn(*mut c_void) -> CFTypeRef;
+type FnCFRelease = unsafe extern "C" fn(*const c_void);
+type FnIOHIDDeviceCopyCFTypeArgumentByIndex =
+    unsafe extern "C" fn(*mut IOHIDDevice, usize) -> *const c_void;
+type FnCFNumberCreate =
+    unsafe extern "C" fn(CFAllocatorRef, u32, *const c_void) -> CFNumberRef;
+#[allow(improper_ctypes_definitions)]
+type FnCFNumberGetValue =
+    unsafe extern "C" fn(CFNumberRef, u32, *mut c_void) -> bool;
+type FnCFDictionaryCreateMutable = unsafe extern "C" fn(
+    CFAllocatorRef,
+    isize,
+    *const c_void,
+    *const c_void,
+) -> *mut c_void;
+type FnCFDictionarySetValue =
+    unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void);
+type FnIOHIDManagerSetDeviceMatchingWithDictionary =
+    unsafe extern "C" fn(*mut IOHIDManager, CFDictionaryRef);
+
+/// Resolved function pointers for the IOHIDLib API.
+static IOHID_FUNCS: std::sync::OnceLock<IoKitFunctions> =
+    std::sync::OnceLock::new();
+
+/// Holds all resolved IOHID function pointers.
+struct IoKitFunctions {
+    manager_create: FnIOHIDManagerCreate,
+    manager_set_device_matching: FnIOHIDManagerSetDeviceMatching,
+    manager_copy_devices: FnIOHIDManagerCopyDevices,
+    manager_schedule_with_runloop: FnIOHIDManagerScheduleWithRunLoop,
+    manager_open: FnIOHIDManagerOpen,
+    manager_close: FnIOHIDManagerClose,
+    device_open: FnIOHIDDeviceOpen,
+    device_close: FnIOHIDDeviceClose,
+    device_get_location_id: FnIOHIDDeviceGetLocationID,
+    device_create_queue: FnIOHIDDeviceCreateQueue,
+    queue_register_callback: FnIOHIDQueueRegisterValueAvailableCallback,
+    queue_schedule_with_runloop: FnIOHIDQueueScheduleWithRunLoop,
+    queue_open: FnIOHIDQueueOpen,
+    queue_close: FnIOHIDQueueClose,
+    value_get_integer: FnIOHIDValueGetInteger,
+    value_get_element: FnIOHIDValueGetElement,
+    element_get_usage_page: FnIOHIDElementGetUsagePage,
+    element_get_usage: FnIOHIDElementGetUsage,
+    cf_array_get_count: FnCFArrayGetCount,
+    cf_array_get_value_at_index: FnCFArrayGetValueAtIndex,
+    cf_set_get_count: FnCFSetGetCount,
+    cf_set_create_iterator: FnCFSetCreateIterator,
+    cf_set_iterator_get_next: FnCFSetIteratorGetNext,
+    cf_release: FnCFRelease,
+    device_copy_cf_type_arg_by_index: FnIOHIDDeviceCopyCFTypeArgumentByIndex,
+    cf_number_create: FnCFNumberCreate,
+    cf_number_get_value: FnCFNumberGetValue,
+    cf_dict_create_mutable: FnCFDictionaryCreateMutable,
+    cf_dict_set_value: FnCFDictionarySetValue,
+    manager_set_device_matching_with_dict:
+        FnIOHIDManagerSetDeviceMatchingWithDictionary,
+}
+
+impl IoKitFunctions {
+    /// Resolve all IOHIDLib symbols from IOKit at runtime.
+    ///
+    /// Returns `true` when all required symbols are available.
+    /// Resolve all IOHIDLib symbols from IOKit at runtime.
+    ///
+    /// Returns `Ok(())` when all required symbols are available.
+    fn resolve() -> Result<(), ()> {
+        if IOHID_FUNCS.get().is_some() {
+            return Ok(());
+        }
+
+        // Load the IOKit framework dynamically.
+        let path = b"/System/Library/Frameworks/IOKit.framework/IOKit\0";
+        let handle =
+            unsafe { libc::dlopen(path.as_ptr() as *const _, libc::RTLD_NOW) };
+        if handle.is_null() {
+            return Err(());
+        }
+
+        // SAFETY: `Option<FnType>` uses niche optimization where null pointer
+        // bits represent `None`.  Transmuting `*mut c_void` (from dlsym) to
+        // `Option<FnType>` is valid because both have identical size and
+        // alignment, and the null/non-null bit patterns match.
+        macro_rules! resolve_sym {
+            ($handle:expr, $name:expr, $ty:ty) => {{
+                let raw = unsafe {
+                    libc::dlsym($handle, $name.as_ptr() as *const _)
+                };
+                let opt: Option<$ty> = unsafe { std::mem::transmute(raw) };
+                opt.ok_or(())
+            }};
+        }
+
+        let funcs = IoKitFunctions {
+            manager_create: resolve_sym!(
+                handle,
+                b"IOHIDManagerCreate\0",
+                FnIOHIDManagerCreate
+            )?,
+            manager_set_device_matching: resolve_sym!(
+                handle,
+                b"IOHIDManagerSetDeviceMatching\0",
+                FnIOHIDManagerSetDeviceMatching
+            )?,
+            manager_copy_devices: resolve_sym!(
+                handle,
+                b"IOHIDManagerCopyDevices\0",
+                FnIOHIDManagerCopyDevices
+            )?,
+            manager_schedule_with_runloop: resolve_sym!(
+                handle,
+                b"IOHIDManagerScheduleWithRunLoop\0",
+                FnIOHIDManagerScheduleWithRunLoop
+            )?,
+            manager_open: resolve_sym!(
+                handle,
+                b"IOHIDManagerOpen\0",
+                FnIOHIDManagerOpen
+            )?,
+            manager_close: resolve_sym!(
+                handle,
+                b"IOHIDManagerClose\0",
+                FnIOHIDManagerClose
+            )?,
+            device_open: resolve_sym!(
+                handle,
+                b"IOHIDDeviceOpen\0",
+                FnIOHIDDeviceOpen
+            )?,
+            device_close: resolve_sym!(
+                handle,
+                b"IOHIDDeviceClose\0",
+                FnIOHIDDeviceClose
+            )?,
+            device_get_location_id: resolve_sym!(
+                handle,
+                b"IOHIDDeviceGetLocationID\0",
+                FnIOHIDDeviceGetLocationID
+            )?,
+            device_create_queue: resolve_sym!(
+                handle,
+                b"IOHIDDeviceCreateQueue\0",
+                FnIOHIDDeviceCreateQueue
+            )?,
+            queue_register_callback: resolve_sym!(
+                handle,
+                b"IOHIDQueueRegisterValueAvailableCallback\0",
+                FnIOHIDQueueRegisterValueAvailableCallback
+            )?,
+            queue_schedule_with_runloop: resolve_sym!(
+                handle,
+                b"IOHIDQueueScheduleWithRunLoop\0",
+                FnIOHIDQueueScheduleWithRunLoop
+            )?,
+            queue_open: resolve_sym!(
+                handle,
+                b"IOHIDQueueOpen\0",
+                FnIOHIDQueueOpen
+            )?,
+            queue_close: resolve_sym!(
+                handle,
+                b"IOHIDQueueClose\0",
+                FnIOHIDQueueClose
+            )?,
+            value_get_integer: resolve_sym!(
+                handle,
+                b"IOHIDValueGetInteger\0",
+                FnIOHIDValueGetInteger
+            )?,
+            value_get_element: resolve_sym!(
+                handle,
+                b"IOHIDValueGetElement\0",
+                FnIOHIDValueGetElement
+            )?,
+            element_get_usage_page: resolve_sym!(
+                handle,
+                b"IOHIDElementGetUsagePage\0",
+                FnIOHIDElementGetUsagePage
+            )?,
+            element_get_usage: resolve_sym!(
+                handle,
+                b"IOHIDElementGetUsage\0",
+                FnIOHIDElementGetUsage
+            )?,
+            cf_array_get_count: resolve_sym!(
+                handle,
+                b"CFArrayGetCount\0",
+                FnCFArrayGetCount
+            )?,
+            cf_array_get_value_at_index: resolve_sym!(
+                handle,
+                b"CFArrayGetValueAtIndex\0",
+                FnCFArrayGetValueAtIndex
+            )?,
+            cf_set_get_count: resolve_sym!(
+                handle,
+                b"CFSetGetCount\0",
+                FnCFSetGetCount
+            )?,
+            cf_set_create_iterator: resolve_sym!(
+                handle,
+                b"CFSetCreateIterator\0",
+                FnCFSetCreateIterator
+            )?,
+            cf_set_iterator_get_next: resolve_sym!(
+                handle,
+                b"CFSetIteratorGetNext\0",
+                FnCFSetIteratorGetNext
+            )?,
+            cf_release: resolve_sym!(handle, b"CFRelease\0", FnCFRelease)?,
+            device_copy_cf_type_arg_by_index: resolve_sym!(
+                handle,
+                b"IOHIDDeviceCopyCFTypeArgumentByIndex\0",
+                FnIOHIDDeviceCopyCFTypeArgumentByIndex
+            )?,
+            cf_number_create: resolve_sym!(
+                handle,
+                b"CFNumberCreate\0",
+                FnCFNumberCreate
+            )?,
+            cf_number_get_value: resolve_sym!(
+                handle,
+                b"CFNumberGetValue\0",
+                FnCFNumberGetValue
+            )?,
+            cf_dict_create_mutable: resolve_sym!(
+                handle,
+                b"CFDictionaryCreateMutable\0",
+                FnCFDictionaryCreateMutable
+            )?,
+            cf_dict_set_value: resolve_sym!(
+                handle,
+                b"CFDictionarySetValue\0",
+                FnCFDictionarySetValue
+            )?,
+            manager_set_device_matching_with_dict: resolve_sym!(
+                handle,
+                b"IOHIDManagerSetDeviceMatchingWithDictionary\0",
+                FnIOHIDManagerSetDeviceMatchingWithDictionary
+            )?,
+        };
+
+        IOHID_FUNCS.set(funcs).map_err(|_| ())
+    }
+
+    /// Get the resolved function pointers.
+    ///
+    /// Panics if resolution failed. Callers must ensure `resolve()` succeeded
+    /// before calling this.
+    fn get() -> &'static Self {
+        let _ = Self::resolve();
+        IOHID_FUNCS
+            .get()
+            .expect("IOHID functions not resolved. Call resolve() first.")
+    }
+}
+
+// Convenience wrappers that delegate to resolved function pointers.
+// These provide the same API as the original extern "C" declarations.
+
+unsafe fn IOHIDManagerCreate(
+    allocator: CFAllocatorRef,
+    options: u32,
+) -> *mut IOHIDManager {
+    unsafe { (IoKitFunctions::get().manager_create)(allocator, options) }
+}
+
+unsafe fn IOHIDManagerSetDeviceMatching(manager: *mut IOHIDManager) {
+    unsafe { (IoKitFunctions::get().manager_set_device_matching)(manager) }
+}
+
+unsafe fn IOHIDManagerCopyDevices(manager: *mut IOHIDManager) -> CFSetRef {
+    unsafe { (IoKitFunctions::get().manager_copy_devices)(manager) }
+}
+
+unsafe fn IOHIDManagerScheduleWithRunLoop(
+    manager: *mut IOHIDManager,
+    run_loop: *mut c_void,
+    mode: *mut c_void,
+) {
+    unsafe {
+        (IoKitFunctions::get().manager_schedule_with_runloop)(
+            manager, run_loop, mode,
+        )
+    }
+}
+
+unsafe fn IOHIDManagerOpen(manager: *mut IOHIDManager, flags: u32) -> u32 {
+    unsafe { (IoKitFunctions::get().manager_open)(manager, flags) }
+}
+
+unsafe fn IOHIDManagerClose(manager: *mut IOHIDManager, flags: u32) -> u32 {
+    unsafe { (IoKitFunctions::get().manager_close)(manager, flags) }
+}
+
+unsafe fn IOHIDDeviceOpen(device: *mut IOHIDDevice, flags: u32) -> u32 {
+    unsafe { (IoKitFunctions::get().device_open)(device, flags) }
+}
+
+unsafe fn IOHIDDeviceClose(device: *mut IOHIDDevice, flags: u32) -> u32 {
+    unsafe { (IoKitFunctions::get().device_close)(device, flags) }
+}
+
+unsafe fn IOHIDDeviceGetLocationID(device: *mut IOHIDDevice) -> u32 {
+    unsafe { (IoKitFunctions::get().device_get_location_id)(device) }
+}
+
+unsafe fn IOHIDDeviceCreateQueue(
+    device: *mut IOHIDDevice,
+    allocator: CFAllocatorRef,
+) -> *mut IOHIDQueue {
+    unsafe { (IoKitFunctions::get().device_create_queue)(device, allocator) }
+}
+
+unsafe fn IOHIDQueueRegisterValueAvailableCallback(
+    queue: *mut IOHIDQueue,
+    callout: Option<
+        unsafe extern "C" fn(
+            *mut c_void,
+            *mut IOHIDQueue,
+            u32,
+            *mut c_void, // CFArrayRef of IOHIDValueRef
+        ),
+    >,
+    context: *mut c_void,
+) {
+    unsafe {
+        (IoKitFunctions::get().queue_register_callback)(
+            queue, callout, context,
+        )
+    }
+}
+
+unsafe fn IOHIDQueueScheduleWithRunLoop(
+    queue: *mut IOHIDQueue,
+    run_loop: *mut c_void,
+    mode: *mut c_void,
+) {
+    unsafe {
+        (IoKitFunctions::get().queue_schedule_with_runloop)(
+            queue, run_loop, mode,
+        )
+    }
+}
+
+unsafe fn IOHIDQueueOpen(queue: *mut IOHIDQueue) -> u32 {
+    unsafe { (IoKitFunctions::get().queue_open)(queue) }
+}
+
+unsafe fn IOHIDQueueClose(queue: *mut IOHIDQueue, flags: u32) {
+    unsafe { (IoKitFunctions::get().queue_close)(queue, flags) }
+}
+
+unsafe fn IOHIDValueGetInteger(value: *mut IOHIDValue) -> u32 {
+    unsafe { (IoKitFunctions::get().value_get_integer)(value) }
+}
+
+unsafe fn IOHIDValueGetElement(value: *mut IOHIDValue) -> *mut IOHIDElement {
+    unsafe { (IoKitFunctions::get().value_get_element)(value) }
+}
+
+unsafe fn IOHIDElementGetUsagePage(element: *mut IOHIDElement) -> u32 {
+    unsafe { (IoKitFunctions::get().element_get_usage_page)(element) }
+}
+
+unsafe fn IOHIDElementGetUsage(element: *mut IOHIDElement) -> u32 {
+    unsafe { (IoKitFunctions::get().element_get_usage)(element) }
+}
+
+unsafe fn CFArrayGetCount(the_array: *const c_void) -> usize {
+    unsafe { (IoKitFunctions::get().cf_array_get_count)(the_array) }
+}
+
+unsafe fn CFArrayGetValueAtIndex(
+    the_array: *const c_void,
+    idx: usize,
+) -> *const c_void {
+    unsafe {
+        (IoKitFunctions::get().cf_array_get_value_at_index)(the_array, idx)
+    }
+}
+
+unsafe fn CFSetGetCount(the_set: CFSetRef) -> usize {
+    unsafe { (IoKitFunctions::get().cf_set_get_count)(the_set) }
+}
+
+unsafe fn CFSetCreateIterator(
+    the_set: CFSetRef,
+    iterator: *mut *mut c_void,
+) -> bool {
+    unsafe {
+        (IoKitFunctions::get().cf_set_create_iterator)(the_set, iterator)
+    }
+}
+
+unsafe fn CFSetIteratorGetNext(iterator: *mut c_void) -> CFTypeRef {
+    unsafe { (IoKitFunctions::get().cf_set_iterator_get_next)(iterator) }
+}
+
+unsafe fn CFRelease(cf: *const c_void) {
+    unsafe { (IoKitFunctions::get().cf_release)(cf) }
+}
+
+unsafe fn IOHIDDeviceCopyCFTypeArgumentByIndex(
+    device: *mut IOHIDDevice,
+    index: usize,
+) -> *const c_void {
+    unsafe {
+        (IoKitFunctions::get().device_copy_cf_type_arg_by_index)(device, index)
+    }
+}
+
+unsafe fn CFNumberCreate(
+    allocator: CFAllocatorRef,
+    the_type: u32,
+    value_ptr: *const c_void,
+) -> CFNumberRef {
+    unsafe {
+        (IoKitFunctions::get().cf_number_create)(
+            allocator, the_type, value_ptr,
+        )
+    }
+}
+
+#[allow(improper_ctypes_definitions)]
+unsafe fn CFNumberGetValue(
+    number: CFNumberRef,
+    the_type: u32,
+    value_ptr: *mut c_void,
+) -> bool {
+    unsafe {
+        (IoKitFunctions::get().cf_number_get_value)(
+            number, the_type, value_ptr,
+        )
+    }
+}
+
+unsafe fn CFDictionaryCreateMutable(
+    allocator: CFAllocatorRef,
+    capacity: isize,
+    key_type: *const c_void,
+    value_type: *const c_void,
+) -> *mut c_void {
+    unsafe {
+        (IoKitFunctions::get().cf_dict_create_mutable)(
+            allocator, capacity, key_type, value_type,
+        )
+    }
+}
+
+unsafe fn CFDictionarySetValue(
+    dict: *mut c_void,
+    key: *const c_void,
+    value: *const c_void,
+) {
+    unsafe { (IoKitFunctions::get().cf_dict_set_value)(dict, key, value) }
+}
+
+unsafe fn IOHIDManagerSetDeviceMatchingWithDictionary(
+    manager: *mut IOHIDManager,
+    dict: CFDictionaryRef,
+) {
+    unsafe {
+        (IoKitFunctions::get().manager_set_device_matching_with_dict)(
+            manager, dict,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HID input element type constant (kHIDElementTypeInput_Misc = 0)
+// ---------------------------------------------------------------------------
+
+/// `kHIDInputElementTypeInputMisc` — used for creating a queue that
+/// receives all input events from the device.
+#[allow(non_upper_case_globals)]
+const kHIDInputElementTypeInputMisc: u32 = 0;
+
+// ---------------------------------------------------------------------------
+// HID value callback context
+// ---------------------------------------------------------------------------
+
+/// Context passed to the queue value-available callback.
+///
+/// When the `driverkit` feature is enabled, output is emitted through a
+/// shared `HidSocket`.  Without it, CGEvent posting is used exclusively.
+#[cfg(feature = "driverkit")]
+pub struct HidQueueContext {
+    // Shared lookup for remapping rules.
+    pub lookup:
+        std::sync::Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
+    // Shared connection to the DriverKit virtual HID keyboard.
+    pub socket: std::sync::Arc<super::hid_socket::HidSocket>,
+    // Bitmask tracking which modifier keys are physically pressed.
+    pub modifier_state: u8,
+    // Set of currently pressed keycodes for deduplication.
+    pub pressed_keys: std::collections::HashSet<u16>,
+    // Device location ID string for keyboard filtering.
+    pub device_id: String,
+}
+
+#[cfg(not(feature = "driverkit"))]
+pub struct HidQueueContext {
+    // Shared lookup for remapping rules.
+    pub lookup:
+        std::sync::Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
+    // Pre-created event source for CGEvent-based output.
+    pub source: CFRetained<objc2_core_graphics::CGEventSource>,
+    // Bitmask tracking which modifier keys are physically pressed.
+    pub modifier_state: u8,
+    // Set of currently pressed keycodes for deduplication.
+    pub pressed_keys: std::collections::HashSet<u16>,
+    // Device location ID string for keyboard filtering.
+    pub device_id: String,
+}
+
+// ---------------------------------------------------------------------------
+// HidDevice — represents a discovered HID keyboard device
+// ---------------------------------------------------------------------------
+
+/// A single HID keyboard device discovered via IOHIDManager.
+///
+/// Holds the `IOHIDDeviceRef` and pre-cached properties for filtering.
+pub struct HidDevice {
+    // Raw device reference.
+    device: *mut IOHIDDevice,
+    // Pre-cached location ID.
+    location_id: u32,
+}
+
+impl HidDevice {
+    /// Open the device with the specified options.
+    ///
+    /// Use `kIOHIDOptionsTypeSeizeDevice` for exclusive access (Karabiner
+    /// approach).  Requires root privileges.
+    pub fn open(&self, seize: bool) -> Result<(), IoKitError> {
+        let flags = if seize {
+            kIOHIDOptionsTypeSeizeDevice
+        } else {
+            kIOHIDOptionsTypeNone
+        };
+
+        let result = unsafe { IOHIDDeviceOpen(self.device, flags) };
+        check_io_return(
+            result,
+            &format!(
+                "IOHIDDeviceOpen for device at location 0x{:08x}",
+                self.location_id,
+            ),
+        )
+    }
+
+    // Close the device.
+    pub fn close(&self) {
+        unsafe {
+            IOHIDDeviceClose(self.device, kIOHIDOptionsTypeNone);
+        }
+    }
+
+    // Create an input queue for this device.
+    pub fn create_queue(&self) -> Result<HidQueue, IoKitError> {
+        let queue = unsafe {
+            IOHIDDeviceCreateQueue(self.device, kCFAllocatorDefault)
+        };
+
+        if queue.is_null() {
+            return Err(IoKitError::IoReturn(
+                0xfffffff0, // kIOReturnBadArgument
+                "IOHIDDeviceCreateQueue returned null".into(),
+            ));
+        }
+
+        Ok(HidQueue { queue })
+    }
+
+    // Returns the location ID of this device.
+    pub fn location_id(&self) -> u32 {
+        self.location_id
+    }
+
+    // Returns the location ID as a hex string for the lookup trait.
+    pub fn location_id_string(&self) -> String {
+        format!("0x{:08x}", self.location_id)
+    }
+
+    // Returns the raw device reference.
+    pub fn as_raw(&self) -> *mut IOHIDDevice {
+        self.device
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HidQueue — receives HID values from a seized device
+// ---------------------------------------------------------------------------
+
+/// An `IOHIDQueue` that receives raw HID values from a seized device.
+pub struct HidQueue {
+    queue: *mut IOHIDQueue,
+}
+
+impl HidQueue {
+    /// Register a callback for HID value events.
+    ///
+    /// The context will be leaked and freed when the queue is dropped.  This
+    /// is safe because the queue outlives the context in normal operation, and
+    /// we free it explicitly on drop.
+    pub fn register_value_callback(
+        &self,
+        context: HidQueueContext,
+    ) -> HidQueueHandle {
+        let context_ptr = Box::into_raw(Box::new(context));
+
+        unsafe {
+            IOHIDQueueRegisterValueAvailableCallback(
+                self.queue,
+                Some(hid_queue_value_callback),
+                context_ptr as *mut c_void,
+            );
+        }
+
+        HidQueueHandle {
+            queue: self.queue,
+            context_ptr: context_ptr as *mut c_void,
+        }
+    }
+
+    // Schedule the queue with the current run loop.
+    pub fn schedule_with_runloop(&self) {
+        let run_loop =
+            CFRunLoop::current().expect("IOHIDQueue: no current run loop");
+        let mode_ref = unsafe { kCFRunLoopDefaultMode }
+            .expect("kCFRunLoopDefaultMode is always available");
+
+        unsafe {
+            IOHIDQueueScheduleWithRunLoop(
+                self.queue,
+                &run_loop as *const _ as *mut c_void,
+                mode_ref as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    // Open (start) the queue.  Must be called after registering callbacks.
+    pub fn open(&self) -> Result<(), IoKitError> {
+        let result = unsafe { IOHIDQueueOpen(self.queue) };
+        check_io_return(result, "IOHIDQueueOpen")
+    }
+}
+
+/// FFI callback invoked by IOHIDQueue for every HID value event.
+///
+/// Each `values` argument is a CFArray of `IOHIDValueRef` pointers.  We
+/// iterate the array and extract usage page, usage code, and value from
+/// each element.  Only key-down events are processed for remapping;
+/// key-up and unmapped keys pass through naturally via the seized device.
+#[cfg(feature = "driverkit")]
+unsafe extern "C" fn hid_queue_value_callback(
+    user_info: *mut c_void,
+    _queue: *mut IOHIDQueue,
+    _unused: u32,
+    values: *mut c_void, // CFArrayRef of IOHIDValueRef
+) {
+    if user_info.is_null() || values.is_null() {
+        return;
+    }
+
+    let context = unsafe { &mut *(user_info as *mut HidQueueContext) };
+
+    // Iterate the CFArray of values.
+    let count = unsafe { CFArrayGetCount(values as *const c_void) };
+
+    for i in 0..count {
+        let value_ref = unsafe {
+            CFArrayGetValueAtIndex(values as *const c_void, i)
+                as *mut IOHIDValue
+        };
+
+        if value_ref.is_null() {
+            continue;
+        }
+
+        // Get the element that produced this value.
+        let element = unsafe { IOHIDValueGetElement(value_ref) };
+        if element.is_null() {
+            continue;
+        }
+
+        // Extract usage page and usage code.
+        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
+        let usage = unsafe { IOHIDElementGetUsage(element) } as u16;
+
+        // Skip non-keyboard events.
+        if usage_page != HID_USAGE_PAGE_KEYBOARD {
+            continue;
+        }
+
+        // Get the value (0 = up, non-zero = down).
+        let raw_value = unsafe { IOHIDValueGetInteger(value_ref) };
+        let is_down = raw_value != 0;
+
+        // Translate HID usage to CGKeyCode.
+        let Some(cg_keycode) = cg_keycode_from_hid_usage(usage) else {
+            continue;
+        };
+
+        // Track pressed keys for deduplication.
+        let actually_down = context.pressed_keys.insert(cg_keycode);
+        if !is_down {
+            context.pressed_keys.remove(&cg_keycode);
+        }
+
+        // Only process key-down events for remapping.
+        if !is_down || !actually_down {
+            continue;
+        }
+
+        // Get the device ID for keyboard filtering.
+        let device_id = Some(context.device_id.as_str());
+
+        // Track modifier state.
+        let lookup_modifiers = context.modifier_state;
+        if let Some(bit) = keycode_to_modifier_bit(cg_keycode) {
+            context.modifier_state |= 1 << bit;
+        }
+
+        // Perform the lookup.
+        let guard = context.lookup.read();
+        let active_outputs = guard
+            .for_app(
+                &guard.active_app(),
+                cg_keycode,
+                lookup_modifiers,
+                device_id,
+            )
+            .or_else(|| guard.global(cg_keycode, lookup_modifiers, device_id))
+            .map(|v| v.to_vec());
+        drop(guard);
+
+        // Emit mapped outputs via the virtual HID keyboard.
+        if let Some(outputs) = active_outputs {
+            for native_key in &outputs {
+                emit_hid_report(&context.socket, native_key);
+            }
+        }
+    }
+}
+
+/// Emit a single `NativeKey` as USB HID keyboard reports.
+///
+/// Sends a report with the modifier and base key pressed, followed by
+/// an empty report to release.
+#[cfg(feature = "driverkit")]
+fn emit_hid_report(
+    socket: &std::sync::Arc<super::hid_socket::HidSocket>,
+    native_key: &crate::daemon::mapping_cache::NativeKey,
+) {
+    use super::hid_socket::build_keyboard_report;
+
+    if let Ok(report) =
+        build_keyboard_report(native_key.modifiers, Some(native_key.base))
+    {
+        let _ = socket.send_report(&report);
+    }
+
+    // Release the key by sending an empty report.
+    if let Ok(empty_report) = build_keyboard_report(0, None) {
+        let _ = socket.send_report(&empty_report);
+    }
+}
+
+#[cfg(not(feature = "driverkit"))]
+unsafe extern "C" fn hid_queue_value_callback(
+    user_info: *mut c_void,
+    _queue: *mut IOHIDQueue,
+    _unused: u32,
+    values: *mut c_void, // CFArrayRef of IOHIDValueRef
+) {
+    if user_info.is_null() || values.is_null() {
+        return;
+    }
+
+    let context = unsafe { &mut *(user_info as *mut HidQueueContext) };
+
+    // Iterate the CFArray of values.
+    let count = unsafe { CFArrayGetCount(values as *const c_void) };
+
+    for i in 0..count {
+        let value_ref = unsafe {
+            CFArrayGetValueAtIndex(values as *const c_void, i)
+                as *mut IOHIDValue
+        };
+
+        if value_ref.is_null() {
+            continue;
+        }
+
+        // Get the element that produced this value.
+        let element = unsafe { IOHIDValueGetElement(value_ref) };
+        if element.is_null() {
+            continue;
+        }
+
+        // Extract usage page and usage code.
+        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
+        let usage = unsafe { IOHIDElementGetUsage(element) } as u16;
+
+        // Skip non-keyboard events.
+        if usage_page != HID_USAGE_PAGE_KEYBOARD {
+            continue;
+        }
+
+        // Get the value (0 = up, non-zero = down).
+        let raw_value = unsafe { IOHIDValueGetInteger(value_ref) };
+        let is_down = raw_value != 0;
+
+        // Translate HID usage to CGKeyCode.
+        let Some(cg_keycode) = cg_keycode_from_hid_usage(usage) else {
+            continue;
+        };
+
+        // Track pressed keys for deduplication.
+        let actually_down = context.pressed_keys.insert(cg_keycode);
+        if !is_down {
+            context.pressed_keys.remove(&cg_keycode);
+        }
+
+        // Only process key-down events for remapping.
+        if !is_down || !actually_down {
+            continue;
+        }
+
+        // Get the device ID for keyboard filtering.
+        let device_id = Some(context.device_id.as_str());
+
+        // Track modifier state.
+        let lookup_modifiers = context.modifier_state;
+        if let Some(bit) = keycode_to_modifier_bit(cg_keycode) {
+            context.modifier_state |= 1 << bit;
+        }
+
+        // Perform the lookup.
+        let guard = context.lookup.read();
+        let active_outputs = guard
+            .for_app(
+                &guard.active_app(),
+                cg_keycode,
+                lookup_modifiers,
+                device_id,
+            )
+            .or_else(|| guard.global(cg_keycode, lookup_modifiers, device_id))
+            .map(|v| v.to_vec());
+        drop(guard);
+
+        // Emit mapped outputs via CGEvent posting.
+        if let Some(outputs) = active_outputs {
+            for native_key in &outputs {
+                emit_cg_event_chord(&context.source, native_key);
+            }
+        }
+    }
+}
+
+/// Post a `NativeKey` as individual CGEvent key-down/key-up events.
+fn emit_cg_event_chord(
+    source: &CFRetained<objc2_core_graphics::CGEventSource>,
+    native_key: &crate::daemon::mapping_cache::NativeKey,
+) {
+    use std::{thread, time::Duration};
+
+    use objc2_core_graphics::{CGEvent, CGEventTapLocation, CGKeyCode};
+
+    let mut pressed_modifiers: Vec<CGKeyCode> = Vec::new();
+
+    // Map modifier bit positions to CGKeyCodes.
+    let modifier_bits = [
+        (0, 59), // LeftControl
+        (1, 62), // RightControl
+        (2, 56), // LeftShift
+        (3, 60), // RightShift
+        (4, 58), // LeftAlt
+        (5, 61), // RightAlt
+        (6, 55), // LeftCommand
+        (7, 54), // RightCommand
+    ];
+
+    // Press modifiers.
+    for (bit, code) in modifier_bits {
+        if (native_key.modifiers >> bit) & 1 == 1 {
+            if let Some(e) =
+                CGEvent::new_keyboard_event(Some(source), code, true)
+            {
+                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
+            }
+            pressed_modifiers.push(code);
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    // Press and release the base key.
+    if let Some(e) = CGEvent::new_keyboard_event(
+        Some(source),
+        native_key.base as CGKeyCode,
+        true,
+    ) {
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
+    }
+    thread::sleep(Duration::from_millis(1));
+
+    if let Some(e) = CGEvent::new_keyboard_event(
+        Some(source),
+        native_key.base as CGKeyCode,
+        false,
+    ) {
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
+    }
+    thread::sleep(Duration::from_millis(1));
+
+    // Release modifiers in reverse order.
+    for code in pressed_modifiers.into_iter().rev() {
+        if let Some(e) = CGEvent::new_keyboard_event(Some(source), code, false)
+        {
+            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Handle that keeps a queue and its context alive, and cleans up on drop.
+pub struct HidQueueHandle {
+    queue: *mut IOHIDQueue,
+    context_ptr: *mut c_void,
+}
+
+impl Drop for HidQueueHandle {
+    fn drop(&mut self) {
+        unsafe {
+            IOHIDQueueClose(self.queue, kIOHIDOptionsTypeNone);
+            drop(Box::from_raw(self.context_ptr as *mut HidQueueContext));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HidDeviceManager — discovers keyboards via IOHIDManager (matching only)
+// ---------------------------------------------------------------------------
+
+/// Device discovery via `IOHIDManager`.  Used exclusively for matching
+/// devices; does NOT register input callbacks on the manager.  Instead,
+/// individual devices are opened directly and captured via `IOHIDQueue`.
+pub struct HidDeviceManager {
+    manager: *mut IOHIDManager,
+}
+
+impl HidDeviceManager {
+    // Create a new manager configured to match keyboard devices.
+    pub fn new_keyboard_matcher() -> Result<Self, IoKitError> {
+        let manager = unsafe {
+            IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone)
+        };
+
+        if manager.is_null() {
+            return Err(IoKitError::IoReturn(
+                0xfffffff0,
+                "IOHIDManagerCreate returned null".into(),
+            ));
+        }
+
+        // Build a custom matching dictionary for keyboards.  We match on
+        // primary usage page (0x01) and primary usage (0x06 = keyboard).
+        let dict = unsafe {
+            CFDictionaryCreateMutable(
+                kCFAllocatorDefault,
+                0,
+                ptr::null(),
+                ptr::null(),
+            )
+        };
+
+        // kHIDPrimaryUsagePage = 0x01.
+        let usage_page_number = unsafe {
+            CFNumberCreate(
+                kCFAllocatorDefault,
+                kCFNumberUIntType,
+                &0x01u32 as *const _ as *const _,
+            )
+        };
+        // "Primary Usage Page" key.
+        let usage_page_key = create_cf_string("Primary Usage Page");
+        unsafe {
+            CFDictionarySetValue(
+                dict,
+                usage_page_key as *const _,
+                usage_page_number as *const _,
+            );
+        }
+
+        // kHIDPrimaryUsage = 0x06 (keyboard).
+        let usage_number = unsafe {
+            CFNumberCreate(
+                kCFAllocatorDefault,
+                kCFNumberUIntType,
+                &0x06u32 as *const _ as *const _,
+            )
+        };
+        let usage_key = create_cf_string("Primary Usage");
+        unsafe {
+            CFDictionarySetValue(
+                dict,
+                usage_key as *const _,
+                usage_number as *const _,
+            );
+        }
+
+        // Apply the matching dictionary.
+        unsafe {
+            IOHIDManagerSetDeviceMatchingWithDictionary(manager, dict);
+        }
+
+        // Release CF objects.
+        unsafe {
+            CFRelease(dict as *const _);
+            CFRelease(usage_page_key as *const _);
+            CFRelease(usage_page_number as *const _);
+            CFRelease(usage_key as *const _);
+            CFRelease(usage_number as *const _);
+        }
+
+        let mgr = HidDeviceManager { manager };
+
+        // Open the manager before scanning.
+        mgr.open()?;
+
+        Ok(mgr)
+    }
+
+    // Open the manager (required before scanning devices).
+    fn open(&self) -> Result<(), IoKitError> {
+        let result = unsafe { IOHIDManagerOpen(self.manager, 0) };
+        check_io_return(result, "IOHIDManagerOpen")
+    }
+
+    // Synchronously scan for connected keyboard devices.
+    pub fn scan_devices(&self) -> Vec<HidDevice> {
+        let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
+
+        if device_set.is_null() {
+            return Vec::new();
+        }
+
+        let mut devices = Vec::new();
+
+        // Iterate the CFSet of matched devices.
+        let mut iterator: *mut c_void = ptr::null_mut();
+        let has_iterator =
+            unsafe { CFSetCreateIterator(device_set, &mut iterator) };
+
+        if has_iterator {
+            loop {
+                let device_ptr = unsafe { CFSetIteratorGetNext(iterator) };
+                if device_ptr.is_null() {
+                    break;
+                }
+
+                let device = device_ptr as *mut IOHIDDevice;
+
+                // Get the location ID.
+                let location_id = unsafe { IOHIDDeviceGetLocationID(device) };
+
+                devices.push(HidDevice {
+                    device,
+                    location_id,
+                });
+            }
+
+            unsafe { CFRelease(iterator as *const _) };
+        }
+
+        // Release the CFSet.
+        unsafe { CFRelease(device_set as *const _) };
+
+        devices
+    }
+
+    // Schedule the manager with the current run loop for hotplug support.
+    pub fn schedule_with_runloop(&self) {
+        let run_loop = CFRunLoop::current()
+            .expect("HidDeviceManager: no current run loop");
+        let mode_ref = unsafe { kCFRunLoopDefaultMode }
+            .expect("kCFRunLoopDefaultMode is always available");
+
+        unsafe {
+            IOHIDManagerScheduleWithRunLoop(
+                self.manager,
+                &run_loop as *const _ as *mut c_void,
+                mode_ref as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    // Returns true if the manager is valid.
+    pub fn is_valid(&self) -> bool {
+        !self.manager.is_null()
+    }
+}
+
+impl Drop for HidDeviceManager {
+    fn drop(&mut self) {
+        if !self.manager.is_null() {
+            unsafe {
+                IOHIDManagerClose(self.manager, kIOHIDOptionsTypeNone);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: create a CFString from &str (leaked, caller must CFRelease)
+// ---------------------------------------------------------------------------
+
+/// Create a `CFString` from a Rust string slice.  The returned pointer
+/// must be released with `CFRelease` when no longer needed.
+fn create_cf_string(s: &str) -> CFStringRef {
+    use objc2_foundation::NSString;
+
+    let ns = NSString::from_str(s);
+    // CFString and NSString are toll-free bridged.  We transfer ownership
+    // to the caller via a raw pointer that they must CFRelease.
+    let ptr: *const objc2_foundation::NSString = ns.as_ref();
+    ptr as CFStringRef
+}
+
+// ---------------------------------------------------------------------------
+// Modifier handling (mirrors mapping.rs for IOHID context)
+// ---------------------------------------------------------------------------
+
+/// Map a CGKeyCode to its modifier bit position.  Returns `None` for
+/// non-modifier keys.
+fn keycode_to_modifier_bit(code: u16) -> Option<u8> {
+    use crate::common::modifier::ModifierRole;
+
+    let role = match code {
+        59 => ModifierRole::LeftControl,
+        62 => ModifierRole::RightControl,
+        56 => ModifierRole::LeftShift,
+        60 => ModifierRole::RightShift,
+        58 => ModifierRole::LeftAlt,
+        61 => ModifierRole::RightAlt,
+        55 => ModifierRole::LeftCommand,
+        54 => ModifierRole::RightCommand,
+        _ => return None,
+    };
+    Some(role.bit())
+}
+
+// ---------------------------------------------------------------------------
+// Public: start IOHID device-seizure based mapping
+// ---------------------------------------------------------------------------
+
+/// Start keyboard input capture via IOKit device seizure.
+///
+/// This follows the Karabiner Elements approach:
+/// 1. Discover keyboards via IOHIDManager (matching only).
+/// 2. Open each device with `kIOHIDOptionsTypeSeizeDevice`.
+/// 3. Create an IOHIDQueue for each device and register a value callback.
+/// 4. Run the CFRunLoop to receive events.
+///
+/// Requires root privileges and Input Monitoring permission.
+/// Handle that keeps all seized devices and queues alive.  Drop to release.
+pub struct SeizureHandle {
+    _manager: HidDeviceManager,
+    _devices: Vec<HidDevice>,
+    _queue_handles: Vec<HidQueueHandle>,
+}
+
+// ---------------------------------------------------------------------------
+// Entry point — IOKit device seizure with queue-based capture
+// ---------------------------------------------------------------------------
+
+/// Start keyboard input capture by seizing physical devices.
+///
+/// Discovers keyboards via `HidDeviceManager`, opens each with
+/// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
+/// delivery.  Mapped output is emitted through the shared `HidSocket`
+/// (DriverKit virtual keyboard).
+#[cfg(feature = "driverkit")]
+pub fn start_iohid_seizure_mapping(
+    lookup: std::sync::Arc<
+        parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
+    >,
+    socket: std::sync::Arc<super::hid_socket::HidSocket>,
+) -> Result<SeizureHandle, IoKitError> {
+    // Discover physical keyboards.
+    let manager = HidDeviceManager::new_keyboard_matcher()?;
+    let devices = manager.scan_devices();
+
+    if devices.is_empty() {
+        return Err(IoKitError::IoReturn(
+            0,
+            "No keyboard devices found via IOHIDManager".into(),
+        ));
+    }
+
+    println!("IOKit HID: discovered {} keyboard device(s)", devices.len(),);
+
+    // Open and seize each device, creating queues.
+    let mut queue_handles = Vec::new();
+
+    for device in &devices {
+        let device_id = device.location_id_string();
+        println!("IOKit HID: seizing device at location {}", device_id,);
+
+        // Seize the device.
+        device.open(true).map_err(|e| {
+            eprintln!(
+                "IOKit HID: failed to seize device {}: {}",
+                device_id, e
+            );
+            e
+        })?;
+
+        // Create a queue and register the callback.
+        let queue = device.create_queue()?;
+
+        // Build the context for this device's callback.
+        let ctx = HidQueueContext {
+            lookup: lookup.clone(),
+            socket: socket.clone(),
+            modifier_state: 0,
+            pressed_keys: std::collections::HashSet::new(),
+            device_id,
+        };
+
+        let handle = queue.register_value_callback(ctx);
+
+        // Schedule and open the queue.
+        queue.schedule_with_runloop();
+        queue.open()?;
+
+        println!(
+            "IOKit HID: queue active for device {}",
+            device.location_id_string()
+        );
+
+        queue_handles.push(handle);
+    }
+
+    // Schedule the manager for hotplug.
+    manager.schedule_with_runloop();
+
+    Ok(SeizureHandle {
+        _manager: manager,
+        _devices: devices,
+        _queue_handles: queue_handles,
+    })
+}
+
+/// Start keyboard input capture by seizing physical devices.
+///
+/// Discovers keyboards via `HidDeviceManager`, opens each with
+/// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
+/// delivery.  Mapped output is emitted via CGEvent posting.
+#[cfg(not(feature = "driverkit"))]
+pub fn start_iohid_seizure_mapping(
+    lookup: std::sync::Arc<
+        parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
+    >,
+    source: CFRetained<objc2_core_graphics::CGEventSource>,
+) -> Result<SeizureHandle, IoKitError> {
+    // Discover physical keyboards.
+    let manager = HidDeviceManager::new_keyboard_matcher()?;
+    let devices = manager.scan_devices();
+
+    if devices.is_empty() {
+        return Err(IoKitError::IoReturn(
+            0,
+            "No keyboard devices found via IOHIDManager".into(),
+        ));
+    }
+
+    println!("IOKit HID: discovered {} keyboard device(s)", devices.len(),);
+
+    // Open and seize each device, creating queues.
+    let mut queue_handles = Vec::new();
+
+    for device in &devices {
+        let device_id = device.location_id_string();
+        println!("IOKit HID: seizing device at location {}", device_id,);
+
+        // Seize the device.
+        device.open(true).map_err(|e| {
+            eprintln!(
+                "IOKit HID: failed to seize device {}: {}",
+                device_id, e
+            );
+            e
+        })?;
+
+        // Create a queue and register the callback.
+        let queue = device.create_queue()?;
+
+        // Build the context for this device's callback.
+        let ctx = HidQueueContext {
+            lookup: lookup.clone(),
+            source: source.clone(),
+            modifier_state: 0,
+            pressed_keys: std::collections::HashSet::new(),
+            device_id,
+        };
+
+        let handle = queue.register_value_callback(ctx);
+
+        // Schedule and open the queue.
+        queue.schedule_with_runloop();
+        queue.open()?;
+
+        println!(
+            "IOKit HID: queue active for device {}",
+            device.location_id_string()
+        );
+
+        queue_handles.push(handle);
+    }
+
+    // Schedule the manager for hotplug.
+    manager.schedule_with_runloop();
+
+    Ok(SeizureHandle {
+        _manager: manager,
+        _devices: devices,
+        _queue_handles: queue_handles,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hid_usage_to_cg_keycode_letters() {
+        assert_eq!(cg_keycode_from_hid_usage(0x04), Some(0)); // A
+        assert_eq!(cg_keycode_from_hid_usage(0x1D), Some(6)); // Z
+    }
+
+    #[test]
+    fn hid_usage_to_cg_keycode_numbers() {
+        assert_eq!(cg_keycode_from_hid_usage(0x1E), Some(18)); // 1
+        assert_eq!(cg_keycode_from_hid_usage(0x27), Some(29)); // 0
+    }
+
+    #[test]
+    fn hid_usage_to_cg_keycode_modifiers() {
+        assert_eq!(cg_keycode_from_hid_usage(0xE0), Some(59)); // LeftControl
+        assert_eq!(cg_keycode_from_hid_usage(0xE2), Some(56)); // LeftShift
+        assert_eq!(cg_keycode_from_hid_usage(0xE6), Some(55)); // LeftCommand
+    }
+
+    #[test]
+    fn hid_usage_to_cg_keycode_function_keys() {
+        assert_eq!(cg_keycode_from_hid_usage(0x3A), Some(122)); // F1
+        assert_eq!(cg_keycode_from_hid_usage(0x45), Some(111)); // F12
+    }
+
+    #[test]
+    fn hid_usage_to_cg_keycode_navigation() {
+        assert_eq!(cg_keycode_from_hid_usage(0x52), Some(124)); // UpArrow
+        assert_eq!(cg_keycode_from_hid_usage(0x51), Some(125)); // DownArrow
+        assert_eq!(cg_keycode_from_hid_usage(0x50), Some(123)); // LeftArrow
+        assert_eq!(cg_keycode_from_hid_usage(0x4B), Some(124)); // RightArrow
+    }
+
+    #[test]
+    fn hid_usage_to_cg_keycode_edit_keys() {
+        assert_eq!(cg_keycode_from_hid_usage(0x28), Some(36)); // Return
+        assert_eq!(cg_keycode_from_hid_usage(0x2A), Some(51)); // Backspace
+        assert_eq!(cg_keycode_from_hid_usage(0x29), Some(53)); // Escape
+        assert_eq!(cg_keycode_from_hid_usage(0x2B), Some(48)); // Tab
+        assert_eq!(cg_keycode_from_hid_usage(0x2C), Some(49)); // Space
+    }
+
+    #[test]
+    fn hid_usage_to_cg_keycode_unknown() {
+        assert_eq!(cg_keycode_from_hid_usage(0xFF), None);
+    }
+
+    #[test]
+    fn keycode_to_modifier_bit_left_control() {
+        assert_eq!(keycode_to_modifier_bit(59), Some(0));
+    }
+
+    #[test]
+    fn keycode_to_modifier_bit_non_modifier() {
+        assert_eq!(keycode_to_modifier_bit(0), None); // A is not a modifier
+    }
+
+    #[test]
+    fn check_io_return_success() {
+        assert!(check_io_return(kIOReturnSuccess, "test").is_ok());
+    }
+
+    #[test]
+    fn check_io_return_not_permitted() {
+        let err = check_io_return(kIOReturnNotPermitted, "test");
+        assert!(matches!(err, Err(IoKitError::NotPermitted(_))));
+    }
+
+    #[test]
+    fn check_io_return_exclusive_access() {
+        let err = check_io_return(kIOReturnExclusiveAccess, "test");
+        assert!(matches!(err, Err(IoKitError::ExclusiveAccess(_))));
+    }
+
+    #[test]
+    fn check_io_return_generic() {
+        let err = check_io_return(0xdeadbeef, "test");
+        assert!(matches!(err, Err(IoKitError::IoReturn(0xdeadbeef, _))));
+    }
+}

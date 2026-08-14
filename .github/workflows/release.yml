@@ -78,9 +78,12 @@ jobs:
         run: |
           ARCHIVE="keymapper-${{ github.ref_name }}-${{ matrix.target }}.tar.xz"
           STAGING="dist/keymapper/${{ github.ref_name }}"
-          mkdir -p "$STAGING"
+          mkdir -p "$STAGING/resources/launchd"
           cp "target/${{ matrix.target }}/release/keymapper" "$STAGING/"
           cp "target/${{ matrix.target }}/release/keymapperd" "$STAGING/"
+          cp resources/launchd/de.adrhinum.keymapperd.plist "$STAGING/resources/launchd/"
+          cp scripts/install-macos.sh "$STAGING/"
+          cp scripts/uninstall-macos.sh "$STAGING/"
           cp LICENSE.TXT README.md "$STAGING/"
           tar -cJf "$ARCHIVE" "dist/keymapper/${{ github.ref_name }}"
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber

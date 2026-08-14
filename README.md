@@ -17,7 +17,7 @@ cargo install --path .
 
 Alternatively, download a pre-built DMG from the [releases page](https://github.com/mamrhein/keymapper.rs/releases), mount it, and run `install.sh`.
 
-Run `keymapperd` with appropriate privileges for keyboard interception (Accessibility on macOS, `/dev/input` access on Linux).
+Run `keymapperd` as root on macOS (required for IOKit device seizure), or with appropriate privileges for keyboard interception on other platforms (`/dev/input` access on Linux).
 
 ### macOS — Homebrew
 
@@ -44,8 +44,17 @@ keymapper config add CapsLock LeftControl
 # Validate your configuration
 keymapper config check
 
-# Start the daemon
-keymapper server start
+Run `keymapperd` as root. On macOS, install the LaunchDaemon:
+
+```bash
+sudo scripts/install-macos.sh /usr/local/bin/keymapperd
+```
+
+Or, if installed via Homebrew, start the service:
+
+```bash
+brew services start keymapper
+```
 ```
 
 ## Configuration
@@ -215,9 +224,9 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 ## Troubleshooting
 
-**macOS — "Failed to create CGEventTap":** grant Accessibility permission in System Settings > Privacy & Security > Accessibility. Restart the daemon after granting access.
+**macOS — daemon not capturing keys:** the daemon must run as root to seize HID devices via IOKit. Verify it is running: `launchctl print system/de.adrhinum.keymapperd`. If it is not loaded, install the LaunchDaemon: `sudo ./install-macos.sh /usr/local/bin/keymapperd`.
 
-**macOS — DriverKit driver not loading:** check System Settings > Privacy & Security for a blocked driver prompt, click **Allow**, then reboot. See [macos-driver.md](docs/macos-driver.md) for full troubleshooting.
+**macOS — driver not loaded:** check System Settings > Privacy & Security for a blocked driver prompt. Click **Allow** and reboot. See [macos-driver.md](docs/macos-driver.md) for full troubleshooting.
 
 **Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
 
@@ -227,8 +236,8 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 ## How it works
 
-| Platform | Mechanism                                                                                                |
-| -------- | -------------------------------------------------------------------------------------------------------- |
-| Linux    | `evdev` device grab + `evdev::uinput` virtual keyboard                                                   |
-| macOS    | `CGEventTap` for interception; DriverKit virtual HID driver for event emission (falls back to `CGEvent`) |
-| Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`)                                                               |
+| Platform | Mechanism |
+|----------|-----------|
+| Linux | `evdev` device grab + `uinput` virtual keyboard |
+| macOS | IOKit device seizure for input capture, DriverKit virtual HID driver for event emission |
+| Windows | Low-level keyboard hook (`WH_KEYBOARD_LL`) |

@@ -21,9 +21,10 @@ use crate::common::keyboard::KeyboardInfo;
 /// excluded because they are typically pointing devices that happen to
 /// announce keyboard capabilities (e.g. touchpads with integrated buttons).
 ///
-/// Returns both the [`KeyboardInfo`] metadata and the opened [`Device`] handle.
-fn enumerate_keyboards() -> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::error::Error>>
-{
+/// Returns both the [`KeyboardInfo`] metadata and the opened [`Device`]
+/// handle.
+fn enumerate_keyboards()
+-> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::error::Error>> {
     let mut enumerator = Enumerator::new()?;
 
     enumerator.match_subsystem("input")?;
@@ -110,13 +111,7 @@ pub(super) fn build_keyboard_from_udev(
     });
 
     Some((
-        KeyboardInfo::new(
-            name,
-            vendor,
-            model,
-            device_path,
-            port,
-        ),
+        KeyboardInfo::new(name, vendor, model, device_path, port),
         device,
     ))
 }
@@ -130,7 +125,8 @@ pub(super) fn build_keyboard_from_udev(
 pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 {
     let results = enumerate_keyboards()?;
-    let keyboards: Vec<KeyboardInfo> = results.into_iter().map(|(info, _)| info).collect();
+    let keyboards: Vec<KeyboardInfo> =
+        results.into_iter().map(|(info, _)| info).collect();
 
     if keyboards.is_empty() {
         return Err("No keyboard devices found.".into());
@@ -146,8 +142,7 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 /// use [`list_keyboards`] instead.  The daemon uses this function to avoid a
 /// second udev scan and redundant device opens.
 pub fn discover_and_open_keyboards()
-    -> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::error::Error>>
-{
+-> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::error::Error>> {
     enumerate_keyboards()
 }
 

@@ -61,5 +61,6 @@ class Keymapper < Formula
     service do
         run [opt_bin / "keymapperd"]
         keep_alive true
+        sudo true  # LaunchDaemon is required for IOKit device seizure.
     end
 end

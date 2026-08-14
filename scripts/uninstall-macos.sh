@@ -1,19 +1,25 @@
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Uninstalls the keymapperd launchd service from macOS.
+# Uninstalls the keymapperd LaunchDaemon from macOS.
 #
-# Boots out the service and removes the plist from ~/Library/LaunchAgents/.
-# Does not delete log files.
+# Boots out the service and removes the plist from /Library/LaunchDaemons/.
+# Does not delete log files.  Requires sudo privileges.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
 
 LABEL="de.adrhinum.keymapperd"
-PLIST_PATH="$HOME/Library/LaunchAgents/${LABEL}.plist"
+PLIST_PATH="/Library/LaunchDaemons/${LABEL}.plist"
+
+# Require root.
+if [ "$EUID" -ne 0 ]; then
+    echo "This script must be run as root (use sudo)." >&2
+    exit 1
+fi
 
 # Unload the service if it is loaded.
-if launchctl print gui/"$UID" "$LABEL" >/dev/null 2>&1; then
-    launchctl bootout gui/"$UID" "$LABEL"
+if launchctl print system/"$LABEL" >/dev/null 2>&1; then
+    launchctl bootout system/"$LABEL"
     echo "Stopped ${LABEL}."
 else
     echo "${LABEL} is not loaded."

@@ -44,10 +44,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (all_keyboards, opened_devices) = {
         let opened = keymapper::platform::discover_and_open_keyboards()
             .unwrap_or_default();
-        let infos: Vec<keymapper::common::keyboard::KeyboardInfo> = opened
-            .iter()
-            .map(|(info, _)| info.clone())
-            .collect();
+        let infos: Vec<keymapper::common::keyboard::KeyboardInfo> =
+            opened.iter().map(|(info, _)| info.clone()).collect();
         (infos, opened)
     };
 
