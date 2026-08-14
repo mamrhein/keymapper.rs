@@ -45,14 +45,6 @@ fn can_run_e2e() -> bool {
             return false;
         }
 
-        // On macOS, IOHIDManager symbols must be resolvable from IOKit.
-        // In some environments (sandboxed runners, certain CI configs) dlsym
-        // on IOKit fails even though the framework exists on disk.
-        #[cfg(target_os = "macos")]
-        if !keymapper::platform::iohid_available() {
-            return false;
-        }
-
         // When the driverkit feature is enabled, the virtual HID driver must
         // also be available.
         #[cfg(all(target_os = "macos", feature = "driverkit"))]
