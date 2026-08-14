@@ -12,9 +12,7 @@
 //! Detects the active display server via `$XDG_SESSION_TYPE` and delegates
 //! to the appropriate backend (X11 or Wayland).
 
-#[cfg(feature = "wayland")]
 mod wayland;
-#[cfg(feature = "x11")]
 mod x11;
 
 /// Synchronously query the current foreground application name.
@@ -26,43 +24,15 @@ pub fn get_active_app_name() -> String {
     let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
 
     match session_type.as_str() {
-        "x11" => {
-            #[cfg(feature = "x11")]
-            {
-                x11::get_active_app_name()
-            }
-            #[cfg(not(feature = "x11"))]
-            {
-                "unknown".to_string()
-            }
-        }
-        "wayland" => {
-            #[cfg(feature = "wayland")]
-            {
-                wayland::get_active_app_name()
-            }
-            #[cfg(not(feature = "wayland"))]
-            {
-                "unknown".to_string()
-            }
-        }
+        "x11" => x11::get_active_app_name(),
+        "wayland" => wayland::get_active_app_name(),
         _ => {
             // Unknown or unset session type; try backends in order.
-            #[cfg(feature = "x11")]
-            {
-                let result = x11::get_active_app_name();
-                if result != "unknown" {
-                    return result;
-                }
+            let result = x11::get_active_app_name();
+            if result != "unknown" {
+                return result;
             }
-            #[cfg(feature = "wayland")]
-            {
-                let result = wayland::get_active_app_name();
-                if result != "unknown" {
-                    return result;
-                }
-            }
-            "unknown".to_string()
+            wayland::get_active_app_name()
         }
     }
 }

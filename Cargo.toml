@@ -40,9 +40,9 @@ evdev = "0.13"
 nix = { version = "0.31.3", features = ["event"] }
 sysinfo = "0.39" # process enumeration for `keymapper appnames`
 udev = "0.9"
-wayland-client = { version = "0.31", optional = true }
-x11rb = { version = "0.14", features = ["allow-unsafe-code"], optional = true }
-zbus = { version = "5", features = ["blocking"], optional = true }
+wayland-client = "0.31"
+x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
+zbus = { version = "5", features = ["blocking"] }
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -71,10 +71,6 @@ windows = { version = "0.62", features = [
 ] }
 
 [features]
-default = ["wayland"]
-x11 = ["dep:x11rb"]
-wayland = ["dep:wayland-client", "dep:zbus"]
-
 # Enable the DriverKit-based virtual HID keyboard on macOS.  When active,
 # synthetic key events are emitted through a real hardware-level HID device
 # instead of CGEvent, bypassing the synthetic-event restrictions of modern
