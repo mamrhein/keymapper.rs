@@ -21,14 +21,14 @@ name = "keymapperd"
 path = "src/keymapperd.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"]}
 dirs = "6" # platform config directory resolution
+fs-err = "3"
 indexmap = { version = "2", features = ["serde"] }
 notify = "8" # cross-platform file watching
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-clap = { version = "4", features = ["derive"]}
-fs-err = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -37,22 +37,20 @@ signal-hook = "0.4"
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
-
-udev = "0.9"
 nix = { version = "0.31.3", features = ["event"] }
 sysinfo = "0.39" # process enumeration for `keymapper appnames`
-x11rb = { version = "0.14", features = ["allow-unsafe-code"], optional = true }
-wayland-client = { version = "0.31", optional = true }
-cosmic-client-toolkit = { version = "0.2", optional = true }
-zbus = { version = "5", features = ["blocking"], optional = true }
+udev = "0.9"
+wayland-client = "0.31"
+x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
+zbus = { version = "5", features = ["blocking"] }
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = "0.3"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWorkspace"] }
-objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary"] }
+objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
+objc2-foundation = "0.3"
 
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -73,10 +71,6 @@ windows = { version = "0.62", features = [
 ] }
 
 [features]
-default = ["wayland"]
-x11 = ["dep:x11rb"]
-wayland = ["dep:wayland-client", "dep:cosmic-client-toolkit", "dep:zbus"]
-
 # Enable the DriverKit-based virtual HID keyboard on macOS.  When active,
 # synthetic key events are emitted through a real hardware-level HID device
 # instead of CGEvent, bypassing the synthetic-event restrictions of modern

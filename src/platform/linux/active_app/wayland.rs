@@ -44,34 +44,31 @@ pub fn get_active_app_name() -> String {
 // ---------------------------------------------------------------------------
 
 fn query_kde() -> String {
-    #[cfg(feature = "wayland")]
-    {
-        use zbus::blocking::Connection;
+    use zbus::blocking::Connection;
 
-        let conn = match Connection::session() {
-            Ok(c) => c,
+    let conn = match Connection::session() {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    // KWin's Workspace3 interface exposes activeWindow() which returns
+    // the PID of the active window.
+    let pid: i32 = match conn.call_method(
+        Some("org.kde.KWin"),
+        "/KWin",
+        Some("org.kde.kwin.Workspace3"),
+        "activeWindow",
+        &(),
+    ) {
+        Ok(reply) => match reply.body().deserialize() {
+            Ok(v) => v,
             Err(_) => return String::new(),
-        };
+        },
+        Err(_) => return String::new(),
+    };
 
-        // KWin's Workspace3 interface exposes activeWindow() which returns
-        // the PID of the active window.
-        let pid: i32 = match conn.call_method(
-            Some("org.kde.KWin"),
-            "/KWin",
-            Some("org.kde.kwin.Workspace3"),
-            "activeWindow",
-            &(),
-        ) {
-            Ok(reply) => match reply.body().deserialize() {
-                Ok(v) => v,
-                Err(_) => return String::new(),
-            },
-            Err(_) => return String::new(),
-        };
-
-        if pid > 0 {
-            return resolve_pid_to_name(pid as u32);
-        }
+    if pid > 0 {
+        return resolve_pid_to_name(pid as u32);
     }
 
     String::new()
@@ -82,38 +79,35 @@ fn query_kde() -> String {
 // ---------------------------------------------------------------------------
 
 fn query_gnome() -> String {
-    #[cfg(feature = "wayland")]
-    {
-        use zbus::blocking::Connection;
+    use zbus::blocking::Connection;
 
-        let conn = match Connection::session() {
-            Ok(c) => c,
+    let conn = match Connection::session() {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    // GNOME Shell exposes a read-only Eval interface that can run
+    // JavaScript in the shell context.  We use it to query the
+    // focused window's wm_class (equivalent to X11 WM_CLASS).
+    let js = "global.display.focus_window && \
+              global.display.focus_window.get_wm_class() || ''";
+
+    let result: String = match conn.call_method(
+        Some("org.gnome.Shell"),
+        "/org/gnome/Shell",
+        Some("org.gnome.Shell.Eval"),
+        "Eval",
+        &(js,),
+    ) {
+        Ok(reply) => match reply.body().deserialize() {
+            Ok(v) => v,
             Err(_) => return String::new(),
-        };
+        },
+        Err(_) => return String::new(),
+    };
 
-        // GNOME Shell exposes a read-only Eval interface that can run
-        // JavaScript in the shell context.  We use it to query the
-        // focused window's wm_class (equivalent to X11 WM_CLASS).
-        let js = "global.display.focus_window && \
-                  global.display.focus_window.get_wm_class() || ''";
-
-        let result: String = match conn.call_method(
-            Some("org.gnome.Shell"),
-            "/org/gnome/Shell",
-            Some("org.gnome.Shell.Eval"),
-            "Eval",
-            &(js,),
-        ) {
-            Ok(reply) => match reply.body().deserialize() {
-                Ok(v) => v,
-                Err(_) => return String::new(),
-            },
-            Err(_) => return String::new(),
-        };
-
-        if !result.is_empty() {
-            return result.trim().to_string();
-        }
+    if !result.is_empty() {
+        return result.trim().to_string();
     }
 
     String::new()
@@ -124,34 +118,31 @@ fn query_gnome() -> String {
 // ---------------------------------------------------------------------------
 
 fn query_cosmic() -> String {
-    #[cfg(feature = "wayland")]
-    {
-        use zbus::blocking::Connection;
+    use zbus::blocking::Connection;
 
-        let conn = match Connection::session() {
-            Ok(c) => c,
+    let conn = match Connection::session() {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    // Check if COSMIC is running by attempting to connect to its D-Bus
+    // service.
+    let app_id: String = match conn.call_method(
+        Some("com.system76.CosmicDesktop"),
+        "/org/freedesktop/Portal/v1",
+        Some("org.freedesktop.portal.Foreground"),
+        "ActiveWindow",
+        &(),
+    ) {
+        Ok(reply) => match reply.body().deserialize() {
+            Ok(v) => v,
             Err(_) => return String::new(),
-        };
+        },
+        Err(_) => return String::new(),
+    };
 
-        // Check if COSMIC is running by attempting to connect to its D-Bus
-        // service.
-        let app_id: String = match conn.call_method(
-            Some("com.system76.CosmicDesktop"),
-            "/org/freedesktop/Portal/v1",
-            Some("org.freedesktop.portal.Foreground"),
-            "ActiveWindow",
-            &(),
-        ) {
-            Ok(reply) => match reply.body().deserialize() {
-                Ok(v) => v,
-                Err(_) => return String::new(),
-            },
-            Err(_) => return String::new(),
-        };
-
-        if !app_id.is_empty() {
-            return app_id;
-        }
+    if !app_id.is_empty() {
+        return app_id;
     }
 
     String::new()
