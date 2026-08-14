@@ -65,12 +65,16 @@ cp "${PROJECT_ROOT}/resources/launchd/de.adrhinum.keymapperd.plist" \
 cp "${PROJECT_ROOT}/scripts/install-macos.sh" "${VOLUME_DIR}/"
 cp "${PROJECT_ROOT}/scripts/uninstall-macos.sh" "${VOLUME_DIR}/"
 
-# Install script — copies binaries to a usable location and sets up launchd.
+# Install script — copies binaries to a usable location and sets up the
+# LaunchDaemon.  The daemon runs as root for IOKit device seizure.
 cat > "${VOLUME_DIR}/install.sh" << 'INSTALL'
 #!/bin/bash
 # ---------------------------------------------------------------------------
 # Installs keymapper binaries to /usr/local/bin (default) or a custom path,
-# then registers the launchd service.
+# then registers the LaunchDaemon.
+#
+# The daemon runs as root to perform IOKit device seizure.  This script
+# requires sudo privileges.
 #
 # Usage: ./install.sh [destination]
 # ---------------------------------------------------------------------------
@@ -80,13 +84,19 @@ set -euo pipefail
 DEST="${1:-/usr/local/bin}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [ ! -d "$DEST" ]; then
-    echo "Creating ${DEST}..."
-    sudo mkdir -p "$DEST"
+# Require root.
+if [ "$EUID" -ne 0 ]; then
+    echo "This script must be run as root (use sudo)." >&2
+    exit 1
 fi
 
-sudo cp "${SCRIPT_DIR}/bin/keymapper" "$DEST/"
-sudo cp "${SCRIPT_DIR}/bin/keymapperd" "$DEST/"
+if [ ! -d "$DEST" ]; then
+    echo "Creating ${DEST}..."
+    mkdir -p "$DEST"
+fi
+
+cp "${SCRIPT_DIR}/bin/keymapper" "$DEST/"
+cp "${SCRIPT_DIR}/bin/keymapperd" "$DEST/"
 
 echo "Installed keymapper to ${DEST}."
 echo ""
@@ -96,6 +106,7 @@ DRIVER_DIR="$HOME/Library/Extensions"
 if [ -d "${SCRIPT_DIR}/driver/KeyMapperVirtualHID.kext" ]; then
     mkdir -p "$DRIVER_DIR"
     cp -R "${SCRIPT_DIR}/driver/KeyMapperVirtualHID.kext" "$DRIVER_DIR/"
+    chown -R "$USER" "$DRIVER_DIR/KeyMapperVirtualHID.kext" 2>/dev/null || true
     echo "Installed virtual HID driver to ${DRIVER_DIR}/."
     echo "On first run, approve the driver in System Settings > Privacy & Security."
 else
@@ -103,7 +114,7 @@ else
     echo "To build the driver, clone the repo and run 'cd driver && make install'."
 fi
 
-# Register the launchd service.
+# Register the LaunchDaemon.
 "${SCRIPT_DIR}/install-macos.sh" "${DEST}/keymapperd"
 
 echo ""
@@ -117,13 +128,13 @@ cat > "${VOLUME_DIR}/INSTALL.txt" << READMI
 keymapper ${VERSION} for macOS
 ==============================
 
-Quick install:
-  Double-click install.sh (or run ./install.sh in Terminal).
+Quick install (requires sudo):
+  sudo ./install.sh
 
 Manual install:
-  cp bin/keymapper /usr/local/bin/
-  cp bin/keymapperd /usr/local/bin/
-  ./install-macos.sh /usr/local/bin/keymapperd
+  sudo cp bin/keymapper /usr/local/bin/
+  sudo cp bin/keymapperd /usr/local/bin/
+  sudo ./install-macos.sh /usr/local/bin/keymapperd
 
 Virtual HID driver (recommended for reliable key emission):
   The bundled driver is installed automatically by install.sh.
@@ -135,7 +146,7 @@ Then:
   keymapper server status    # verify the daemon is running
 
 To uninstall:
-  ./uninstall-macos.sh
+  sudo ./uninstall-macos.sh
 
 Full documentation is in README.md.
 READMI

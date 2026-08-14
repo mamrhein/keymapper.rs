@@ -16,5 +16,10 @@
     <string>@LOG_DIR@/keymapperd.log</string>
     <key>StandardErrorPath</key>
     <string>@LOG_DIR@/keymapperd-err.log</string>
+    <!--
+        The daemon runs as root to perform IOKit device seizure. Input events
+        are captured via IOHIDManager and forwarded to the user-space client
+        over a Unix domain socket.
+    -->
 </dict>
 </plist>
