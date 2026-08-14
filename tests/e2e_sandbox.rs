@@ -315,14 +315,14 @@ where
 
     // On Windows, set the env var so the sandbox reads events from the file.
     #[cfg(target_os = "windows")]
-    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
+    unsafe { std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file); }
 
     // Run the test body.
     test_fn(&*sandbox);
 
     // Clear the env var after the test.
     #[cfg(target_os = "windows")]
-    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
+    unsafe { std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE"); }
 
     // Teardown: kill the daemon and clean up the sandbox.
     daemon.kill();
@@ -429,7 +429,7 @@ where
 
     // On Windows, set the env var so the sandbox reads events from the file.
     #[cfg(target_os = "windows")]
-    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
+    unsafe { std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file); }
 
     // Drain any events captured during startup.
     let _ = sandbox.drain_output_events();
@@ -439,7 +439,7 @@ where
 
     // Clear the env var after the test.
     #[cfg(target_os = "windows")]
-    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
+    unsafe { std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE"); }
 
     // Teardown.
     daemon.kill();
@@ -1197,7 +1197,7 @@ groups:
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Set the env var so the sandbox reads events from the file.
-    std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file);
+    unsafe { std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file); }
 
     // Drain any events captured during startup.
     let _ = sandbox.drain_output_events();
@@ -1244,7 +1244,7 @@ groups:
     );
 
     // Clear the env var.
-    std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE");
+    unsafe { std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE"); }
 
     // Teardown.
     daemon.kill();
