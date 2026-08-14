@@ -17,7 +17,10 @@ use std::{
     time::Duration,
 };
 
-use evdev::{Device, EventType};
+use evdev::{
+    AttributeSet, Device, EventType, InputEvent, KeyCode,
+    uinput::VirtualDevice,
+};
 use libc::{c_int, epoll_event, epoll_wait as libc_epoll_wait};
 use parking_lot::{Mutex, RwLock};
 use signal_hook::{
@@ -190,20 +193,39 @@ fn modifier_bit_to_code(bit: u8) -> Option<u16> {
     Some(key.as_native())
 }
 
+/// Emit a complete key event (press+release) through the virtual device.
+///
+/// Handles chord emission: modifiers are pressed, the base key is toggled,
+/// then modifiers are released in reverse order. On failure, any keys that
+/// were pressed are released to prevent stuck state.
 fn emit_key_event(
-    device: &mut uinput::Device,
+    device: &mut VirtualDevice,
     native_key: &NativeKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Raw evdev event type codes.
+    const EV_KEY: u16 = 1;
+    const EV_SYN: u16 = 0;
+    const SYN_REPORT: u16 = 0;
+
     // Track all pressed codes so they can be released on failure.
     let mut pressed: Vec<u16> = Vec::new();
 
+    // Helper to emit a single event with synchronization.
+    let emit = |dev: &mut VirtualDevice,
+                code: u16,
+                val: i32|
+     -> Result<(), Box<dyn std::error::Error>> {
+        dev.emit(&[
+            InputEvent::new(EV_KEY, code, val),
+            InputEvent::new(EV_SYN, SYN_REPORT, 0),
+        ])?;
+        Ok(())
+    };
+
     // Helper to release any keys that were successfully pressed.
-    let cleanup = |dev: &mut uinput::Device, codes: &[u16]| {
+    let cleanup = |dev: &mut VirtualDevice, codes: &[u16]| {
         for code in codes.iter().rev() {
-            if let Err(e) = dev.write(EventType::KEY.0 as _, *code as _, 0) {
-                eprintln!("warning: failed to release key {code}: {e}");
-            }
-            let _ = dev.synchronize();
+            let _ = emit(dev, *code, 0);
             thread::sleep(Duration::from_millis(1));
         }
     };
@@ -213,56 +235,20 @@ fn emit_key_event(
         if (native_key.modifiers >> bit) & 1 == 1
             && let Some(code) = modifier_bit_to_code(bit)
         {
-            if let Err(e) = device.write(EventType::KEY.0 as _, code as _, 1) {
-                cleanup(device, &pressed);
-                return Err(e.into());
-            }
+            emit(device, code, 1)?;
             pressed.push(code);
-            if let Err(e) = device.synchronize() {
-                cleanup(device, &pressed);
-                return Err(e.into());
-            }
             thread::sleep(Duration::from_millis(1));
         }
     }
 
     // Press and release the base key.
-    if let Err(e) =
-        device.write(EventType::KEY.0 as _, native_key.base as _, 1)
-    {
-        cleanup(device, &pressed);
-        return Err(e.into());
-    }
-    pressed.push(native_key.base);
-    if let Err(e) = device.synchronize() {
-        cleanup(device, &pressed);
-        return Err(e.into());
-    }
+    emit(device, native_key.base, 1)?;
     thread::sleep(Duration::from_millis(1));
-
-    if let Err(e) =
-        device.write(EventType::KEY.0 as _, native_key.base as _, 0)
-    {
-        cleanup(device, &pressed);
-        return Err(e.into());
-    }
-    pressed.pop();
-    if let Err(e) = device.synchronize() {
-        cleanup(device, &pressed);
-        return Err(e.into());
-    }
+    emit(device, native_key.base, 0)?;
     thread::sleep(Duration::from_millis(1));
 
     // Release modifiers in reverse order.
-    for code in pressed.into_iter().rev() {
-        if let Err(e) = device.write(EventType::KEY.0 as _, code as _, 0) {
-            return Err(e.into());
-        }
-        if let Err(e) = device.synchronize() {
-            return Err(e.into());
-        }
-        thread::sleep(Duration::from_millis(1));
-    }
+    cleanup(device, &pressed);
 
     Ok(())
 }
@@ -277,7 +263,7 @@ fn emit_key_event(
 /// that modifier state on one keyboard does not affect another.
 fn process_device_events(
     managed: &mut ManagedDevice,
-    virtual_device: &mut uinput::Device,
+    virtual_device: &mut VirtualDevice,
     lookup: &Arc<RwLock<dyn Lookup>>,
 ) {
     // Drain all pending events from this non-blocking device.
@@ -351,34 +337,34 @@ fn process_device_events(
         }
 
         // Forward the event to the virtual device.
+        const EV_KEY: u16 = 1;
+        const EV_SYN: u16 = 0;
+        const SYN_REPORT: u16 = 0;
+
         if value == 1 {
-            if let Err(e) =
-                virtual_device.write(EventType::KEY.0 as _, code as _, 1)
-            {
-                eprintln!("write error: {}", e);
+            if let Err(e) = virtual_device.emit(&[
+                InputEvent::new(EV_KEY, code, 1),
+                InputEvent::new(EV_SYN, SYN_REPORT, 0),
+            ]) {
+                eprintln!("emit error: {}", e);
             }
         } else if value == 0 {
-            if let Err(e) =
-                virtual_device.write(EventType::KEY.0 as _, code as _, 0)
-            {
-                eprintln!("write error: {}", e);
+            if let Err(e) = virtual_device.emit(&[
+                InputEvent::new(EV_KEY, code, 0),
+                InputEvent::new(EV_SYN, SYN_REPORT, 0),
+            ]) {
+                eprintln!("emit error: {}", e);
             }
         } else {
             // Repeat event (value == 2): emit as press+release to avoid
             // key-stick on the virtual device.
-            if let Err(e) =
-                virtual_device.write(EventType::KEY.0 as _, code as _, 1)
-            {
-                eprintln!("write error: {}", e);
+            if let Err(e) = virtual_device.emit(&[
+                InputEvent::new(EV_KEY, code, 1),
+                InputEvent::new(EV_KEY, code, 0),
+                InputEvent::new(EV_SYN, SYN_REPORT, 0),
+            ]) {
+                eprintln!("emit error: {}", e);
             }
-            if let Err(e) =
-                virtual_device.write(EventType::KEY.0 as _, code as _, 0)
-            {
-                eprintln!("write error: {}", e);
-            }
-        }
-        if let Err(e) = virtual_device.synchronize() {
-            eprintln!("sync error: {}", e);
         }
     }
 }
@@ -617,13 +603,18 @@ pub fn start_mapping(
         });
     }
 
-    let mut virtual_device = uinput::default()?
-        .name("CrossPlatform_Virtual_Keyboard")?
-        .event(uinput::event::Keyboard::All)?
-        .create()?;
+    // KEY_CNT is the total number of key codes defined by the kernel
+    // (linux/input.h: #define KEY_CNT (KEY_MAX + 1), where KEY_MAX = 0x2fd).
+    const KEY_CNT: u16 = 0x2fe;
+    let all_keys: AttributeSet<KeyCode> =
+        (0..KEY_CNT).map(KeyCode::new).collect();
+    let mut virtual_device = VirtualDevice::builder()?
+        .name("CrossPlatform_Virtual_Keyboard")
+        .with_keys(&all_keys)?
+        .build()?;
 
     thread::sleep(Duration::from_millis(200));
-    println!("Linux uinput virtual keyboard ready.");
+    println!("Linux virtual keyboard ready.");
 
     let shutdown = Arc::new(AtomicBool::new(false));
     register(SIGINT, shutdown.clone())

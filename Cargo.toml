@@ -37,7 +37,7 @@ signal-hook = "0.4"
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
-uinput = "0.1"
+
 udev = "0.9"
 nix = { version = "0.31.3", features = ["event"] }
 sysinfo = "0.39" # process enumeration for `keymapper appnames`

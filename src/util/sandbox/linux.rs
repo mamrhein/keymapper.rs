@@ -32,7 +32,10 @@ use std::{
     time::Duration,
 };
 
-use evdev::{Device, EventType};
+use evdev::{
+    AttributeSet, Device, EventType, InputEvent, KeyCode,
+    uinput::VirtualDevice,
+};
 
 use super::{CapturedEvent, Sandbox, SandboxError};
 
@@ -97,7 +100,7 @@ struct MonitorHandle {
 pub struct LinuxSandbox {
     /// Virtual input device for event injection.  Only `Some` after a
     /// successful `setup()` call.
-    device: Option<Arc<Mutex<uinput::Device>>>,
+    device: Option<Arc<Mutex<VirtualDevice>>>,
 
     /// Path to the input device's `/dev/input/event*` node, returned by
     /// `input_device_id()` so the daemon can target it.
@@ -105,7 +108,7 @@ pub struct LinuxSandbox {
 
     /// Secondary virtual input device for injecting events from a
     /// different source.  Used by keyboard filter tests.
-    secondary_device: Option<Arc<Mutex<uinput::Device>>>,
+    secondary_device: Option<Arc<Mutex<VirtualDevice>>>,
 
     /// Path to the secondary device's `/dev/input/event*` node.
     secondary_device_path: Option<String>,
@@ -202,6 +205,10 @@ impl LinuxSandbox {
 
     /// Inject a keyboard event into the virtual input device.
     fn inject_key(&self, code: u16, value: i32) -> Result<(), SandboxError> {
+        const EV_KEY: u16 = 1;
+        const EV_SYN: u16 = 0;
+        const SYN_REPORT: u16 = 0;
+
         let device = self.device.as_ref().ok_or_else(|| {
             SandboxError::InjectionFailed(
                 "sandbox not set up; call setup() first".to_string(),
@@ -212,11 +219,11 @@ impl LinuxSandbox {
             .lock()
             .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
 
-        dev.write(EventType::KEY.0 as _, code as i32, value)
-            .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
-
-        dev.synchronize()
-            .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
+        dev.emit(&[
+            InputEvent::new(EV_KEY, code, value),
+            InputEvent::new(EV_SYN, SYN_REPORT, 0),
+        ])
+        .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
 
         // Allow the kernel to propagate the event to readers of the event
         // node.  Without this delay the daemon may not have picked up the
@@ -378,11 +385,15 @@ impl LinuxSandbox {
             .lock()
             .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
 
-        dev.write(EventType::KEY.0 as _, code as i32, value)
-            .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
+        const EV_KEY: u16 = 1;
+        const EV_SYN: u16 = 0;
+        const SYN_REPORT: u16 = 0;
 
-        dev.synchronize()
-            .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
+        dev.emit(&[
+            InputEvent::new(EV_KEY, code, value),
+            InputEvent::new(EV_SYN, SYN_REPORT, 0),
+        ])
+        .map_err(|e| SandboxError::InjectionFailed(format!("{e}")))?;
 
         // Allow the kernel to propagate the event to readers of the event
         // node.
@@ -554,18 +565,22 @@ fn find_device_by_name(name: &str) -> Option<Device> {
 /// its `/dev/input/event*` node path.
 fn create_uinput_device(
     name: &str,
-) -> Result<(uinput::Device, String), SandboxError> {
+) -> Result<(VirtualDevice, String), SandboxError> {
     // Snapshot existing event nodes so we can identify the new one after
     // creation.
     let before = scan_event_devices();
 
-    let device = uinput::default()
+    // KEY_CNT is the total number of key codes defined by the kernel
+    // (linux/input.h: #define KEY_CNT (KEY_MAX + 1), where KEY_MAX = 0x2fd).
+    const KEY_CNT: u16 = 0x2fe;
+    let all_keys: AttributeSet<KeyCode> =
+        (0..KEY_CNT).map(KeyCode::new).collect();
+    let device = VirtualDevice::builder()
         .map_err(|e| SandboxError::DeviceCreationFailed(format!("{e}")))?
         .name(name)
+        .with_keys(&all_keys)
         .map_err(|e| SandboxError::DeviceCreationFailed(format!("{e}")))?
-        .event(uinput::event::Keyboard::All)
-        .map_err(|e| SandboxError::DeviceCreationFailed(format!("{e}")))?
-        .create()
+        .build()
         .map_err(|e| SandboxError::DeviceCreationFailed(format!("{e}")))?;
 
     // Small delay to let the kernel create the event node.

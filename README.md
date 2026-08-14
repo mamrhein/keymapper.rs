@@ -61,12 +61,12 @@ brew services start keymapper
 
 Create `config.yaml` in one of the following locations:
 
-| Platform | Path |
-|----------|------|
-| Linux | `$XDG_CONFIG_HOME/keymapperd/config.yaml` (defaults to `~/.config/keymapperd/`) |
-| macOS | `~/Library/Application Support/keymapperd/config.yaml` |
-| Windows | `%APPDATA%\keymapperd\config.yaml` |
-| Any | Current working directory (development convenience) |
+| Platform | Path                                                                            |
+| -------- | ------------------------------------------------------------------------------- |
+| Linux    | `$XDG_CONFIG_HOME/keymapperd/config.yaml` (defaults to `~/.config/keymapperd/`) |
+| macOS    | `~/Library/Application Support/keymapperd/config.yaml`                          |
+| Windows  | `%APPDATA%\keymapperd\config.yaml`                                              |
+| Any      | Current working directory (development convenience)                             |
 
 Search order is CWD first, then the platform-specific application config directory. Symbolic links are rejected; `config.yaml` must be a regular file.
 
@@ -108,11 +108,11 @@ The daemon exits with an error if no configuration file is found in any search l
 
 The document is a YAML sequence of rule groups. Each group has:
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | No | Human-readable label (ignored at runtime) |
-| `apps` | No | List of application names to scope the group. Omit or leave empty for global rules |
-| `mappings` | Yes | Key-value pairs mapping triggers to outputs |
+| Field      | Required | Description                                                                        |
+| ---------- | -------- | ---------------------------------------------------------------------------------- |
+| `name`     | No       | Human-readable label (ignored at runtime)                                          |
+| `apps`     | No       | List of application names to scope the group. Omit or leave empty for global rules |
+| `mappings` | Yes      | Key-value pairs mapping triggers to outputs                                        |
 
 Groups are evaluated in definition order. Within each group, mappings are evaluated top-to-bottom; the first matching trigger wins.
 
@@ -120,10 +120,10 @@ Groups are evaluated in definition order. Within each group, mappings are evalua
 
 Each mapping is a `trigger: output` pair inside a `mappings:` block.
 
-| Output | Description | Example |
-|--------|-------------|---------|
+| Output                     | Description                                                                 | Example                 |
+| -------------------------- | --------------------------------------------------------------------------- | ----------------------- |
 | Single key or chord string | Replace the trigger with one key event (modifiers held while pressing base) | `CapsLock: LeftControl` |
-| List of chord strings | Emit a sequence of key events (macro) | `F1: [Cmd+C, T]` |
+| List of chord strings      | Emit a sequence of key events (macro)                                       | `F1: [Cmd+C, T]`        |
 
 Every output is a **chord**: modifier keys are held while the base key is pressed, then released in reverse. For example, `Cmd+C` is emitted as "press Cmd → press C → release C → release Cmd", ensuring the modifier has its intended effect.
 
@@ -131,11 +131,11 @@ Every output is a **chord**: modifier keys are held while the base key is presse
 
 Triggers use compact `+`-separated strings. The last token is the base key; all preceding tokens are modifiers.
 
-| Syntax | Example | Meaning |
-|--------|---------|---------|
-| Bare key | `CapsLock` | Single key with no modifier requirement |
-| Modifier + key | `Ctrl+H` | Ctrl held while pressing H |
-| Multiple modifiers | `Cmd+Shift+T` | Cmd + Shift held while pressing T |
+| Syntax             | Example       | Meaning                                 |
+| ------------------ | ------------- | --------------------------------------- |
+| Bare key           | `CapsLock`    | Single key with no modifier requirement |
+| Modifier + key     | `Ctrl+H`      | Ctrl held while pressing H              |
+| Multiple modifiers | `Cmd+Shift+T` | Cmd + Shift held while pressing T       |
 
 **Modifier resolution:** generic modifier names resolve to their left-side default. `Ctrl` becomes left Control, `Alt` becomes left Alt, `Cmd` becomes left Command, and so on. Use the explicit names (`LeftCtrl`, `RightCtrl`, etc.) when you need to target a specific side.
 
@@ -157,22 +157,22 @@ All key names are case-sensitive and use TitleCase. Use `keymapper keys list` to
 
 The following aliases resolve to the same platform key:
 
-| Alias | Resolves to |
-|-------|-------------|
-| `Ctrl`, `LeftCtrl` | left Control key |
-| `RightCtrl` | right Control key |
-| `Shift`, `LeftShift` | left Shift key |
-| `Alt`, `LeftAlt`, `Option`, `LeftOption` | left Alt/Option key |
-| `RightAlt`, `RightOption` | right Alt/Option key |
-| `Cmd`, `Command`, `Super`, `LeftCmd` | left Command/Super key |
-| `RightCmd`, `RightCommand` | right Command/Super key |
-| `Caps` | CapsLock |
-| `Enter` | Return |
-| `Esc` | Escape |
-| `Up`, `Down`, `Left`, `Right` | arrow keys |
-| `PgUp`, `PgDn` | PageUp, PageDown |
-| `KP_Multiply`, `KP_Add`, `KP_Divide`, `KP_Enter`, `KP_Subtract` | numpad operator keys |
-| `NonUSBackslash` | IsoExtra key (international keyboards) |
+| Alias                                                           | Resolves to                            |
+| --------------------------------------------------------------- | -------------------------------------- |
+| `Ctrl`, `LeftCtrl`                                              | left Control key                       |
+| `RightCtrl`                                                     | right Control key                      |
+| `Shift`, `LeftShift`                                            | left Shift key                         |
+| `Alt`, `LeftAlt`, `Option`, `LeftOption`                        | left Alt/Option key                    |
+| `RightAlt`, `RightOption`                                       | right Alt/Option key                   |
+| `Cmd`, `Command`, `Super`, `LeftCmd`                            | left Command/Super key                 |
+| `RightCmd`, `RightCommand`                                      | right Command/Super key                |
+| `Caps`                                                          | CapsLock                               |
+| `Enter`                                                         | Return                                 |
+| `Esc`                                                           | Escape                                 |
+| `Up`, `Down`, `Left`, `Right`                                   | arrow keys                             |
+| `PgUp`, `PgDn`                                                  | PageUp, PageDown                       |
+| `KP_Multiply`, `KP_Add`, `KP_Divide`, `KP_Enter`, `KP_Subtract` | numpad operator keys                   |
+| `NonUSBackslash`                                                | IsoExtra key (international keyboards) |
 
 ## CLI reference
 
@@ -193,30 +193,30 @@ The match is case-sensitive. On Wayland, this command prints compositor-specific
 
 Manage the configuration file.
 
-| Subcommand | Description |
-|------------|-------------|
-| `list` | Print the configuration file to stdout |
-| `check [path]` | Validate and diagnose the configuration. Detects no-op rules, duplicate triggers, empty groups, and circular pairs. Accepts an optional path to a config file or directory containing `config.yaml` |
-| `create [dir]` | Create an empty configuration file at the given directory or the default platform-specific location |
-| `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names) |
+| Subcommand           | Description                                                                                                                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`               | Print the configuration file to stdout                                                                                                                                                              |
+| `check [path]`       | Validate and diagnose the configuration. Detects no-op rules, duplicate triggers, empty groups, and circular pairs. Accepts an optional path to a config file or directory containing `config.yaml` |
+| `create [dir]`       | Create an empty configuration file at the given directory or the default platform-specific location                                                                                                 |
+| `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names)                                                                        |
 
 ### `keymapper keys`
 
 Key introspection tools.
 
-| Subcommand | Description |
-|------------|-------------|
-| `list` | Print all key names recognised in the configuration file |
-| `probe` | Wait for physical key presses and print each key's name and code. Press Control+Escape to exit |
+| Subcommand | Description                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------- |
+| `list`     | Print all key names recognised in the configuration file                                       |
+| `probe`    | Wait for physical key presses and print each key's name and code. Press Control+Escape to exit |
 
 ### `keymapper server`
 
 Daemon process management.
 
-| Subcommand | Description |
-|------------|-------------|
-| `status` | Check whether keymapperd is running |
-| `start` | Start keymapperd if it is not already running |
+| Subcommand | Description                                   |
+| ---------- | --------------------------------------------- |
+| `status`   | Check whether keymapperd is running           |
+| `start`    | Start keymapperd if it is not already running |
 
 ## Hot-reload
 
