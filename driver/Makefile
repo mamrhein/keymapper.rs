@@ -16,6 +16,9 @@ KEXT_NAME  := KeyMapperVirtualHID.kext
 
 EXTENSIONS_DIR := $(HOME)/Library/Extensions
 
+# Pin the DerivedData output so build artifacts land in Build/Products/.
+DERIVED_DATA := -derivedDataPath Build
+
 # Default to ad-hoc signing for local development.  Override with
 # CODE_SIGN_IDENTITY= for distribution builds, or use the 'ci' target
 # which disables signing entirely (DriverKit 25.5 rejects ad-hoc signing).
@@ -47,6 +50,7 @@ build:
 	  -scheme $(SCHEME) \
 	  -configuration Debug \
 	  ONLY_ACTIVE_ARCH=YES \
+	  $(DERIVED_DATA) \
 	  $(COMMON_FLAGS)
 
 release:
@@ -55,6 +59,7 @@ release:
 	  -configuration Release \
 	  ARCHS="arm64 x86_64" \
 	  ONLY_ACTIVE_ARCH=NO \
+	  $(DERIVED_DATA) \
 	  $(COMMON_FLAGS)
 
 ci:
@@ -63,6 +68,7 @@ ci:
 	  -configuration Release \
 	  ARCHS="arm64 x86_64" \
 	  ONLY_ACTIVE_ARCH=NO \
+	  $(DERIVED_DATA) \
 	  $(NOSIGN_FLAGS)
 
 install: release
