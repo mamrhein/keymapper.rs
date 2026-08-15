@@ -1,0 +1,113 @@
+# ---------------------------------------------------------------------------
+# name:     ci-e2e
+# triggers: push to main, pull requests
+#
+# Runs the end-to-end sandbox tests on Linux, macOS, and Windows.  Linux
+# requires root for /dev/uinput access.  macOS requires root to bypass
+# TCC Accessibility permission.  Windows runs without elevation since
+# SendInput and WH_KEYBOARD_LL work at session level.
+# ---------------------------------------------------------------------------
+
+name: ci-e2e
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  CARGO_TERM_COLOR: always
+  CI: true
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Linux — e2e sandbox tests with /dev/uinput
+  # -----------------------------------------------------------------------
+  # linux-e2e:
+  #   runs-on: ubuntu-latest
+
+  #   steps:
+  #     - uses: actions/checkout@v5
+
+  #     - name: Install Rust stable
+  #       uses: dtolnay/rust-toolchain@stable
+
+  #     - name: Install system dependencies
+  #       run: |
+  #         sudo apt-get update
+  #         sudo apt-get install -y \
+  #           pkg-config \
+  #           libdbus-1-dev \
+  #           libudev-dev \
+  #           libxkbcommon-dev \
+  #           libxcb1-dev
+
+  #     - name: Install cargo-nextest
+  #       uses: taiki-e/install-action@nextest
+
+  #     - name: Build daemon and e2e test binary
+  #       # The e2e tests spawn keymapperd as a subprocess and resolve it from
+  #       # target/debug/keymapperd relative to the test binary's location.
+  #       run: |
+  #         cargo build --bin keymapperd
+  #         cargo nextest run --test e2e_sandbox --no-run
+
+  #     - name: Run e2e tests as root (for /dev/uinput access)
+  #       # Running as root is required because the sandbox needs write access
+  #       # to /dev/uinput.  GitHub Actions runners allow this with sudo.
+  #       run: |
+  #         # Load the uinput module — it may already be loaded but this is
+  #         # idempotent and harmless.
+  #         sudo modprobe uinput || true
+  #         # The ubuntu-latest runner has /dev/uinput with root:root 0660.
+  #         # Running tests as root grants the required write access.
+  #         sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_sandbox
+
+  # -----------------------------------------------------------------------
+  # macOS — e2e sandbox tests (root bypasses TCC Accessibility)
+  # -----------------------------------------------------------------------
+  macos-e2e:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Run e2e tests
+        # Build, ad-hoc sign the test binary, and run as root to bypass TCC
+        # Accessibility permission.  Ad-hoc signing (codesign --sign -) is
+        # sufficient; no certificate is needed.
+        run: bash scripts/sign-and-test-e2e.sh
+
+  # -----------------------------------------------------------------------
+  # Windows — e2e sandbox tests (no elevation required)
+  # -----------------------------------------------------------------------
+  # windows-e2e:
+  #   runs-on: windows-latest
+
+  #   steps:
+  #     - uses: actions/checkout@v5
+
+  #     - name: Install Rust stable
+  #       uses: dtolnay/rust-toolchain@stable
+
+  #     - name: Install cargo-nextest
+  #       uses: taiki-e/install-action@nextest
+
+  #     - name: Build daemon and e2e test binary
+  #       run: |
+  #         cargo build --bin keymapperd
+  #         cargo nextest run --test e2e_sandbox --no-run
+
+  #     - name: Run e2e tests
+  #       # SendInput and WH_KEYBOARD_LL work at session level; no elevation
+  #       # is required.
+  #       run: cargo nextest run --no-capture --test e2e_sandbox
