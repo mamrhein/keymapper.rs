@@ -16,9 +16,6 @@ KEXT_NAME  := KeyMapperVirtualHID.kext
 
 EXTENSIONS_DIR := $(HOME)/Library/Extensions
 
-# Pin the DerivedData output so build artifacts land in Build/Products/.
-DERIVED_DATA := -derivedDataPath Build
-
 # Default to ad-hoc signing for local development.  Override with
 # CODE_SIGN_IDENTITY= for distribution builds, or use the 'ci' target
 # which disables signing entirely (DriverKit 25.5 rejects ad-hoc signing).
@@ -50,7 +47,6 @@ build:
 	  -scheme $(SCHEME) \
 	  -configuration Debug \
 	  ONLY_ACTIVE_ARCH=YES \
-	  $(DERIVED_DATA) \
 	  $(COMMON_FLAGS)
 
 release:
@@ -59,7 +55,6 @@ release:
 	  -configuration Release \
 	  ARCHS="arm64 x86_64" \
 	  ONLY_ACTIVE_ARCH=NO \
-	  $(DERIVED_DATA) \
 	  $(COMMON_FLAGS)
 
 ci:
@@ -68,21 +63,31 @@ ci:
 	  -configuration Release \
 	  ARCHS="arm64 x86_64" \
 	  ONLY_ACTIVE_ARCH=NO \
-	  $(DERIVED_DATA) \
 	  $(NOSIGN_FLAGS)
 
+# Find the latest built .kext by scanning both local DerivedData and the
+# system-wide Xcode DerivedData directory.  This avoids hardcoding the
+# xcodebuild output path, which varies depending on SDK version and host.
+find_kext = \
+  find . ~/Library/Developer/Xcode/DerivedData \
+    -maxdepth 10 -name "$(KEXT_NAME)" -type d 2>/dev/null | head -1
+
 install: release
-	mkdir -p "$(EXTENSIONS_DIR)"
-	cp -R Build/Products/Release/$(KEXT_NAME) "$(EXTENSIONS_DIR)/"
-	@echo ""
-	@echo "Driver installed to $(EXTENSIONS_DIR)/$(KEXT_NAME)"
-	@echo "Approve it in System Settings > Privacy & Security on first run."
+	@KEXT=$$($(find_kext)); \
+	if [ -z "$$KEXT" ]; then echo "error: built $(KEXT_NAME) not found" >&2; exit 1; fi; \
+	mkdir -p "$(EXTENSIONS_DIR)"; \
+	cp -R "$$KEXT" "$(EXTENSIONS_DIR)/"; \
+	echo ""; \
+	echo "Driver installed to $(EXTENSIONS_DIR)/$(KEXT_NAME)"; \
+	echo "Approve it in System Settings > Privacy & Security on first run."
 
 install-ci: ci
-	mkdir -p "$(EXTENSIONS_DIR)"
-	cp -R Build/Products/Release/$(KEXT_NAME) "$(EXTENSIONS_DIR)/"
-	@echo ""
-	@echo "Driver installed to $(EXTENSIONS_DIR)/$(KEXT_NAME)"
+	@KEXT=$$($(find_kext)); \
+	if [ -z "$$KEXT" ]; then echo "error: built $(KEXT_NAME) not found" >&2; exit 1; fi; \
+	mkdir -p "$(EXTENSIONS_DIR)"; \
+	cp -R "$$KEXT" "$(EXTENSIONS_DIR)/"; \
+	echo ""; \
+	echo "Driver installed to $(EXTENSIONS_DIR)/$(KEXT_NAME)"
 
 clean:
 	xcodebuild -project $(XCODE_PROJ) \
