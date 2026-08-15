@@ -130,7 +130,7 @@ impl HidFunctions {
                 Option<FnIOHIDServiceSocketCreate>,
             >(libc::dlsym(
                 handle,
-                b"IOHIDServiceSocketCreate\0".as_ptr() as *const _,
+                c"IOHIDServiceSocketCreate".as_ptr(),
             ))
         };
         let send_report = unsafe {
@@ -139,14 +139,14 @@ impl HidFunctions {
                 Option<FnIOHIDServiceSocketSendReport>,
             >(libc::dlsym(
                 handle,
-                b"IOHIDServiceSocketSendReport\0".as_ptr() as *const _,
+                c"IOHIDServiceSocketSendReport".as_ptr(),
             ))
         };
         let close = unsafe {
             std::mem::transmute::<*mut c_void, Option<FnIOHIDServiceSocketClose>>(
                 libc::dlsym(
                     handle,
-                    b"IOHIDServiceSocketClose\0".as_ptr() as *const _,
+                    c"IOHIDServiceSocketClose".as_ptr(),
                 ),
             )
         };
@@ -269,7 +269,7 @@ impl HidSocket {
 
         // Build a matching dictionary for our driver class name.
         let matching =
-            unsafe { IOServiceMatching(b"KeyMapperDriver\0".as_ptr()) };
+            unsafe { IOServiceMatching(c"KeyMapperDriver".as_ptr() as *const u8) };
         if matching == MACH_PORT_NULL {
             return Err(HidSocketError::DriverNotFound);
         }
