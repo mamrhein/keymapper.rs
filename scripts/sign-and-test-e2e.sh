@@ -24,9 +24,10 @@ build_and_install_driver() {
     # Build the DriverKit virtual HID driver and install it to the user's
     # Extensions directory so it is discoverable via IOKit.  On GitHub Actions
     # runners, DriverKit extensions in ~/Library/Extensions are loaded
-    # automatically without requiring user approval.
+    # automatically without requiring user approval.  Use 'install-ci' to
+    # disable code signing — DriverKit 25.5 rejects ad-hoc signing.
     cd driver
-    make install
+    make install-ci
     cd ..
 }
 
