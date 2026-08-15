@@ -193,16 +193,9 @@ fn is_driver_loaded_in_iokit() -> bool {
 ///
 /// Uses the `HidSocket::discover_and_open` API from the platform module.
 /// Returns `true` if a socket connection succeeds.
-#[cfg(feature = "driverkit")]
 fn is_socket_connected() -> bool {
     use crate::platform::HidSocket;
     HidSocket::discover_and_open().is_ok()
-}
-
-#[cfg(not(feature = "driverkit"))]
-fn is_socket_connected() -> bool {
-    // Without the driverkit feature, socket connectivity cannot be tested.
-    false
 }
 
 // ---------------------------------------------------------------------------

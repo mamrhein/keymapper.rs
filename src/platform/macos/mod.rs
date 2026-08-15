@@ -8,7 +8,6 @@
 // $Revision$
 
 mod active_app;
-#[cfg(feature = "driverkit")]
 mod hid_socket;
 mod iokit_hid;
 mod key;
@@ -16,7 +15,6 @@ mod keyboard;
 mod mapping;
 
 pub(crate) use active_app::get_active_app_name;
-#[cfg(feature = "driverkit")]
 pub use hid_socket::HidSocket;
 pub use key::Key;
 pub use keyboard::list_keyboards;

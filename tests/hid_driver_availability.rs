@@ -14,7 +14,7 @@
 //! Ok).  The "loaded" scenario only passes when the DriverKit extension is
 //! actually running.
 
-#[cfg(all(target_os = "macos", feature = "driverkit"))]
+#[cfg(target_os = "macos")]
 mod hid_tests {
     use keymapper::platform::HidSocket;
 
@@ -98,15 +98,12 @@ mod hid_tests {
     }
 }
 
-/// On non-macOS platforms or when `driverkit` is disabled, there's nothing
-/// to test.  Provide a compile-time guard test so the crate compiles cleanly.
-#[cfg(not(all(target_os = "macos", feature = "driverkit")))]
+/// On non-macOS platforms there's nothing to test.  Provide a compile-time
+/// guard test so the crate compiles cleanly.
+#[cfg(not(target_os = "macos"))]
 mod skip_tests {
     #[test]
-    fn driverkit_not_enabled() {
-        eprintln!(
-            "skipping: driverkit feature not enabled. Run with `--features \
-             driverkit`."
-        );
+    fn driverkit_not_on_macos() {
+        eprintln!("skipping: virtual HID driver is macOS-only.");
     }
 }

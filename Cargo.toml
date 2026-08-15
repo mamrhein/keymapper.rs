@@ -11,15 +11,12 @@ repository = "https://github.com/mamrhein/keymapper.rs"
 license-file = "LICENSE.TXT"
 keywords = ["Cross-platform", "keymapper", "macOS", "Linux", "Windows"]
 categories = ["command-line-utilities"]
-
 [[bin]]
 name = "keymapper"
 path = "src/keymapper.rs"
-
 [[bin]]
 name = "keymapperd"
 path = "src/keymapperd.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"]}
 dirs = "6" # platform config directory resolution
@@ -29,11 +26,9 @@ notify = "8" # cross-platform file watching
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
-
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 signal-hook = "0.4"
-
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
@@ -43,7 +38,6 @@ udev = "0.9"
 wayland-client = "0.31"
 x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
 zbus = { version = "5", features = ["blocking"] }
-
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -51,7 +45,6 @@ objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWorkspace"] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary"] }
 objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
 objc2-foundation = "0.3"
-
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
 crossbeam-channel = "0.5" # lock-free IPC between input threads
@@ -70,9 +63,3 @@ windows = { version = "0.62", features = [
     "Win32_Devices_HumanInterfaceDevice",
 ] }
 
-[features]
-# Enable the DriverKit-based virtual HID keyboard on macOS.  When active,
-# synthetic key events are emitted through a real hardware-level HID device
-# instead of CGEvent, bypassing the synthetic-event restrictions of modern
-# macOS.  Requires the KeyMapperDriver extension to be loaded.
-driverkit = []

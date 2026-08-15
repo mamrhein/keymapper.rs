@@ -9,10 +9,9 @@
 
 //! User-space bridge to the DriverKit virtual HID keyboard driver.
 //!
-//! Communicates with the `KeyMapperDriver` via `IOHIDServiceSocket`.  When
-//! the driver is loaded, HID reports are sent to emulate a real hardware
-//! keyboard, bypassing the synthetic-event restrictions of `CGEvent`.  When
-//! the driver is not available, callers fall back to `CGEvent` posting.
+//! Communicates with the `KeyMapperDriver` via `IOHIDServiceSocket`.  HID
+//! reports are sent to emulate a real hardware keyboard, bypassing the
+//! synthetic-event restrictions of `CGEvent`.
 
 use std::{
     ffi::c_void,

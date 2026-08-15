@@ -119,7 +119,7 @@ jobs:
 
       - name: Run e2e tests as root
         run: |
-          sudo bash scripts/.sign-and-test-e2e.sh --features driverkit
+          sudo bash scripts/.sign-and-test-e2e.sh 
 
   # -----------------------------------------------------------------------
   # Linux — x86_64 (native)

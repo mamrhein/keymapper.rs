@@ -110,8 +110,11 @@ if [ -d "${SCRIPT_DIR}/driver/KeyMapperVirtualHID.kext" ]; then
     echo "Installed virtual HID driver to ${DRIVER_DIR}/."
     echo "On first run, approve the driver in System Settings > Privacy & Security."
 else
-    echo "No virtual HID driver found. Running in CGEvent fallback mode."
-    echo "To build the driver, clone the repo and run 'cd driver && make install'."
+    echo "Error: No virtual HID driver found." >&2
+    echo "Build and install the driver before running the installer:" >&2
+    echo "  cd driver && make install" >&2
+    exit 1
+fi
 fi
 
 # Register the LaunchDaemon.

@@ -21,7 +21,7 @@
 
 use std::{ffi::c_void, ptr};
 
-use objc2_core_foundation::{CFRetained, CFRunLoop, kCFRunLoopDefaultMode};
+use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
 
 // ---------------------------------------------------------------------------
 // Opaque IOKit HID types
@@ -836,31 +836,12 @@ const kHIDInputElementTypeInputMisc: u32 = 0;
 // ---------------------------------------------------------------------------
 
 /// Context passed to the queue value-available callback.
-///
-/// When the `driverkit` feature is enabled, output is emitted through a
-/// shared `HidSocket`.  Without it, CGEvent posting is used exclusively.
-#[cfg(feature = "driverkit")]
 pub struct HidQueueContext {
     // Shared lookup for remapping rules.
     pub lookup:
         std::sync::Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
     // Shared connection to the DriverKit virtual HID keyboard.
     pub socket: std::sync::Arc<super::hid_socket::HidSocket>,
-    // Bitmask tracking which modifier keys are physically pressed.
-    pub modifier_state: u8,
-    // Set of currently pressed keycodes for deduplication.
-    pub pressed_keys: std::collections::HashSet<u16>,
-    // Device location ID string for keyboard filtering.
-    pub device_id: String,
-}
-
-#[cfg(not(feature = "driverkit"))]
-pub struct HidQueueContext {
-    // Shared lookup for remapping rules.
-    pub lookup:
-        std::sync::Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
-    // Pre-created event source for CGEvent-based output.
-    pub source: CFRetained<objc2_core_graphics::CGEventSource>,
     // Bitmask tracking which modifier keys are physically pressed.
     pub modifier_state: u8,
     // Set of currently pressed keycodes for deduplication.
@@ -1008,7 +989,6 @@ impl HidQueue {
 /// iterate the array and extract usage page, usage code, and value from
 /// each element.  Only key-down events are processed for remapping;
 /// key-up and unmapped keys pass through naturally via the seized device.
-#[cfg(feature = "driverkit")]
 unsafe extern "C" fn hid_queue_value_callback(
     user_info: *mut c_void,
     _queue: *mut IOHIDQueue,
@@ -1104,7 +1084,6 @@ unsafe extern "C" fn hid_queue_value_callback(
 ///
 /// Sends a report with the modifier and base key pressed, followed by
 /// an empty report to release.
-#[cfg(feature = "driverkit")]
 fn emit_hid_report(
     socket: &std::sync::Arc<super::hid_socket::HidSocket>,
     native_key: &crate::daemon::mapping_cache::NativeKey,
@@ -1120,163 +1099,6 @@ fn emit_hid_report(
     // Release the key by sending an empty report.
     if let Ok(empty_report) = build_keyboard_report(0, None) {
         let _ = socket.send_report(&empty_report);
-    }
-}
-
-#[cfg(not(feature = "driverkit"))]
-unsafe extern "C" fn hid_queue_value_callback(
-    user_info: *mut c_void,
-    _queue: *mut IOHIDQueue,
-    _unused: u32,
-    values: *mut c_void, // CFArrayRef of IOHIDValueRef
-) {
-    if user_info.is_null() || values.is_null() {
-        return;
-    }
-
-    let context = unsafe { &mut *(user_info as *mut HidQueueContext) };
-
-    // Iterate the CFArray of values.
-    let count = unsafe { CFArrayGetCount(values as *const c_void) };
-
-    for i in 0..count {
-        let value_ref = unsafe {
-            CFArrayGetValueAtIndex(values as *const c_void, i)
-                as *mut IOHIDValue
-        };
-
-        if value_ref.is_null() {
-            continue;
-        }
-
-        // Get the element that produced this value.
-        let element = unsafe { IOHIDValueGetElement(value_ref) };
-        if element.is_null() {
-            continue;
-        }
-
-        // Extract usage page and usage code.
-        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
-        let usage = unsafe { IOHIDElementGetUsage(element) } as u16;
-
-        // Skip non-keyboard events.
-        if usage_page != HID_USAGE_PAGE_KEYBOARD {
-            continue;
-        }
-
-        // Get the value (0 = up, non-zero = down).
-        let raw_value = unsafe { IOHIDValueGetInteger(value_ref) };
-        let is_down = raw_value != 0;
-
-        // Translate HID usage to CGKeyCode.
-        let Some(cg_keycode) = cg_keycode_from_hid_usage(usage) else {
-            continue;
-        };
-
-        // Track pressed keys for deduplication.
-        let actually_down = context.pressed_keys.insert(cg_keycode);
-        if !is_down {
-            context.pressed_keys.remove(&cg_keycode);
-        }
-
-        // Only process key-down events for remapping.
-        if !is_down || !actually_down {
-            continue;
-        }
-
-        // Get the device ID for keyboard filtering.
-        let device_id = Some(context.device_id.as_str());
-
-        // Track modifier state.
-        let lookup_modifiers = context.modifier_state;
-        if let Some(bit) = keycode_to_modifier_bit(cg_keycode) {
-            context.modifier_state |= 1 << bit;
-        }
-
-        // Perform the lookup.
-        let guard = context.lookup.read();
-        let active_outputs = guard
-            .for_app(
-                &guard.active_app(),
-                cg_keycode,
-                lookup_modifiers,
-                device_id,
-            )
-            .or_else(|| guard.global(cg_keycode, lookup_modifiers, device_id))
-            .map(|v| v.to_vec());
-        drop(guard);
-
-        // Emit mapped outputs via CGEvent posting.
-        if let Some(outputs) = active_outputs {
-            for native_key in &outputs {
-                emit_cg_event_chord(&context.source, native_key);
-            }
-        }
-    }
-}
-
-/// Post a `NativeKey` as individual CGEvent key-down/key-up events.
-fn emit_cg_event_chord(
-    source: &CFRetained<objc2_core_graphics::CGEventSource>,
-    native_key: &crate::daemon::mapping_cache::NativeKey,
-) {
-    use std::{thread, time::Duration};
-
-    use objc2_core_graphics::{CGEvent, CGEventTapLocation, CGKeyCode};
-
-    let mut pressed_modifiers: Vec<CGKeyCode> = Vec::new();
-
-    // Map modifier bit positions to CGKeyCodes.
-    let modifier_bits = [
-        (0, 59), // LeftControl
-        (1, 62), // RightControl
-        (2, 56), // LeftShift
-        (3, 60), // RightShift
-        (4, 58), // LeftAlt
-        (5, 61), // RightAlt
-        (6, 55), // LeftCommand
-        (7, 54), // RightCommand
-    ];
-
-    // Press modifiers.
-    for (bit, code) in modifier_bits {
-        if (native_key.modifiers >> bit) & 1 == 1 {
-            if let Some(e) =
-                CGEvent::new_keyboard_event(Some(source), code, true)
-            {
-                CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
-            }
-            pressed_modifiers.push(code);
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    // Press and release the base key.
-    if let Some(e) = CGEvent::new_keyboard_event(
-        Some(source),
-        native_key.base as CGKeyCode,
-        true,
-    ) {
-        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
-    }
-    thread::sleep(Duration::from_millis(1));
-
-    if let Some(e) = CGEvent::new_keyboard_event(
-        Some(source),
-        native_key.base as CGKeyCode,
-        false,
-    ) {
-        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
-    }
-    thread::sleep(Duration::from_millis(1));
-
-    // Release modifiers in reverse order.
-    for code in pressed_modifiers.into_iter().rev() {
-        if let Some(e) = CGEvent::new_keyboard_event(Some(source), code, false)
-        {
-            CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&e));
-        }
-        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -1537,7 +1359,6 @@ pub struct SeizureHandle {
 /// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
 /// delivery.  Mapped output is emitted through the shared `HidSocket`
 /// (DriverKit virtual keyboard).
-#[cfg(feature = "driverkit")]
 pub fn start_iohid_seizure_mapping(
     lookup: std::sync::Arc<
         parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
@@ -1580,83 +1401,6 @@ pub fn start_iohid_seizure_mapping(
         let ctx = HidQueueContext {
             lookup: lookup.clone(),
             socket: socket.clone(),
-            modifier_state: 0,
-            pressed_keys: std::collections::HashSet::new(),
-            device_id,
-        };
-
-        let handle = queue.register_value_callback(ctx);
-
-        // Schedule and open the queue.
-        queue.schedule_with_runloop();
-        queue.open()?;
-
-        println!(
-            "IOKit HID: queue active for device {}",
-            device.location_id_string()
-        );
-
-        queue_handles.push(handle);
-    }
-
-    // Schedule the manager for hotplug.
-    manager.schedule_with_runloop();
-
-    Ok(SeizureHandle {
-        _manager: manager,
-        _devices: devices,
-        _queue_handles: queue_handles,
-    })
-}
-
-/// Start keyboard input capture by seizing physical devices.
-///
-/// Discovers keyboards via `HidDeviceManager`, opens each with
-/// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
-/// delivery.  Mapped output is emitted via CGEvent posting.
-#[cfg(not(feature = "driverkit"))]
-pub fn start_iohid_seizure_mapping(
-    lookup: std::sync::Arc<
-        parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
-    >,
-    source: CFRetained<objc2_core_graphics::CGEventSource>,
-) -> Result<SeizureHandle, IoKitError> {
-    // Discover physical keyboards.
-    let manager = HidDeviceManager::new_keyboard_matcher()?;
-    let devices = manager.scan_devices();
-
-    if devices.is_empty() {
-        return Err(IoKitError::IoReturn(
-            0,
-            "No keyboard devices found via IOHIDManager".into(),
-        ));
-    }
-
-    println!("IOKit HID: discovered {} keyboard device(s)", devices.len(),);
-
-    // Open and seize each device, creating queues.
-    let mut queue_handles = Vec::new();
-
-    for device in &devices {
-        let device_id = device.location_id_string();
-        println!("IOKit HID: seizing device at location {}", device_id,);
-
-        // Seize the device.
-        device.open(true).map_err(|e| {
-            eprintln!(
-                "IOKit HID: failed to seize device {}: {}",
-                device_id, e
-            );
-            e
-        })?;
-
-        // Create a queue and register the callback.
-        let queue = device.create_queue()?;
-
-        // Build the context for this device's callback.
-        let ctx = HidQueueContext {
-            lookup: lookup.clone(),
-            source: source.clone(),
             modifier_state: 0,
             pressed_keys: std::collections::HashSet::new(),
             device_id,

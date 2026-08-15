@@ -45,9 +45,8 @@ fn can_run_e2e() -> bool {
             return false;
         }
 
-        // When the driverkit feature is enabled, the virtual HID driver must
-        // also be available.
-        #[cfg(all(target_os = "macos", feature = "driverkit"))]
+        // On macOS, the virtual HID driver must be available.
+        #[cfg(target_os = "macos")]
         if keymapper::platform::HidSocket::discover_and_open().is_err() {
             return false;
         }
