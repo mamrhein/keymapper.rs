@@ -54,7 +54,9 @@ impl MonitorApp {
 }
 
 impl eframe::App for MonitorApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx();
+
         // Check for shutdown signal.
         if self.shutdown.load(Ordering::Relaxed) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -65,14 +67,13 @@ impl eframe::App for MonitorApp {
         // frame.  We use `keys_down` as the source of truth because raw
         // events may be coalesced or filtered by the backend.
 
-        let input = ctx.input(|i| i.clone());
-
         // --- Non-modifier keys ---
-        let current_keys: std::collections::HashSet<Key> = input
-            .keys_down
-            .iter()
-            .filter_map(|egui_key| map_egui_key(*egui_key))
-            .collect();
+        let current_keys: std::collections::HashSet<Key> = ctx.input(|i| {
+            i.keys_down
+                .iter()
+                .filter_map(|egui_key| map_egui_key(*egui_key))
+                .collect()
+        });
 
         // Emit events for keys that changed state.
         let added: Vec<Key> = current_keys
@@ -94,13 +95,15 @@ impl eframe::App for MonitorApp {
 
         // --- Modifier keys ---
         // Use the `Modifiers` struct which provides individual modifier state.
-        let mods = input.modifiers;
-        let current_mods = ModifierState {
-            left_control: mods.ctrl,
-            left_shift: mods.shift,
-            left_alt: mods.alt,
-            left_super: mods.mac_cmd || mods.command,
-        };
+        let current_mods = ctx.input(|i| {
+            let mods = i.modifiers;
+            ModifierState {
+                left_control: mods.ctrl,
+                left_shift: mods.shift,
+                left_alt: mods.alt,
+                left_super: mods.mac_cmd || mods.command,
+            }
+        });
 
         // Emit modifier events for state changes.
         if current_mods.left_control != self.prev_modifiers.left_control {
@@ -132,11 +135,9 @@ impl eframe::App for MonitorApp {
         self.prev_modifiers = current_mods;
 
         // Show a minimal UI so the window doesn't appear empty.
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong("keymapper_monitor");
-                ui.label("active");
-            });
+        ui.horizontal(|ui| {
+            ui.strong("keymapper_monitor");
+            ui.label("active");
         });
     }
 }
