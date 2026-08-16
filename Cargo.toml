@@ -17,15 +17,25 @@ path = "src/keymapper.rs"
 [[bin]]
 name = "keymapperd"
 path = "src/keymapperd.rs"
+[[bin]]
+name = "keymapper_monitor"
+path = "src/keymapper_monitor.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"]}
 dirs = "6" # platform config directory resolution
+eframe = { version = "0.30", default-features = false, features = [
+    "default_fonts",
+    "glow",
+    "persistence",
+] } # cross-platform GUI for the monitor binary
+egui = "0.30" # UI library used by eframe
 fs-err = "3"
 indexmap = { version = "2", features = ["serde"] }
 notify = "8" # cross-platform file watching
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
+# Unix signal handling and libc bindings
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 signal-hook = "0.4"
@@ -62,4 +72,3 @@ windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_HumanInterfaceDevice",
 ] }
-

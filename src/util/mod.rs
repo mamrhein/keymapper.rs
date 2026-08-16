@@ -9,5 +9,6 @@
 
 //! CLI utility commands for the keymapper tool.
 
+pub mod monitor;
 pub mod platform;
 pub mod sandbox;
