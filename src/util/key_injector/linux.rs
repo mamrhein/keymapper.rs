@@ -28,10 +28,7 @@ use evdev::{AttributeSet, InputEvent, KeyCode, uinput::VirtualDevice};
 use super::{InjectorError, KeyInjector};
 
 /// Unique device name prefix for injector input keyboards.
-pub const INPUT_DEVICE_NAME_PREFIX: &str = "sandbox-keyboard-primary";
-
-/// Name pattern the daemon uses for its output uinput device.
-const DAEMON_OUTPUT_DEVICE_NAME: &str = "CrossPlatform_Virtual_Keyboard";
+pub const INPUT_DEVICE_NAME_PREFIX: &str = "virtual-keyboard";
 
 // ---------------------------------------------------------------------------
 // Injector implementation
