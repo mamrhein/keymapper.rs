@@ -59,8 +59,8 @@ pub fn parse(path: &Path) -> std::io::Result<Vec<LogEvent>> {
 
 /// Assert that *actual* events match *expected* exactly.
 ///
-/// Produces a descriptive diff on mismatch showing the position and values
-/// of the first divergence, plus length differences if applicable.
+/// Produces a descriptive diff on mismatch showing all positions and values
+/// that diverge, plus length differences if applicable.
 pub fn assert_events_match(
     actual: &[LogEvent],
     expected: &[LogEvent],
@@ -83,20 +83,35 @@ pub fn assert_events_match(
         );
     }
 
+    let mut mismatches: Vec<(usize, &LogEvent, &LogEvent)> = Vec::new();
     for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
         if a != e {
-            panic!(
-                "{}\nevent mismatch at position {}\nactual[{}]   = \
+            mismatches.push((i, a, e));
+        }
+    }
+
+    if mismatches.is_empty() {
+        return;
+    }
+
+    let mut detail_lines: Vec<String> = mismatches
+        .iter()
+        .map(|(i, a, e)| {
+            format!(
+                "event mismatch at position {i}\nactual[{}]   = \
                  {}\nexpected[{}] = {}",
-                message,
-                i,
                 i,
                 format_event(a),
                 i,
                 format_event(e),
-            );
-        }
-    }
+            )
+        })
+        .collect();
+
+    // Reverse so mismatches print in ascending index order when joined.
+    detail_lines.reverse();
+
+    panic!("{}\n{}", message, detail_lines.join("\n"));
 }
 
 /// Format a single `[LogEvent]` as a human-readable string for diffs.
@@ -193,6 +208,22 @@ mod tests {
         let actual = vec![event_str("B", true)];
         let expected = vec![event_str("A", true)];
         assert_events_match(&actual, &expected, "value test");
+    }
+
+    #[test]
+    #[should_panic(expected = "event mismatch at position 0")]
+    fn assert_events_match_reports_all_mismatches() {
+        let actual = vec![
+            event_str("B", true),
+            event_str("X", false),
+            event_str("C", true),
+        ];
+        let expected = vec![
+            event_str("A", true),
+            event_str("Y", false),
+            event_str("Z", true),
+        ];
+        assert_events_match(&actual, &expected, "multi-mismatch test");
     }
 
     #[test]
