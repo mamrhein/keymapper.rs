@@ -33,10 +33,7 @@ pub fn spawn_daemon(
                 libc::setsid();
 
                 // Redirect standard file descriptors to /dev/null.
-                let dev_null = libc::open(
-                    b"/dev/null\0".as_ptr() as *const i8,
-                    libc::O_RDWR,
-                );
+                let dev_null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
                 if dev_null >= 0 {
                     libc::dup2(dev_null, libc::STDIN_FILENO);
                     libc::dup2(dev_null, libc::STDOUT_FILENO);
@@ -50,13 +47,11 @@ pub fn spawn_daemon(
                 let dir_str = config_dir.to_string_lossy();
                 let c_dir = std::ffi::CString::new(dir_str.as_ref())
                     .unwrap_or_default();
-                unsafe { libc::chdir(c_dir.as_ptr()) };
+                libc::chdir(c_dir.as_ptr());
 
                 // Replace this process with the keymapperd binary.
-                let exe = b"keymapperd\0";
-                unsafe {
-                    libc::execvp(exe.as_ptr() as *const i8, std::ptr::null());
-                }
+                let exe = c"keymapperd";
+                libc::execvp(exe.as_ptr(), std::ptr::null());
 
                 // execvp returned — it failed.  Exit the child gracefully.
                 std::process::exit(1);
