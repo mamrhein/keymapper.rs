@@ -1,0 +1,22 @@
+# Comprehensive mapping config for e2e testing.
+#
+# Global rules exercise single-key remaps, chord outputs, and modifier
+# triggers.  App-specific rules verify that scoped groups parse and load
+# correctly without interfering with the global mappings.
+
+- name: "global mappings"
+  mappings:
+    CapsLock: LeftControl
+    A: B
+    Escape: Cmd+A
+    Ctrl+Semicolon: C
+
+- name: "to_be_ignored"
+  apps: [to_be_ignored]
+  mappings:
+    Ctrl+Q: Escape
+
+- name: "keymapper_monitor"
+  apps: [keymapper_monitor]
+  mappings:
+    Tab: Return

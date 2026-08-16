@@ -1,0 +1,20 @@
+# Reloaded config for hot-reload e2e testing.
+#
+# Replaces the comprehensive config.  Different global mappings verify that
+# the daemon picks up the new rules after a file change.
+
+- name: "global mappings (reloaded)"
+  mappings:
+    CapsLock: Escape
+    A: C
+    Escape: Cmd+T
+
+- name: "to_be_ignored (reloaded)"
+  apps: [to_be_ignored]
+  mappings:
+    Ctrl+W: Escape
+
+- name: "keymapper_monitor (reloaded)"
+  apps: [keymapper_monitor]
+  mappings:
+    Tab: Delete
