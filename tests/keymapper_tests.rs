@@ -844,14 +844,14 @@ fn config_add_keyboard_unknown_field_fails() {
 }
 
 // ---------------------------------------------------------------------------
-// server status / start subcommands
+// daemon status / start subcommands
 // ---------------------------------------------------------------------------
 
 #[test]
 fn server_status_not_running() {
     // keymapperd is unlikely to be running in the test environment.
     let output = Command::new(bin_path())
-        .args(["server", "status"])
+        .args(["daemon", "status"])
         .output()
         .expect("failed to run keymapper");
 
@@ -867,12 +867,12 @@ fn server_status_not_running() {
 
 #[test]
 fn server_start_not_found() {
-    // With service-manager integration, `server start` either fails with a
+    // With service-manager integration, `daemon start` either fails with a
     // clear error (service not installed) or reports already-running if the
     // service is known to launchd/systemd.  Both outcomes are valid; we just
     // verify the command doesn't crash or hang.
     let output = Command::new(bin_path())
-        .args(["server", "start"])
+        .args(["daemon", "start"])
         .output()
         .expect("failed to run keymapper");
 

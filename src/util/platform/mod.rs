@@ -10,6 +10,7 @@
 //! Platform-specific implementations of CLI commands.
 
 pub mod appnames_cmd;
+pub mod daemon_cmd;
 pub mod driver_cmd;
 pub mod keyboard_cmd;
 pub mod keys_cmd;

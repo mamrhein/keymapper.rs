@@ -16,7 +16,8 @@ use keymapper::{
         keyboard::KeyboardSpecifier,
     },
     util::platform::{
-        appnames_cmd, driver_cmd, keyboard_cmd, keys_cmd, server_cmd,
+        appnames_cmd, daemon_cmd, driver_cmd, keyboard_cmd, keys_cmd,
+        server_cmd,
     },
 };
 
@@ -68,25 +69,51 @@ enum Commands {
     },
 
     /// Daemon process management.
-    Server {
+    Daemon {
         #[command(subcommand)]
-        command: ServerCommands,
+        command: DaemonCommands,
     },
 }
 
 #[derive(Subcommand)]
-enum ServerCommands {
+enum DaemonCommands {
     /// Check whether keymapperd is running.
     Status,
 
     /// Start keymapperd if it is not already running.
-    Start,
+    Start {
+        /// Directory containing `config.yaml`.
+        ///
+        /// When specified, spawns keymapperd as a background process with
+        /// this directory as its working directory.  The PID is
+        /// written to `<path>/keymapperd.pid` for later stop/restart.
+        ///
+        /// When omitted, uses the platform service manager (launchd /
+        /// systemd) to manage the daemon.  This is the production
+        /// mode.
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+    },
 
     /// Stop keymapperd if it is running.
-    Stop,
+    Stop {
+        /// Directory containing the PID file (`keymapperd.pid`).
+        ///
+        /// When specified, stops the process that was started with
+        /// `--config-dir`.  When omitted, uses the platform service manager.
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+    },
 
     /// Restart keymapperd (stop then start).
-    Restart,
+    Restart {
+        /// Directory containing `config.yaml` and the PID file.
+        ///
+        /// When specified, uses PID-based process management.  When omitted,
+        /// uses the platform service manager.
+        #[arg(long)]
+        config_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -210,11 +237,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             KeysCommands::Probe => cmd_keys_probe(),
         },
         Commands::Keyboards => cmd_keyboards(),
-        Commands::Server { command } => match command {
-            ServerCommands::Status => cmd_server_status()?,
-            ServerCommands::Start => cmd_server_start()?,
-            ServerCommands::Stop => cmd_server_stop()?,
-            ServerCommands::Restart => cmd_server_restart()?,
+        Commands::Daemon { command } => match command {
+            DaemonCommands::Status => cmd_daemon_status(None)?,
+            DaemonCommands::Start { config_dir } => {
+                cmd_daemon_start(config_dir)?
+            }
+            DaemonCommands::Stop { config_dir } => {
+                cmd_daemon_stop(config_dir)?
+            }
+            DaemonCommands::Restart { config_dir } => {
+                cmd_daemon_restart(config_dir)?
+            }
         },
         Commands::Driver { command } => match command {
             DriverCommands::Install => cmd_driver_install()?,
@@ -532,8 +565,16 @@ fn cmd_config_add(
     Ok(())
 }
 
-fn cmd_server_status() -> Result<(), Box<dyn std::error::Error>> {
-    if server_cmd::is_running() {
+fn cmd_daemon_status(
+    config_dir: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let running = if let Some(dir) = config_dir {
+        daemon_cmd::is_running(Some(dir))
+    } else {
+        server_cmd::is_running()
+    };
+
+    if running {
         println!("keymapperd is running");
     } else {
         println!("keymapperd is not running");
@@ -542,36 +583,83 @@ fn cmd_server_status() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_server_start() -> Result<(), Box<dyn std::error::Error>> {
-    if server_cmd::is_running() {
-        println!("keymapperd is already running");
-        return Ok(());
-    }
+fn cmd_daemon_start(
+    config_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match config_dir.as_deref() {
+        Some(dir) => {
+            // Development mode: PID-based process management.
+            if daemon_cmd::is_running(Some(dir)) {
+                println!("keymapperd is already running");
+                return Ok(());
+            }
 
-    server_cmd::start()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    println!("keymapperd started");
+            daemon_cmd::start(dir)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("keymapperd started");
+        }
+        None => {
+            // Production mode: service manager.
+            if server_cmd::is_running() {
+                println!("keymapperd is already running");
+                return Ok(());
+            }
+
+            server_cmd::start()
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("keymapperd started");
+        }
+    }
 
     Ok(())
 }
 
-fn cmd_server_stop() -> Result<(), Box<dyn std::error::Error>> {
-    if !server_cmd::is_running() {
-        println!("keymapperd is not running");
-        return Ok(());
-    }
+fn cmd_daemon_stop(
+    config_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match config_dir.as_deref() {
+        Some(dir) => {
+            // Development mode: PID-based process management.
+            if !daemon_cmd::is_running(Some(dir)) {
+                println!("keymapperd is not running");
+                return Ok(());
+            }
 
-    server_cmd::stop()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    println!("keymapperd stopped");
+            daemon_cmd::stop(Some(dir))
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("keymapperd stopped");
+        }
+        None => {
+            // Production mode: service manager.
+            if !server_cmd::is_running() {
+                println!("keymapperd is not running");
+                return Ok(());
+            }
+
+            server_cmd::stop()
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("keymapperd stopped");
+        }
+    }
 
     Ok(())
 }
 
-fn cmd_server_restart() -> Result<(), Box<dyn std::error::Error>> {
-    server_cmd::restart()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    println!("keymapperd restarted");
+fn cmd_daemon_restart(
+    config_dir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match config_dir.as_deref() {
+        Some(dir) => {
+            daemon_cmd::restart(dir)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("keymapperd restarted");
+        }
+        None => {
+            server_cmd::restart()
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            println!("keymapperd restarted");
+        }
+    }
 
     Ok(())
 }
