@@ -27,6 +27,8 @@ eframe = { version = "0.36", default-features = false, features = [
     "default_fonts",
     "glow",
     "persistence",
+    "wayland",
+    "x11",
 ] } # cross-platform GUI for the monitor binary
 egui = "0.36" # UI library used by eframe
 fs-err = "3"
