@@ -7,22 +7,39 @@
 // $Source$
 // $Revision$
 
-//! End-to-end integration tests using the virtual keyboard sandbox.
+//! End-to-end integration tests using file-based event validation.
 //!
-//! These tests spawn the `keymapperd` binary as a subprocess, inject
-//! synthetic keyboard events via the platform sandbox, and verify that
-//! the daemon's remapped output matches expectations.
+//! These tests spawn `keymapper_monitor` as a subprocess to capture keyboard
+//! events into a log file, inject synthetic key events via the platform
+//! injector, and validate the daemon's remapped output against expected
+//! sequences derived from the config fixture files.
+//!
+//! The test flow is:
+//! 1. Create a temp directory and copy a fixture config into it.
+//! 2. Parse the config to extract trigger keys and their mapped outputs from
+//!    all rule groups (regardless of app/keyboard context).
+//! 3. Build an injection sequence containing triggers plus passthrough keys.
+//! 4. Build an expected sequence containing mapped outputs plus passthrough.
+//! 5. Start the monitor, injector, and daemon.
+//! 6. Inject keys from the sequence and assert the event log matches the
+//!    expected sequence.
+
+mod event_log;
 
 use std::{
     env,
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc,
     thread,
     time::Duration,
 };
 
-use keymapper::util::sandbox::{CapturedEvent, Sandbox, SandboxError};
+use event_log::{LogEvent, assert_events_match, event_str};
+use keymapper::{
+    common::{Key, config::AppConfig},
+    platform::Key as PlatformKey,
+    util::key_injector::{InjectorError, KeyInjector},
+};
 
 // ---------------------------------------------------------------------------
 // CI gate — e2e tests require elevated privileges and a clean environment
@@ -39,15 +56,8 @@ fn can_run_e2e() -> bool {
             return false;
         }
 
-        // Check that the sandbox can be created (probes Accessibility
-        // permission on macOS, root on Linux, etc.).
-        if !create_sandbox().is_ok_and(|opt| opt.is_some()) {
-            return false;
-        }
-
-        // On macOS, the virtual HID driver must be available.
-        #[cfg(target_os = "macos")]
-        if keymapper::platform::HidSocket::discover_and_open().is_err() {
+        // Check that the injector can be created.
+        if !create_injector().is_ok_and(|opt| opt.is_some()) {
             return false;
         }
 
@@ -61,1276 +71,731 @@ fn should_run_e2e_raw() -> bool {
 }
 
 /// Check whether e2e tests should run.
-///
-/// These tests require elevated rights (root on Linux for /dev/uinput,
-/// root on macOS to bypass TCC Accessibility, and a clean desktop session
-/// on Windows) and are brittle outside CI due to interference from other
-/// applications' event hooks and taps.  The `CI` environment variable is
-/// set by GitHub Actions, GitLab CI, and most other CI systems.
-///
-/// The result is cached after the first call so we only probe system
-/// permissions once.
 fn should_run_e2e() -> bool {
     can_run_e2e()
 }
 
 // ---------------------------------------------------------------------------
-// Platform-specific key codes — sourced from the platform Key enum
+// Test fixture paths
 // ---------------------------------------------------------------------------
 
-mod codes {
-    use keymapper::platform::Key;
+/// Path to the comprehensive config fixture.  Contains mappings that
+/// exercise single-key remaps, chord outputs, and modifier triggers.
+const CONFIG_COMPREHENSIVE: &str =
+    "tests/fixtures/configs/config_comprehensive.yaml";
 
-    pub const CAPSLOCK: u16 = Key::CapsLock.as_native();
-    pub const ESC: u16 = Key::Escape.as_native();
-    pub const LEFT_ALT: u16 = Key::LeftAlt.as_native();
-    pub const LEFT_CONTROL: u16 = Key::LeftControl.as_native();
-    pub const A: u16 = Key::A.as_native();
-    pub const B: u16 = Key::B.as_native();
-}
+/// Path to the reloaded config fixture.  Contains different mappings to
+/// verify hot-reload behavior.
+const CONFIG_RELOADED: &str = "tests/fixtures/configs/config_reloaded.yaml";
 
 // ---------------------------------------------------------------------------
-// Test helpers
+// Binary path resolution
 // ---------------------------------------------------------------------------
 
-/// Resolve the path to the compiled `keymapperd` binary.
-fn daemon_bin_path() -> PathBuf {
+/// Resolve the path to the compiled `keymapper_monitor` binary.
+fn monitor_bin_path() -> PathBuf {
     env::current_exe()
         .unwrap()
         .parent()
         .unwrap()
         .parent()
         .unwrap()
-        .join("keymapperd")
+        .join("keymapper_monitor")
 }
 
-/// Create a temporary directory with `config.yaml` containing *content*.
-/// Returns the directory path.  The directory is NOT cleaned up automatically.
-static CONFIG_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
-fn write_config_dir(content: &str) -> PathBuf {
-    let seq =
-        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let pid = std::process::id();
-    let dir = env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
-
-    std::fs::create_dir_all(&dir).expect("failed to create temp dir");
-    std::fs::write(dir.join("config.yaml"), content)
-        .expect("failed to write config");
-
-    dir
+/// Resolve the path to the compiled `keymapper` CLI binary.
+fn cli_bin_path() -> PathBuf {
+    env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("keymapper")
 }
 
-/// Timeout for waiting on a config hot-reload to complete.  The watcher
-/// debounces filesystem events for 500ms (DEBOUNCE_INTERVAL), so we allow
-/// some headroom for parsing and cache compilation.
-const RELOAD_TIMEOUT: Duration = Duration::from_secs(5);
+// ---------------------------------------------------------------------------
+// Config-driven sequence builders
+// ---------------------------------------------------------------------------
 
-/// RAII guard that kills the daemon subprocess on `Drop`. Captures stdout
-/// in a background thread so callers can await specific log messages
-/// (e.g. "Configuration hot-swapped successfully!").
-struct DaemonGuard {
-    child: std::process::Child,
-    /// Receiver for stdout lines from the daemon.
-    stdout_rx: mpsc::Receiver<String>,
+/// Represents a single injection step in the test sequence.  Each step
+/// injects a down event followed by an up event with a small delay between.
+#[derive(Debug, Clone)]
+struct InjectionStep {
+    /// The native key codes to inject (modifiers first, then base key).
+    keys_down: Vec<u16>,
+    /// The native key codes to release (base key first, then modifiers).
+    keys_up: Vec<u16>,
 }
 
-impl DaemonGuard {
-    fn kill(&mut self) {
-        self.child.kill().ok();
-        self.child.wait().ok();
-
-        // Allow the kernel time to clean up uinput device nodes after the
-        // daemon's file descriptors are closed.  Without this delay the
-        // next test's monitor may discover a stale /dev/input/event* entry.
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    /// Block until the daemon logs a hot-reload success message, or timeout.
-    ///
-    /// Returns `Ok(())` when the reload completed, `Err` on timeout.
-    fn await_reload(&self) -> Result<(), String> {
-        let target = "Configuration hot-swapped successfully!";
-        let deadline = std::time::Instant::now() + RELOAD_TIMEOUT;
-
-        loop {
-            let remaining =
-                deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(
-                    "timeout waiting for config hot-reload".to_string()
-                );
-            }
-
-            match self.stdout_rx.recv_timeout(remaining) {
-                Ok(line) => {
-                    if line.contains(target) {
-                        return Ok(());
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(
-                        "timeout waiting for config hot-reload".to_string()
-                    );
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(
-                        "daemon stdout closed unexpectedly".to_string()
-                    );
-                }
-            }
-        }
-    }
+/// The result of parsing a config file for test sequence generation.
+struct TestSequences {
+    /// Ordered injection steps: triggers followed by passthrough keys.
+    steps: Vec<InjectionStep>,
+    /// Expected log events corresponding to each injection step.
+    expected: Vec<LogEvent>,
 }
 
-impl Drop for DaemonGuard {
-    fn drop(&mut self) {
-        self.child.kill().ok();
-        self.child.wait().ok();
-    }
-}
-
-/// Spawn the `keymapperd` binary in *config_dir* and return a guard that
-/// ensures the child is killed on `Drop`.
+/// Parse the config file at *config_path* and build test sequences.
 ///
-/// When *events_file* is `Some`, passes it as `KEYMAPPER_TEST_OUTPUT` to the
-/// daemon so that output events are written to the file instead of injected
-/// via `SendInput`. This works around the Windows limitation where `SendInput`
-/// from within a hook callback does not trigger other hooks.
-#[allow(unused_variables)]
-fn start_daemon(
-    config_dir: &PathBuf,
-    events_file: Option<&Path>,
-) -> DaemonGuard {
-    use std::process::Stdio;
-
-    let mut cmd = Command::new(daemon_bin_path());
-    cmd.current_dir(config_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-
-    // On Windows, pass the events file path to the daemon so it writes
-    // outputs to a file instead of calling `SendInput`.
-    #[cfg(target_os = "windows")]
-    if let Some(path) = events_file {
-        cmd.env("KEYMAPPER_TEST_OUTPUT", path);
-    }
-
-    let mut child = cmd.spawn().expect("failed to spawn keymapperd");
-
-    let stdout = child.stdout.take().expect("failed to capture stdout");
-
-    // Spawn a background thread that reads stdout line-by-line and sends
-    // each line over the channel.  This allows `await_reload()` to poll
-    // for specific log messages without blocking the test thread.
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        use std::io::BufRead;
-        let reader = std::io::BufReader::new(stdout);
-        for line in reader.lines() {
-            match line {
-                Ok(l) => {
-                    if tx.send(l).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
+/// Extracts all trigger keys from every rule group (regardless of app or
+/// keyboard context), and adds passthrough keys that are not used by any
+/// rule.  The injection sequence interleaves mapped triggers with
+/// passthrough keys to exercise both remapping and transparent forwarding.
+fn build_test_sequences(config_path: &Path) -> TestSequences {
+    let content = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
+        panic!("failed to read config fixture {config_path:?}: {e}")
     });
 
-    DaemonGuard {
-        child,
-        stdout_rx: rx,
+    let app_config = AppConfig::load_from_str(&content).unwrap_or_else(|e| {
+        panic!("failed to parse config fixture {config_path:?}: {e}")
+    });
+
+    // Collect all triggers and their outputs from every rule group.
+    let mut triggers: Vec<&keymapper::common::config::KeyEvent> = Vec::new();
+    let mut outputs: Vec<Vec<keymapper::common::config::KeyEvent>> =
+        Vec::new();
+
+    for group in &app_config.groups {
+        for (trigger, output_events) in group.mappings.iter() {
+            triggers.push(trigger);
+            outputs.push(output_events.to_vec());
+        }
+    }
+
+    // Collect all keys used in triggers and outputs to find passthrough
+    // candidates.
+    let mut used_keys = std::collections::HashSet::new();
+    for trigger in &triggers {
+        used_keys.insert(trigger.base);
+        for mod_key in &trigger.modifiers {
+            used_keys.insert(*mod_key);
+        }
+    }
+    for output_group in &outputs {
+        for output in output_group {
+            used_keys.insert(output.base);
+            for mod_key in &output.modifiers {
+                used_keys.insert(*mod_key);
+            }
+        }
+    }
+
+    // Pick 5 passthrough keys that are not used by any rule.
+    let passthrough_keys: Vec<Key> = Key::all()
+        .iter()
+        .filter(|k| !used_keys.contains(k))
+        .cloned()
+        .take(5)
+        .collect();
+
+    if passthrough_keys.len() < 5 {
+        panic!(
+            "config uses too many unique keys to find 5 passthrough \
+             candidates (used {} out of {})",
+            used_keys.len(),
+            Key::all().len()
+        );
+    }
+
+    // Build injection steps and expected events.  The sequence alternates
+    // between mapped triggers and passthrough keys to thoroughly exercise
+    // both code paths.
+    let mut steps: Vec<InjectionStep> = Vec::new();
+    let mut expected: Vec<LogEvent> = Vec::new();
+
+    let mut passthrough_iter = passthrough_keys.iter();
+
+    // Interleave triggers with passthrough keys.  Insert a passthrough
+    // after every two triggers to keep the test sequence manageable.
+    let mut trigger_idx = 0;
+    let mut passthrough_count = 0;
+
+    while trigger_idx < triggers.len() || passthrough_count < 5 {
+        // Add up to 2 triggers before the next passthrough.
+        let triggers_to_add = std::cmp::min(2, triggers.len() - trigger_idx);
+        for _ in 0..triggers_to_add {
+            let trigger = triggers[trigger_idx];
+            let output_group = &outputs[trigger_idx];
+
+            // Build injection step for the trigger.
+            let step = key_event_to_injection_step(trigger);
+            steps.push(step);
+
+            // Build expected events for the mapped output.
+            #[allow(clippy::needless_borrow)]
+            let trigger_down_events =
+                build_expected_output_events(&output_group, true);
+            #[allow(clippy::needless_borrow)]
+            let trigger_up_events =
+                build_expected_output_events(&output_group, false);
+
+            expected.extend(trigger_down_events);
+            expected.extend(trigger_up_events);
+
+            trigger_idx += 1;
+        }
+
+        // Add a passthrough key if we still have some left.
+        if let Some(&passthrough_key) = passthrough_iter.next() {
+            let step = single_key_injection_step(passthrough_key);
+            steps.push(step);
+
+            // Passthrough keys pass through unchanged.
+            expected.push(event_str(passthrough_key.as_str(), true));
+            expected.push(event_str(passthrough_key.as_str(), false));
+
+            passthrough_count += 1;
+        }
+    }
+
+    TestSequences { steps, expected }
+}
+
+/// Convert a `[KeyEvent]` into an injection step with properly ordered
+/// modifier and base key presses.
+fn key_event_to_injection_step(
+    key_event: &keymapper::common::config::KeyEvent,
+) -> InjectionStep {
+    // Convert common Key to platform native code.
+    let mut keys_down: Vec<u16> = key_event
+        .modifiers
+        .iter()
+        .map(|k| common_to_platform_code(*k))
+        .collect();
+    let base_code = common_to_platform_code(key_event.base);
+    keys_down.push(base_code);
+
+    // Release in reverse order: base first, then modifiers last-to-first.
+    let mut keys_up: Vec<u16> = vec![base_code];
+    for mod_code in key_event.modifiers.iter().rev() {
+        keys_up.push(common_to_platform_code(*mod_code));
+    }
+
+    InjectionStep { keys_down, keys_up }
+}
+
+/// Build an injection step for a single key with no modifiers.
+fn single_key_injection_step(key: Key) -> InjectionStep {
+    let code = common_to_platform_code(key);
+    InjectionStep {
+        keys_down: vec![code],
+        keys_up: vec![code],
     }
 }
 
-/// Helper that wraps the full test lifecycle: setup sandbox, start daemon,
-/// run the test closure, then tear down everything.
-fn run_e2e_test<F>(config: &str, test_fn: F)
-where
-    F: FnOnce(&dyn Sandbox),
-{
-    if !should_run_e2e() {
-        eprintln!(
-            "skipping e2e test: sandbox not available in this environment. \
-             Set CI=1 and ensure required permissions are granted."
-        );
-        return;
-    }
+/// Build the expected log events for a group of output KeyEvents.
+///
+/// When *is_down* is true, emits down events for each output key in order.
+/// When false, emits up events in reverse order (matching the daemon's
+/// chord output semantics).
+fn build_expected_output_events(
+    outputs: &[keymapper::common::config::KeyEvent],
+    is_down: bool,
+) -> Vec<LogEvent> {
+    let mut events = Vec::new();
 
-    // Create config directory.
-    let config_dir = write_config_dir(config);
-
-    // Create the sandbox — at this point permissions were already verified by
-    // `should_run_e2e()`, so a failure indicates a real problem.
-    let mut sandbox = match create_sandbox() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            eprintln!("sandbox not available on this platform, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
-        Err(e) => match &e {
-            SandboxError::PermissionDenied(_) => {
-                eprintln!("sandbox creation failed: {e}, skipping test");
-                std::fs::remove_dir_all(&config_dir).ok();
-                return;
-            }
-            _ => {
-                std::fs::remove_dir_all(&config_dir).ok();
-                panic!("sandbox creation failed unexpectedly: {e}");
-            }
-        },
+    let ordered_outputs = if is_down {
+        outputs.to_vec()
+    } else {
+        outputs.iter().rev().cloned().collect()
     };
 
-    sandbox.setup().unwrap_or_else(|e| {
-        eprintln!("sandbox setup failed: {e}, skipping test");
-        std::fs::remove_dir_all(&config_dir).ok();
-        std::process::exit(0);
-    });
+    for output in &ordered_outputs {
+        // For a chord output, emit modifier downs first, then base.
+        if is_down {
+            for mod_key in &output.modifiers {
+                events.push(event_str(mod_key.as_str(), true));
+            }
+            events.push(event_str(output.base.as_str(), true));
+        } else {
+            // Release base first, then modifiers in reverse.
+            events.push(event_str(output.base.as_str(), false));
+            for mod_key in output.modifiers.iter().rev() {
+                events.push(event_str(mod_key.as_str(), false));
+            }
+        }
+    }
 
-    // Give the monitor tap a moment to stabilize before the daemon starts,
-    // so it captures all events from the beginning.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // On Windows, create an events file for the daemon to write outputs to.
-    // This works around the limitation where `SendInput` from within a hook
-    // callback does not trigger other hooks.
-    #[cfg(target_os = "windows")]
-    let events_file = config_dir.join("events.txt");
-    #[cfg(target_os = "windows")]
-    std::fs::write(&events_file, "").expect("failed to create events file");
-
-    // Spawn the daemon in a subprocess.  The guard ensures cleanup on panic.
-    #[cfg(target_os = "windows")]
-    let mut daemon = start_daemon(&config_dir, Some(&events_file));
-    #[cfg(not(target_os = "windows"))]
-    let mut daemon = start_daemon(&config_dir, None);
-
-    // Allow the daemon to initialize (grab devices, create uinput, etc.).
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // On Windows, set the env var so the sandbox reads events from the file.
-    #[cfg(target_os = "windows")]
-    unsafe { std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file); }
-
-    // Run the test body.
-    test_fn(&*sandbox);
-
-    // Clear the env var after the test.
-    #[cfg(target_os = "windows")]
-    unsafe { std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE"); }
-
-    // Teardown: kill the daemon and clean up the sandbox.
-    daemon.kill();
-
-    sandbox.teardown();
-    std::fs::remove_dir_all(&config_dir).ok();
+    events
 }
 
+/// Convert a platform-agnostic `[Key]` to the platform-specific native
+/// key code.
+fn common_to_platform_code(common_key: Key) -> u16 {
+    // Convert the common Key to the platform-specific Key by matching
+    // variant names.  Both enums have identical variants in the same order,
+    // but the platform enum uses native key codes as discriminants.
+    let platform_key: PlatformKey = match common_key {
+        Key::LeftControl => PlatformKey::LeftControl,
+        Key::RightControl => PlatformKey::RightControl,
+        Key::LeftShift => PlatformKey::LeftShift,
+        Key::RightShift => PlatformKey::RightShift,
+        Key::LeftAlt => PlatformKey::LeftAlt,
+        Key::RightAlt => PlatformKey::RightAlt,
+        Key::LeftCommand => PlatformKey::LeftCommand,
+        Key::RightCommand => PlatformKey::RightCommand,
+        Key::CapsLock => PlatformKey::CapsLock,
+        Key::Tab => PlatformKey::Tab,
+        Key::Space => PlatformKey::Space,
+        Key::Return => PlatformKey::Return,
+        Key::Backspace => PlatformKey::Backspace,
+        Key::Delete => PlatformKey::Delete,
+        Key::Escape => PlatformKey::Escape,
+        Key::UpArrow => PlatformKey::UpArrow,
+        Key::DownArrow => PlatformKey::DownArrow,
+        Key::LeftArrow => PlatformKey::LeftArrow,
+        Key::RightArrow => PlatformKey::RightArrow,
+        Key::PageUp => PlatformKey::PageUp,
+        Key::PageDown => PlatformKey::PageDown,
+        Key::Home => PlatformKey::Home,
+        Key::End => PlatformKey::End,
+        Key::F1 => PlatformKey::F1,
+        Key::F2 => PlatformKey::F2,
+        Key::F3 => PlatformKey::F3,
+        Key::F4 => PlatformKey::F4,
+        Key::F5 => PlatformKey::F5,
+        Key::F6 => PlatformKey::F6,
+        Key::F7 => PlatformKey::F7,
+        Key::F8 => PlatformKey::F8,
+        Key::F9 => PlatformKey::F9,
+        Key::F10 => PlatformKey::F10,
+        Key::F11 => PlatformKey::F11,
+        Key::F12 => PlatformKey::F12,
+        Key::A => PlatformKey::A,
+        Key::B => PlatformKey::B,
+        Key::C => PlatformKey::C,
+        Key::D => PlatformKey::D,
+        Key::E => PlatformKey::E,
+        Key::F => PlatformKey::F,
+        Key::G => PlatformKey::G,
+        Key::H => PlatformKey::H,
+        Key::I => PlatformKey::I,
+        Key::J => PlatformKey::J,
+        Key::K => PlatformKey::K,
+        Key::L => PlatformKey::L,
+        Key::M => PlatformKey::M,
+        Key::N => PlatformKey::N,
+        Key::O => PlatformKey::O,
+        Key::P => PlatformKey::P,
+        Key::Q => PlatformKey::Q,
+        Key::R => PlatformKey::R,
+        Key::S => PlatformKey::S,
+        Key::T => PlatformKey::T,
+        Key::U => PlatformKey::U,
+        Key::V => PlatformKey::V,
+        Key::W => PlatformKey::W,
+        Key::X => PlatformKey::X,
+        Key::Y => PlatformKey::Y,
+        Key::Z => PlatformKey::Z,
+        Key::Number1 => PlatformKey::Number1,
+        Key::Number2 => PlatformKey::Number2,
+        Key::Number3 => PlatformKey::Number3,
+        Key::Number4 => PlatformKey::Number4,
+        Key::Number5 => PlatformKey::Number5,
+        Key::Number6 => PlatformKey::Number6,
+        Key::Number7 => PlatformKey::Number7,
+        Key::Number8 => PlatformKey::Number8,
+        Key::Number9 => PlatformKey::Number9,
+        Key::Number0 => PlatformKey::Number0,
+        Key::Numpad0 => PlatformKey::Numpad0,
+        Key::Numpad1 => PlatformKey::Numpad1,
+        Key::Numpad2 => PlatformKey::Numpad2,
+        Key::Numpad3 => PlatformKey::Numpad3,
+        Key::Numpad4 => PlatformKey::Numpad4,
+        Key::Numpad5 => PlatformKey::Numpad5,
+        Key::Numpad6 => PlatformKey::Numpad6,
+        Key::Numpad7 => PlatformKey::Numpad7,
+        Key::Numpad8 => PlatformKey::Numpad8,
+        Key::Numpad9 => PlatformKey::Numpad9,
+        Key::NumpadDecimal => PlatformKey::NumpadDecimal,
+        Key::NumpadMultiply => PlatformKey::NumpadMultiply,
+        Key::NumpadPlus => PlatformKey::NumpadPlus,
+        Key::NumpadDivide => PlatformKey::NumpadDivide,
+        Key::NumpadEnter => PlatformKey::NumpadEnter,
+        Key::NumpadMinus => PlatformKey::NumpadMinus,
+        #[cfg(target_os = "macos")]
+        Key::NumpadClear => PlatformKey::NumpadClear,
+        #[cfg(target_os = "macos")]
+        Key::NumpadEqual => PlatformKey::NumpadEqual,
+        #[cfg(not(target_os = "macos"))]
+        Key::NumpadClear => PlatformKey::IsoHash,
+        #[cfg(not(target_os = "macos"))]
+        Key::NumpadEqual => PlatformKey::IsoHash,
+        Key::Minus => PlatformKey::Minus,
+        Key::Equal => PlatformKey::Equal,
+        Key::BracketLeft => PlatformKey::BracketLeft,
+        Key::BracketRight => PlatformKey::BracketRight,
+        Key::Backslash => PlatformKey::Backslash,
+        Key::Semicolon => PlatformKey::Semicolon,
+        Key::Quote => PlatformKey::Quote,
+        Key::Comma => PlatformKey::Comma,
+        Key::Period => PlatformKey::Period,
+        Key::Slash => PlatformKey::Slash,
+        Key::Grave => PlatformKey::Grave,
+        Key::IsoExtra => PlatformKey::IsoExtra,
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        Key::IsoHash => PlatformKey::IsoHash,
+        #[cfg(target_os = "macos")]
+        Key::IsoHash => PlatformKey::IsoExtra,
+    };
+    platform_key.as_native()
+}
+
+// ---------------------------------------------------------------------------
+// Process management helpers
+// ---------------------------------------------------------------------------
+
+/// RAII guard that kills a child process on `Drop`.
+struct ProcessGuard {
+    child: std::process::Child,
+    label: &'static str,
+}
+
+impl ProcessGuard {
+    fn kill(&mut self) {
+        eprintln!("stopping {}...", self.label);
+        self.child.kill().ok();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// Spawn the monitor binary as a subprocess.  Returns a guard that ensures
+/// the child is killed on `Drop`.
+fn start_monitor(output_path: &Path) -> ProcessGuard {
+    let mut child = Command::new(monitor_bin_path())
+        .arg("--output")
+        .arg(output_path)
+        .spawn()
+        .expect("failed to spawn keymapper_monitor");
+
+    // Give the egui window time to open and become ready.
+    thread::sleep(Duration::from_secs(2));
+
+    // Check that the process is still alive.  `try_wait()` returns `None`
+    // when the process has not yet exited.
+    if child.try_wait().ok().is_none() {
+        // Still running — good.
+    } else {
+        panic!("keymapper_monitor exited prematurely");
+    }
+
+    ProcessGuard {
+        child,
+        label: "monitor",
+    }
+}
+
+/// Start the daemon via `keymapper daemon start --config-dir <path>`.
+fn start_daemon(config_dir: &Path) {
+    let status = Command::new(cli_bin_path())
+        .args([
+            "daemon",
+            "start",
+            "--config-dir",
+            config_dir.to_str().expect("config_dir is not valid utf-8"),
+        ])
+        .status()
+        .expect("failed to run keymapper daemon start");
+
+    if !status.success() {
+        panic!("keymapper daemon start failed with status: {}", status);
+    }
+
+    // Allow the daemon to initialize (grab devices, create uinput, etc.).
+    thread::sleep(Duration::from_millis(500));
+}
+
+/// Stop the daemon via `keymapper daemon stop`.
+fn stop_daemon(config_dir: &Path) {
+    let _status = Command::new(cli_bin_path())
+        .args([
+            "daemon",
+            "stop",
+            "--config-dir",
+            config_dir.to_str().expect("config_dir is not valid utf-8"),
+        ])
+        .status()
+        .expect("failed to run keymapper daemon stop");
+
+    // Allow the daemon to clean up.
+    thread::sleep(Duration::from_millis(200));
+}
+
+// ---------------------------------------------------------------------------
+// Injector creation
+// ---------------------------------------------------------------------------
+
 #[cfg(target_os = "macos")]
-fn create_sandbox() -> Result<Option<Box<dyn Sandbox>>, SandboxError> {
-    use keymapper::util::sandbox::MacoSandbox;
-    let s = MacoSandbox::new()?;
-    Ok(s.map(|x| Box::new(x) as Box<dyn Sandbox>))
+fn create_injector() -> Result<Option<Box<dyn KeyInjector>>, InjectorError> {
+    use keymapper::util::key_injector::MacOSInjector;
+    let injector = MacOSInjector::new()?;
+    Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector>))
 }
 
 #[cfg(target_os = "linux")]
-fn create_sandbox() -> Result<Option<Box<dyn Sandbox>>, SandboxError> {
-    use keymapper::util::sandbox::LinuxSandbox;
-    let s = LinuxSandbox::new()?;
-    Ok(s.map(|x| Box::new(x) as Box<dyn Sandbox>))
+fn create_injector() -> Result<Option<Box<dyn KeyInjector>>, InjectorError> {
+    use keymapper::util::key_injector::LinuxInjector;
+    let injector = LinuxInjector::new()?;
+    Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector>))
 }
 
 #[cfg(target_os = "windows")]
-fn create_sandbox() -> Result<Option<Box<dyn Sandbox>>, SandboxError> {
-    use keymapper::util::sandbox::WindowsSandbox;
-    let s = WindowsSandbox::new()?;
-    Ok(s.map(|x| Box::new(x) as Box<dyn Sandbox>))
+fn create_injector() -> Result<Option<Box<dyn KeyInjector>>, InjectorError> {
+    use keymapper::util::key_injector::WindowsInjector;
+    let injector = WindowsInjector::new()?;
+    Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector>))
 }
 
-/// Overwrite the config file in *config_dir* with new content.
-///
-/// Uses `std::fs::write` which truncates and rewrites the same file path,
-/// triggering `notify::EventKind::Modify` on the watched file. The watcher
-/// debounces multiple events, so rapid successive writes are safe.
-fn update_config(config_dir: &Path, content: &str) {
-    std::fs::write(config_dir.join("config.yaml"), content)
-        .expect("failed to write updated config");
-}
+// ---------------------------------------------------------------------------
+// Key injection helper
+// ---------------------------------------------------------------------------
 
-/// Helper that wraps the full test lifecycle for hot-reload tests:
-/// setup sandbox, start daemon, then run a multi-phase test closure that
-/// has access to the config directory path and the daemon guard so it can
-/// modify the config and await reloads.
-fn run_e2e_test_with_reload<F>(initial_config: &str, test_fn: F)
-where
-    F: FnOnce(&dyn Sandbox, &PathBuf, &mut DaemonGuard),
-{
-    if !should_run_e2e() {
-        eprintln!(
-            "skipping e2e test: sandbox not available in this environment. \
-             Set CI=1 and ensure required permissions are granted."
-        );
-        return;
+/// Inject a single step from the test sequence.  Presses all keys in
+/// *step.keys_down* (down), then releases them in *step.keys_up* order.
+fn inject_step(injector: &dyn KeyInjector, step: &InjectionStep) {
+    for &code in &step.keys_down {
+        injector
+            .inject_key_down(code)
+            .expect("failed to inject key down");
+        // Small delay between key presses within a chord.
+        thread::sleep(Duration::from_millis(3));
     }
 
-    // Create config directory.
-    let config_dir = write_config_dir(initial_config);
+    // Brief hold time for the full chord.
+    thread::sleep(Duration::from_millis(10));
 
-    // Create the sandbox — at this point permissions were already verified by
-    // `should_run_e2e()`, so a failure indicates a real problem.
-    let mut sandbox = match create_sandbox() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            eprintln!("sandbox not available on this platform, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
-        Err(e) => match &e {
-            SandboxError::PermissionDenied(_) => {
-                eprintln!("sandbox creation failed: {e}, skipping test");
-                std::fs::remove_dir_all(&config_dir).ok();
-                return;
-            }
-            _ => {
-                std::fs::remove_dir_all(&config_dir).ok();
-                panic!("sandbox creation failed unexpectedly: {e}");
-            }
-        },
-    };
+    for &code in &step.keys_up {
+        injector
+            .inject_key_up(code)
+            .expect("failed to inject key up");
+        thread::sleep(Duration::from_millis(3));
+    }
 
-    sandbox.setup().unwrap_or_else(|e| {
-        eprintln!("sandbox setup failed: {e}, skipping test");
-        std::fs::remove_dir_all(&config_dir).ok();
-        std::process::exit(0);
-    });
+    // Delay between steps to let the daemon process events.
+    thread::sleep(Duration::from_millis(50));
+}
 
-    // Give the monitor tap a moment to stabilize.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
 
-    // On Windows, create an events file for the daemon to write outputs to.
-    #[cfg(target_os = "windows")]
-    let events_file = config_dir.join("events.txt");
-    #[cfg(target_os = "windows")]
-    std::fs::write(&events_file, "").expect("failed to create events file");
+/// Atomic counter for unique temp directory names.
+static TEST_COUNTER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
-    // Spawn the daemon.
-    #[cfg(target_os = "windows")]
-    let mut daemon = start_daemon(&config_dir, Some(&events_file));
-    #[cfg(not(target_os = "windows"))]
-    let mut daemon = start_daemon(&config_dir, None);
-
-    // Allow the daemon to initialize.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // On Windows, set the env var so the sandbox reads events from the file.
-    #[cfg(target_os = "windows")]
-    unsafe { std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file); }
-
-    // Drain any events captured during startup.
-    let _ = sandbox.drain_output_events();
-
-    // Run the multi-phase test body.
-    test_fn(&*sandbox, &config_dir, &mut daemon);
-
-    // Clear the env var after the test.
-    #[cfg(target_os = "windows")]
-    unsafe { std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE"); }
-
-    // Teardown.
-    daemon.kill();
-
-    sandbox.teardown();
-    std::fs::remove_dir_all(&config_dir).ok();
+/// Create a unique temporary directory for the test.
+fn create_test_dir() -> PathBuf {
+    let seq = TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pid = std::process::id();
+    let dir = env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
+    std::fs::create_dir_all(&dir).expect("failed to create temp dir");
+    dir
 }
 
 // ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
 
-/// Verify that a global mapping remaps CapsLock to LeftControl.
+/// Run the full e2e test against the comprehensive config fixture.
 ///
-/// This is the canonical "capslock to control" remap. The daemon should
-/// swallow the CapsLock event and emit LeftControl instead.
+/// Parses the config to derive injection and expected sequences, then
+/// validates that the daemon remaps keys correctly.
 #[test]
-fn e2e_global_mapping_capslock_to_control() {
-    let config = r#"- mappings:
-    CapsLock: LeftControl"#;
-
-    run_e2e_test(config, |sandbox| {
-        sandbox
-            .inject_key_down(codes::CAPSLOCK)
-            .expect("inject key down");
-        sandbox
-            .inject_key_up(codes::CAPSLOCK)
-            .expect("inject key up");
-
-        let events = sandbox.drain_output_events();
-
-        assert_eq!(
-            events,
-            vec![
-                CapturedEvent {
-                    code: codes::LEFT_CONTROL,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::LEFT_CONTROL,
-                    is_down: false,
-                },
-            ],
-            "CapsLock should be remapped to LeftControl"
-        );
-    });
-}
-
-/// Verify that an unmapped key passes through unchanged.
-///
-/// When no rule matches, the daemon forwards the original event. The
-/// monitoring tap should see the key as-is.
-#[test]
-fn e2e_unmapped_key_passthrough() {
-    // Config maps CapsLock, but not A.
-    let config = r#"- mappings:
-    CapsLock: LeftControl"#;
-
-    run_e2e_test(config, |sandbox| {
-        // Press 'A' which has no mapping.
-        sandbox.inject_key_down(codes::A).expect("inject key down");
-        sandbox.inject_key_up(codes::A).expect("inject key up");
-
-        let events = sandbox.drain_output_events();
-
-        assert_eq!(
-            events,
-            vec![
-                CapturedEvent {
-                    code: codes::A,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::A,
-                    is_down: false,
-                },
-            ],
-            "Unmapped key should pass through unchanged"
-        );
-    });
-}
-
-/// Verify a simple single-key-to-single-key remap for non-modifier keys.
-#[test]
-fn e2e_global_mapping_a_to_b() {
-    let config = r#"- mappings:
-    A: B"#;
-
-    run_e2e_test(config, |sandbox| {
-        sandbox.inject_key_down(codes::A).expect("inject key down");
-        sandbox.inject_key_up(codes::A).expect("inject key up");
-
-        let events = sandbox.drain_output_events();
-
-        assert_eq!(
-            events,
-            vec![
-                CapturedEvent {
-                    code: codes::B,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::B,
-                    is_down: false,
-                },
-            ],
-            "A should be remapped to B"
-        );
-    });
-}
-
-/// Verify that a chord output (modifier + key) is emitted correctly.
-///
-/// The daemon should emit the modifier down, then the base key down,
-/// then reverse on release.  The monitoring tap captures all four events.
-#[test]
-fn e2e_chord_output() {
-    let config = r#"- mappings:
-    CapsLock: Cmd+A"#;
-
-    run_e2e_test(config, |sandbox| {
-        sandbox
-            .inject_key_down(codes::CAPSLOCK)
-            .expect("inject key down");
-        sandbox
-            .inject_key_up(codes::CAPSLOCK)
-            .expect("inject key up");
-
-        let events = sandbox.drain_output_events();
-
-        // On macOS: Cmd (55) down, A (0) down, A (0) up, Cmd (55) up.
-        // On Linux: Super (125) down, A (30) down, A (30) up, Super (125) up.
-        // The exact codes depend on the platform — we just check we get
-        // 4 events forming a proper chord.
-        assert_eq!(events.len(), 4, "chord output should produce 4 events");
-
-        // First two events are downs, last two are ups.
-        assert!(events[0].is_down);
-        assert!(events[1].is_down);
-        assert!(!events[2].is_down);
-        assert!(!events[3].is_down);
-
-        // The base key (A) is the inner pair.
-        assert_eq!(events[1].code, codes::A, "base key should be A");
-        assert_eq!(events[2].code, codes::A, "base key release should be A");
-
-        // The modifier wraps around.
-        assert_eq!(events[0].code, events[3].code, "modifier should match");
-    });
-}
-
-/// Verify a multi-output mapping (one key triggers multiple sequential
-/// outputs).
-#[test]
-fn e2e_multi_output_mapping() {
-    let config = r#"- mappings:
-    CapsLock: [LeftControl, A]"#;
-
-    run_e2e_test(config, |sandbox| {
-        sandbox
-            .inject_key_down(codes::CAPSLOCK)
-            .expect("inject key down");
-        sandbox
-            .inject_key_up(codes::CAPSLOCK)
-            .expect("inject key up");
-
-        let events = sandbox.drain_output_events();
-
-        // Expected: Ctrl down, Ctrl up, A down, A up.
-        assert_eq!(events.len(), 4, "multi-output should produce 4 events");
-
-        assert_eq!(events[0].code, codes::LEFT_CONTROL);
-        assert!(events[0].is_down);
-        assert_eq!(events[1].code, codes::LEFT_CONTROL);
-        assert!(!events[1].is_down);
-        assert_eq!(events[2].code, codes::A);
-        assert!(events[2].is_down);
-        assert_eq!(events[3].code, codes::A);
-        assert!(!events[3].is_down);
-    });
-}
-
-/// Verify a modifier-combination mapping (Ctrl+A maps to B).
-#[test]
-fn e2e_modifier_combination_mapping() {
-    let config = r#"- mappings:
-    Ctrl+A: B"#;
-
-    run_e2e_test(config, |sandbox| {
-        // Press Ctrl, hold it, then press A.
-        sandbox
-            .inject_key_down(codes::LEFT_CONTROL)
-            .expect("inject ctrl down");
-        sandbox.inject_key_down(codes::A).expect("inject a down");
-        sandbox.inject_key_up(codes::A).expect("inject a up");
-        sandbox
-            .inject_key_up(codes::LEFT_CONTROL)
-            .expect("inject ctrl up");
-
-        let events = sandbox.drain_output_events();
-
-        // Ctrl down passes through, then A is remapped to B.
-        assert!(events.len() >= 4, "expected at least 4 events");
-
-        // Find the B press/release among the captured events.
-        let b_down = events.iter().any(|e| e.code == codes::B && e.is_down);
-        let b_up = events.iter().any(|e| e.code == codes::B && !e.is_down);
-
-        assert!(b_down, "should see B key-down from remapped Ctrl+A");
-        assert!(b_up, "should see B key-up from remapped Ctrl+A");
-    });
-}
-
-/// Verify that a swap mapping works (CapsLock <-> LeftControl).
-#[test]
-fn e2e_swap_mapping() {
-    let config = r#"- mappings:
-    CapsLock: LeftControl
-    LeftControl: CapsLock"#;
-
-    run_e2e_test(config, |sandbox| {
-        // CapsLock should become LeftControl.
-        sandbox
-            .inject_key_down(codes::CAPSLOCK)
-            .expect("inject capslock down");
-        sandbox
-            .inject_key_up(codes::CAPSLOCK)
-            .expect("inject capslock up");
-
-        let events = sandbox.drain_output_events();
-
-        assert_eq!(
-            events,
-            vec![
-                CapturedEvent {
-                    code: codes::LEFT_CONTROL,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::LEFT_CONTROL,
-                    is_down: false,
-                },
-            ],
-            "CapsLock should swap to LeftControl"
-        );
-
-        // LeftControl should become CapsLock.
-        sandbox
-            .inject_key_down(codes::LEFT_CONTROL)
-            .expect("inject ctrl down");
-        sandbox
-            .inject_key_up(codes::LEFT_CONTROL)
-            .expect("inject ctrl up");
-
-        let events = sandbox.drain_output_events();
-
-        assert_eq!(
-            events,
-            vec![
-                CapturedEvent {
-                    code: codes::CAPSLOCK,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::CAPSLOCK,
-                    is_down: false,
-                },
-            ],
-            "LeftControl should swap to CapsLock"
-        );
-    });
-}
-
-/// Verify that a keyboard filter restricts mappings to matching devices.
-///
-/// The daemon discovers both virtual keyboards but only grabs one for
-/// monitoring.  The config uses a per-group `keyboards` filter that matches
-/// the primary device's name.  Depending on which device the daemon grabs:
-///
-/// - If primary is grabbed: CapsLock is remapped to LeftControl (filter
-///   matches).
-/// - If secondary is grabbed: CapsLock passes through unchanged (filter blocks
-///   the mapping because the grabbed device doesn't match).
-///
-/// Both outcomes are valid and demonstrate correct keyboard filter behavior.
-#[cfg(target_os = "linux")]
-#[test]
-fn e2e_keyboard_filter() {
-    use keymapper::util::sandbox::{
-        LinuxSandbox, linux::INPUT_DEVICE_NAME_PREFIX,
-    };
-
-    // Only run in CI — requires elevated privileges.
+fn e2e_comprehensive_config() {
     if !should_run_e2e() {
         eprintln!(
-            "skipping e2e test: sandbox not available in this environment. \
+            "skipping e2e test: injector not available in this environment. \
              Set CI=1 and ensure required permissions are granted."
         );
         return;
     }
 
-    // Create the sandbox — at this point permissions were already verified by
-    // `should_run_e2e()`, so a failure indicates a real problem.
-    let mut sandbox = match LinuxSandbox::new() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            eprintln!("sandbox not available, skipping test");
-            return;
-        }
-        Err(e) => match &e {
-            SandboxError::PermissionDenied(_) => {
-                eprintln!("sandbox creation failed: {e}, skipping test");
-                return;
-            }
-            _ => panic!("sandbox creation failed unexpectedly: {e}"),
-        },
-    };
+    // a. Create temp directory.
+    let temp_dir = create_test_dir();
+    eprintln!("test dir: {:?}", temp_dir);
 
-    sandbox.setup().unwrap_or_else(|e| {
-        eprintln!("sandbox setup failed: {e}, skipping test");
-        std::process::exit(0);
-    });
+    // b. Copy fixture config into temp directory.
+    let config_in = Path::new(CONFIG_COMPREHENSIVE);
+    let config_out = temp_dir.join("config.yaml");
+    std::fs::copy(config_in, &config_out)
+        .expect("failed to copy config fixture");
 
-    // Create the secondary device with a different name.
-    sandbox.create_secondary_device().unwrap_or_else(|e| {
-        eprintln!("failed to create secondary device: {e}");
-        sandbox.teardown();
-    });
+    // c. Create events log path.
+    let events_log = temp_dir.join("events.log");
 
-    // Get device paths for identification.
-    let primary_path = sandbox.input_device_id().unwrap();
-    let secondary_path = sandbox.secondary_device_path().unwrap();
-
-    // Build the device name that the daemon will discover for the primary.
-    // The daemon's keyboard discovery on Linux uses `ID_PRODUCT_NAME` from
-    // udev, falling back to the evdev device name.  We use the evdev device
-    // name pattern set by the sandbox.
-    let primary_name =
-        format!("{INPUT_DEVICE_NAME_PREFIX}-{}", std::process::id());
-
-    // Give the monitor tap a moment to stabilize.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Write config with a per-group keyboard filter matching the primary name.
-    let seq =
-        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let pid = std::process::id();
-    let config_dir =
-        env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
-    std::fs::create_dir_all(&config_dir).expect("failed to create temp dir");
-
-    let config_content = format!(
-        r#"- name: "primary keyboard rules"
-  keyboards:
-    - name: "{primary_name}"
-  mappings:
-    CapsLock: LeftControl"#
-    );
-    std::fs::write(config_dir.join("config.yaml"), &config_content)
-        .expect("failed to write config");
-
-    let mut daemon = start_daemon(&config_dir, None);
-
-    // Allow the daemon to initialize.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Drain any events captured during startup.
-    let _ = sandbox.drain_output_events();
-
-    // Inject CapsLock from the primary device and check output.
-    sandbox
-        .inject_key_down(codes::CAPSLOCK)
-        .expect("inject key down");
-    sandbox
-        .inject_key_up(codes::CAPSLOCK)
-        .expect("inject key up");
-
-    let primary_events = sandbox.drain_output_events();
-
-    // Determine which device the daemon grabbed by checking if CapsLock was
-    // remapped.  If events show LeftControl, the daemon grabbed primary and
-    // the filter matched.  If events show CapsLock, the daemon grabbed
-    // secondary and the filter blocked the mapping.
-    let primary_grabbed =
-        primary_events.iter().any(|e| e.code == codes::LEFT_CONTROL);
-
-    if primary_grabbed {
-        // Daemon grabbed primary; filter matches; mapping applies.
-        assert_eq!(
-            primary_events,
-            vec![
-                CapturedEvent {
-                    code: codes::LEFT_CONTROL,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::LEFT_CONTROL,
-                    is_down: false,
-                },
-            ],
-            "primary device should be remapped (filter matches)"
-        );
-        eprintln!(
-            "keyboard filter test: daemon grabbed primary ({primary_path}), \
-             filter matched, CapsLock remapped to LeftControl"
-        );
-    } else {
-        // Daemon grabbed secondary; filter does NOT match; mapping blocked.
-        assert_eq!(
-            primary_events,
-            vec![
-                CapturedEvent {
-                    code: codes::CAPSLOCK,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::CAPSLOCK,
-                    is_down: false,
-                },
-            ],
-            "secondary device should pass through (filter blocks mapping)"
-        );
-        eprintln!(
-            "keyboard filter test: daemon grabbed secondary \
-             ({secondary_path}), filter did not match, CapsLock passed \
-             through"
-        );
-    }
-
-    // Teardown.
-    daemon.kill();
-    sandbox.teardown();
-    std::fs::remove_dir_all(&config_dir).ok();
-}
-
-/// Verify that a keyboard filter restricts mappings to matching devices on
-/// macOS.
-///
-/// Unlike the Linux test, macOS uses IOHIDManager for input capture, which
-/// delivers events per-device and provides the device's Location ID. The
-/// sandbox injects events via CGEvent, which operates at a higher layer than
-/// IOHIDManager. This means injected events bypass the daemon's input capture
-/// entirely — they go straight to the session and are captured by the monitor
-/// tap regardless of whether a mapping exists.
-///
-/// This test validates:
-/// 1. Keyboard discovery via `list_keyboards()` works on macOS.
-/// 2. A keyboard-filtered config is constructed correctly from discovered
-///    device metadata.
-/// 3. The daemon starts and runs with the filtered config.
-/// 4. Unmapped keys pass through to the monitor tap (CGEvent injection always
-///    reaches HIDEventTap).
-///
-/// To fully verify that mapped keys are suppressed, a real physical keyboard
-/// must be used. The test logs the discovered keyboards and the filter config
-/// so a user can manually verify filtering by pressing keys on an attached
-/// keyboard.
-#[cfg(target_os = "macos")]
-#[test]
-fn e2e_keyboard_filter() {
-    // Only run in CI — requires elevated privileges.
-    if !should_run_e2e() {
-        eprintln!(
-            "skipping e2e test: sandbox not available in this environment. \
-             Set CI=1 and ensure required permissions are granted."
-        );
-        return;
-    }
-
-    // Discover attached keyboards.
-    let keyboards = match keymapper::platform::list_keyboards() {
-        Ok(kbs) => kbs,
-        Err(e) => {
-            eprintln!("keyboard discovery failed: {e}, skipping test");
-            return;
-        }
-    };
-
-    if keyboards.is_empty() {
-        eprintln!("no keyboards discovered, skipping test");
-        return;
-    }
-
-    eprintln!("discovered {} keyboard(s):", keyboards.len());
-    for kb in &keyboards {
-        eprintln!(
-            "  - name={}, vendor={}, model={}, device={}",
-            kb.name, kb.vendor, kb.model, kb.device
-        );
-    }
-
-    // Build a keyboard filter that matches the first discovered keyboard.
-    let target = &keyboards[0];
-    let config_content =
-        if !target.vendor.is_empty() && target.vendor != "0x0000" {
-            // Filter by vendor — the most stable identifier.
-            format!(
-                r#"keyboards:
-  - vendor: "{vendor}"
-groups:
-  - mappings:
-      CapsLock: LeftControl"#,
-                vendor = target.vendor
-            )
-        } else {
-            // Fallback: filter by name if vendor is not available.
-            format!(
-                r#"keyboards:
-  - name: "{name}"
-groups:
-  - mappings:
-      CapsLock: LeftControl"#,
-                name = target.name
-            )
-        };
-
-    eprintln!("keyboard filter config:\n{}", config_content);
-
-    // Create config directory.
-    let seq =
-        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let pid = std::process::id();
-    let config_dir =
-        env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
-    std::fs::create_dir_all(&config_dir).expect("failed to create temp dir");
-    std::fs::write(config_dir.join("config.yaml"), &config_content)
-        .expect("failed to write config");
-
-    // Create the sandbox — at this point permissions were already verified by
-    // `should_run_e2e()`, so a failure indicates a real problem.
-    let mut sandbox = match create_sandbox() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            eprintln!("sandbox not available on this platform, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
-        Err(e) => match &e {
-            SandboxError::PermissionDenied(_) => {
-                eprintln!("sandbox creation failed: {e}, skipping test");
-                std::fs::remove_dir_all(&config_dir).ok();
-                return;
-            }
-            _ => {
-                std::fs::remove_dir_all(&config_dir).ok();
-                panic!("sandbox creation failed unexpectedly: {e}");
-            }
-        },
-    };
-
-    sandbox.setup().unwrap_or_else(|e| {
-        eprintln!("sandbox setup failed: {e}, skipping test");
-        std::fs::remove_dir_all(&config_dir).ok();
-        std::process::exit(0);
-    });
-
-    // Give the monitor tap a moment to stabilize.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Spawn the daemon in a subprocess.
-    let mut daemon = start_daemon(&config_dir, None);
-
-    // Allow the daemon to initialize.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Drain any events captured during startup.
-    let _ = sandbox.drain_output_events();
-
-    // Inject CapsLock via SendInput.  On Windows, SendInput does NOT
-    // generate WM_INPUT events, so the worker has no Raw Input buffer
-    // entries to match against.  After a 10 ms delay, the worker falls
-    // back to a lookup without device identification.  The mapping is
-    // found because no device ID means keyboard filters pass through.
-    // This validates that the injection and capture infrastructure works,
-    // but cannot verify that keyboard filtering suppresses mapped keys
-    // from real keyboards.
-    sandbox
-        .inject_key_down(codes::CAPSLOCK)
-        .expect("inject key down");
-    sandbox
-        .inject_key_up(codes::CAPSLOCK)
-        .expect("inject key up");
-
-    let events = sandbox.drain_output_events();
-
-    // SendInput-injected events fall back to no-device-ID lookup, so
-    // the mapping IS applied (CapsLock → LeftControl).  The monitor
-    // captures the daemon's SendInput output (which has no marker).
-    // Note: this does NOT verify keyboard filtering, because the worker
-    // has no device ID for SendInput events.
-    if !events.is_empty() {
-        // If events are captured, verify the remapping.
-        let has_left_control =
-            events.iter().any(|e| e.code == codes::LEFT_CONTROL);
-        if has_left_control {
-            eprintln!(
-                "keyboard filter test: CapsLock was remapped to LeftControl \
-                 (SendInput bypasses Raw Input, so device filtering is not \
-                 applied)"
-            );
-        }
-    }
-
+    // Parse the config to build injection and expected sequences.
+    let sequences = build_test_sequences(&config_out);
     eprintln!(
-        "keyboard filter test: daemon running with filter for '{}' \
-         (vendor={}). SendInput injection does NOT trigger WM_INPUT, so the \
-         worker falls back to no-device-ID lookup and keyboard filtering is \
-         bypassed. To verify filtering, press CapsLock on the '{}' keyboard \
-         and observe whether it is remapped to LeftControl.",
-        target.name, target.vendor, target.name
+        "injection steps: {}, expected events: {}",
+        sequences.steps.len(),
+        sequences.expected.len()
     );
 
-    // Teardown.
-    daemon.kill();
-    sandbox.teardown();
-    std::fs::remove_dir_all(&config_dir).ok();
-}
+    // d. Start the monitor.
+    let mut monitor = start_monitor(&events_log);
 
-/// Verify that a keyboard filter restricts mappings to matching devices on
-/// Windows.
-///
-/// Unlike the Linux test, Windows uses Raw Input (`WM_INPUT`) for device
-/// identification. `SendInput` injection does NOT generate `WM_INPUT` events,
-/// so the worker thread has no Raw Input buffer entries to match against.
-/// After a 10 ms delay, the worker falls back to a lookup without device
-/// identification. This means:
-///
-/// 1. Keyboard filtering is effectively bypassed for `SendInput` events.
-/// 2. The mapping still works because the worker finds the rule without device
-///    filtering.
-/// 3. Real physical keyboard events (which DO trigger Raw Input) are subject
-///    to the keyboard filter.
-///
-/// This test validates:
-/// 1. Keyboard discovery via `list_keyboards()` works on Windows.
-/// 2. A keyboard-filtered config is constructed correctly from discovered
-///    device metadata.
-/// 3. The daemon starts and runs with the filtered config.
-/// 4. The mapping still works for `SendInput` events (worker falls back to
-///    no-device-ID lookup).
-///
-/// To fully verify keyboard filtering, a real physical keyboard must be used.
-/// The test logs the discovered keyboards and the filter config so a user can
-/// manually verify filtering by pressing keys on an attached keyboard.
-#[cfg(target_os = "windows")]
-#[test]
-fn e2e_keyboard_filter() {
-    // Only run in CI — restricts to CI per policy.
-    if !should_run_e2e() {
-        eprintln!(
-            "skipping e2e test: sandbox not available in this environment. \
-             Set CI=1 and ensure required permissions are granted."
-        );
-        return;
+    // e. Create and setup the injector.
+    let mut injector = create_injector()
+        .expect("failed to create injector")
+        .expect("injector not available on this platform");
+    injector.setup().expect("failed to setup injector");
+
+    // f. Start the daemon.
+    start_daemon(&temp_dir);
+
+    // g. Inject keys from the test sequence.
+    eprintln!("injecting {} steps...", sequences.steps.len());
+    for (i, step) in sequences.steps.iter().enumerate() {
+        eprintln!("  step {}: {:?} / {:?}", i, step.keys_down, step.keys_up);
+        inject_step(&*injector, step);
     }
 
-    // Discover attached keyboards.
-    let keyboards = match keymapper::platform::list_keyboards() {
-        Ok(kbs) => kbs,
-        Err(e) => {
-            eprintln!("keyboard discovery failed: {e}, skipping test");
-            return;
-        }
-    };
+    // j. Stop the daemon.
+    stop_daemon(&temp_dir);
 
-    if keyboards.is_empty() {
-        eprintln!("no keyboards discovered, skipping test");
-        return;
-    }
+    // k. Stop the monitor.
+    monitor.kill();
 
-    eprintln!("discovered {} keyboard(s):", keyboards.len());
-    for kb in &keyboards {
-        eprintln!(
-            "  - name={}, vendor={}, model={}, device={}",
-            kb.name, kb.vendor, kb.model, kb.device
-        );
-    }
+    // l. Teardown the injector.
+    injector.teardown();
 
-    // Build a keyboard filter that matches the first discovered keyboard.
-    let target = &keyboards[0];
-    let config_content =
-        if !target.vendor.is_empty() && target.vendor != "0x0000" {
-            // Filter by vendor — the most stable identifier.
-            format!(
-                r#"keyboards:
-  - vendor: "{vendor}"
-groups:
-  - mappings:
-      CapsLock: LeftControl"#,
-                vendor = target.vendor
-            )
-        } else {
-            // Fallback: filter by name if vendor is not available.
-            format!(
-                r#"keyboards:
-  - name: "{name}"
-groups:
-  - mappings:
-      CapsLock: LeftControl"#,
-                name = target.name
-            )
-        };
-
-    eprintln!("keyboard filter config:\n{}", config_content);
-
-    // Create config directory.
-    let seq =
-        CONFIG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let pid = std::process::id();
-    let config_dir =
-        env::temp_dir().join(format!("keymapper_e2e_{pid}_{seq}"));
-    std::fs::create_dir_all(&config_dir).expect("failed to create temp dir");
-    std::fs::write(config_dir.join("config.yaml"), &config_content)
-        .expect("failed to write config");
-
-    // Create the sandbox — at this point permissions were already verified by
-    // `should_run_e2e()`, so a failure indicates a real problem.
-    let mut sandbox = match create_sandbox() {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            eprintln!("sandbox not available on this platform, skipping test");
-            std::fs::remove_dir_all(&config_dir).ok();
-            return;
-        }
-        Err(e) => match &e {
-            SandboxError::PermissionDenied(_) => {
-                eprintln!("sandbox creation failed: {e}, skipping test");
-                std::fs::remove_dir_all(&config_dir).ok();
-                return;
-            }
-            _ => {
-                std::fs::remove_dir_all(&config_dir).ok();
-                panic!("sandbox creation failed unexpectedly: {e}");
-            }
-        },
-    };
-
-    sandbox.setup().unwrap_or_else(|e| {
-        eprintln!("sandbox setup failed: {e}, skipping test");
-        std::fs::remove_dir_all(&config_dir).ok();
-        std::process::exit(0);
+    // m. Parse the event log.
+    let actual = event_log::parse(&events_log).unwrap_or_else(|e| {
+        panic!("failed to parse event log {:?}: {e}", events_log)
     });
+    eprintln!("captured {} events from log", actual.len());
 
-    // Give the monitor hook a moment to stabilize.
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    // Create an events file for the daemon to write outputs to.
-    let events_file = config_dir.join("events.txt");
-    std::fs::write(&events_file, "").expect("failed to create events file");
-
-    // Spawn the daemon.
-    let mut daemon = start_daemon(&config_dir, Some(&events_file));
-
-    // Allow the daemon to initialize.
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Set the env var so the sandbox reads events from the file.
-    unsafe { std::env::set_var("KEYMAPPER_TEST_OUTPUT_FILE", &events_file); }
-
-    // Drain any events captured during startup.
-    let _ = sandbox.drain_output_events();
-
-    // Inject CapsLock via SendInput.  On Windows, SendInput does not generate
-    // WM_INPUT events, so the daemon's Raw Input device matching has no
-    // entries to compare against. After a 10 ms delay, the worker falls back
-    // to a lookup without device identification, meaning the mapping IS
-    // applied.
-    sandbox
-        .inject_key_down(codes::CAPSLOCK)
-        .expect("inject key down");
-    sandbox
-        .inject_key_up(codes::CAPSLOCK)
-        .expect("inject key up");
-
-    let events = sandbox.drain_output_events();
-
-    // Because SendInput bypasses Raw Input, the worker falls back to a global
-    // lookup and the mapping is applied.
-    assert_eq!(
-        events,
-        vec![
-            CapturedEvent {
-                code: codes::LEFT_CONTROL,
-                is_down: true,
-            },
-            CapturedEvent {
-                code: codes::LEFT_CONTROL,
-                is_down: false,
-            },
-        ],
-        "SendInput-injected CapsLock should be remapped to LeftControl via \
-         the worker's fallback lookup (Raw Input device matching is bypassed \
-         for synthetic events)"
+    // n. Assert the event log matches the expected sequence.
+    assert_events_match(
+        &actual,
+        &sequences.expected,
+        "event log does not match expected sequence",
     );
 
-    eprintln!(
-        "keyboard filter test: daemon running with filter for '{}' \
-         (vendor={}). SendInput bypasses Raw Input, so the mapping is \
-         applied via fallback lookup. To verify filtering, press CapsLock on \
-         the '{}' keyboard and observe whether it is remapped to LeftControl.",
-        target.name, target.vendor, target.name
-    );
+    // o. Clean up.
+    std::fs::remove_dir_all(&temp_dir).ok();
 
-    // Clear the env var.
-    unsafe { std::env::remove_var("KEYMAPPER_TEST_OUTPUT_FILE"); }
-
-    // Teardown.
-    daemon.kill();
-    sandbox.teardown();
-    std::fs::remove_dir_all(&config_dir).ok();
+    eprintln!("e2e_comprehensive_config PASSED");
 }
 
-/// Verify that changing the config file while the daemon is running causes
-/// the new mapping to take effect.
+/// Run the full e2e test with a hot-reload of the config.
 ///
-/// The test exercises three phases:
-/// 1. Initial mapping is active (CapsLock → LeftControl).
-/// 2. Config is rewritten to map CapsLock → A, and the daemon hot-reloads.
-/// 3. The new mapping is verified by injecting CapsLock and expecting A.
+/// 1. Starts with `config_comprehensive.yaml` and injects keys.
+/// 2. Hot-reloads to `config_reloaded.yaml`.
+/// 3. Injects keys again and validates the new mappings.
 #[test]
 fn e2e_config_hot_reload() {
-    let initial_config = r#"- mappings:
-    CapsLock: LeftAlt+A"#;
-
-    run_e2e_test_with_reload(initial_config, |sandbox, config_dir, daemon| {
-        // --- Phase 1: verify initial mapping (CapsLock → LeftControl) ---
-        sandbox
-            .inject_key_down(codes::CAPSLOCK)
-            .expect("Inject key down");
-        sandbox
-            .inject_key_up(codes::CAPSLOCK)
-            .expect("Inject key up");
-
-        let events = sandbox.drain_output_events();
-        assert_eq!(
-            events,
-            vec![
-                CapturedEvent {
-                    code: codes::LEFT_ALT,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::A,
-                    is_down: true,
-                },
-                CapturedEvent {
-                    code: codes::A,
-                    is_down: false,
-                },
-                CapturedEvent {
-                    code: codes::LEFT_ALT,
-                    is_down: false,
-                },
-            ],
-            "Initial mapping: CapsLock should be remapped to LeftAlt+A"
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: injector not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
         );
+        return;
+    }
 
-        // --- Phase 2: hot-reload config to CapsLock → Escape ---
-        let new_config = r#"- mappings:
-    CapsLock: Escape"#;
-        update_config(config_dir, new_config);
+    // a. Create temp directory.
+    let temp_dir = create_test_dir();
+    eprintln!("test dir: {:?}", temp_dir);
 
-        // Block until the daemon reports a successful hot-swap.
-        daemon.await_reload().expect(
-            "Daemon should have hot-reloaded the configuration within timeout",
-        );
+    // b. Copy initial fixture config into temp directory.
+    let config_in = Path::new(CONFIG_COMPREHENSIVE);
+    let config_out = temp_dir.join("config.yaml");
+    std::fs::copy(config_in, &config_out)
+        .expect("failed to copy config fixture");
 
-        // Small grace period after reload for the new cache to be used.
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    // c. Create events log path.
+    let events_log = temp_dir.join("events.log");
 
-        // --- Phase 3: verify new mapping takes effect (CapsLock → Escape) ---
-        sandbox
-            .inject_key_down(codes::CAPSLOCK)
-            .expect("Inject key down");
-        sandbox
-            .inject_key_up(codes::CAPSLOCK)
-            .expect("Inject key up");
+    // Parse the initial config to build injection and expected sequences.
+    let sequences_phase1 = build_test_sequences(&config_out);
+    eprintln!(
+        "phase 1: injection steps: {}, expected events: {}",
+        sequences_phase1.steps.len(),
+        sequences_phase1.expected.len()
+    );
 
-        let events = sandbox.drain_output_events();
-        assert_eq!(
-            events,
-            vec![
-                CapturedEvent {
-                    code: codes::ESC,
-                    is_down: true
-                },
-                CapturedEvent {
-                    code: codes::ESC,
-                    is_down: false
-                },
-            ],
-            "Reloaded mapping: CapsLock should be remapped to Escape"
-        );
+    // d. Start the monitor.
+    let mut monitor = start_monitor(&events_log);
+
+    // e. Create and setup the injector.
+    let mut injector = create_injector()
+        .expect("failed to create injector")
+        .expect("injector not available on this platform");
+    injector.setup().expect("failed to setup injector");
+
+    // f. Start the daemon.
+    start_daemon(&temp_dir);
+
+    // g. Inject keys from phase 1 sequence.
+    eprintln!(
+        "phase 1: injecting {} steps...",
+        sequences_phase1.steps.len()
+    );
+    for step in &sequences_phase1.steps {
+        inject_step(&*injector, step);
+    }
+
+    // h. Hot-reload: copy the reloaded config into the temp directory.
+    eprintln!("hot-reloading config...");
+    let reload_config = Path::new(CONFIG_RELOADED);
+    std::fs::copy(reload_config, &config_out)
+        .expect("failed to copy reloaded config");
+
+    // Wait for the daemon's reload debounce plus compilation time.
+    thread::sleep(Duration::from_secs(2));
+
+    // Parse the reloaded config to build phase 2 sequences.
+    let sequences_phase2 = build_test_sequences(&config_out);
+    eprintln!(
+        "phase 2: injection steps: {}, expected events: {}",
+        sequences_phase2.steps.len(),
+        sequences_phase2.expected.len()
+    );
+
+    // i. Inject keys from phase 2 sequence (under new config).
+    eprintln!(
+        "phase 2: injecting {} steps...",
+        sequences_phase2.steps.len()
+    );
+    for step in &sequences_phase2.steps {
+        inject_step(&*injector, step);
+    }
+
+    // j. Stop the daemon.
+    stop_daemon(&temp_dir);
+
+    // k. Stop the monitor.
+    monitor.kill();
+
+    // l. Teardown the injector.
+    injector.teardown();
+
+    // m. Parse the event log.
+    let actual = event_log::parse(&events_log).unwrap_or_else(|e| {
+        panic!("failed to parse event log {:?}: {e}", events_log)
     });
+    eprintln!("captured {} events from log", actual.len());
+
+    // n. Build the combined expected sequence: phase 1 + phase 2.
+    let mut expected_combined = sequences_phase1.expected.clone();
+    expected_combined.extend(sequences_phase2.expected.iter().cloned());
+
+    assert_events_match(
+        &actual,
+        &expected_combined,
+        "event log does not match combined expected sequence (phase 1 + \
+         phase 2 after hot-reload)",
+    );
+
+    // o. Clean up.
+    std::fs::remove_dir_all(&temp_dir).ok();
+
+    eprintln!("e2e_config_hot_reload PASSED");
 }
