@@ -7,8 +7,8 @@
 // $Source$
 // $Revision$
 
-//! CLI utility commands for the keymapper tool.
+//! Utility modules for keymapper.
 
+pub mod key_injector;
 pub mod monitor;
 pub mod platform;
-pub mod sandbox;
