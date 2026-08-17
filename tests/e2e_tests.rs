@@ -23,6 +23,9 @@
 //! 5. Start the monitor, injector, and daemon.
 //! 6. Inject keys from the sequence and assert the event log matches the
 //!    expected sequence.
+//!
+//! The temp directory, the monitor process, and the daemon are wrapped in
+//! RAII guards, so the environment is cleaned up even when a test fails.
 
 mod event_log;
 
@@ -446,23 +449,98 @@ fn common_to_platform_code(common_key: Key) -> u16 {
 // Process management helpers
 // ---------------------------------------------------------------------------
 
+/// RAII guard that removes a temporary directory on `Drop`.
+///
+/// Declare this before the process guards, because guards drop in reverse
+/// declaration order and the daemon's PID file (needed to stop it) lives
+/// inside the directory.
+struct TempDirGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempDirGuard {
+    fn new(path: PathBuf) -> Self {
+        TempDirGuard { path: Some(path) }
+    }
+
+    fn remove(&mut self) {
+        if let Some(path) = self.path.take()
+            && let Err(e) = std::fs::remove_dir_all(&path)
+        {
+            eprintln!("failed to remove temp dir {:?}: {e}", path);
+        }
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        self.remove();
+    }
+}
+
 /// RAII guard that kills a child process on `Drop`.
 struct ProcessGuard {
-    child: std::process::Child,
+    child: Option<std::process::Child>,
     label: &'static str,
 }
 
 impl ProcessGuard {
     fn kill(&mut self) {
-        eprintln!("stopping {}...", self.label);
-        self.child.kill().ok();
-        let _ = self.child.wait();
+        if let Some(mut child) = self.child.take() {
+            eprintln!("stopping {}...", self.label);
+            child.kill().ok();
+            let _ = child.wait();
+        }
     }
 }
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+/// RAII guard that stops the daemon on `Drop`.
+///
+/// The daemon runs detached from the test process, so a panic in the test
+/// would leave it running and holding the keyboard grab.  This guard runs
+/// `keymapper daemon stop` on drop to make the cleanup unconditional.  It
+/// only logs failures, because `stop` may run during stack unwinding,
+/// where a panic would abort the process.
+struct DaemonGuard {
+    config_dir: PathBuf,
+    stopped: bool,
+}
+
+impl DaemonGuard {
+    /// Stop the daemon via `keymapper daemon stop`.  Idempotent.
+    fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+
+        eprintln!("stopping daemon...");
+        match Command::new(cli_bin_path())
+            .args(["daemon", "stop", "--config-dir"])
+            .arg(&self.config_dir)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                eprintln!("daemon stop failed with status: {status}")
+            }
+            Err(e) => eprintln!("failed to run daemon stop: {e}"),
+        }
+
+        // Allow the daemon to release its devices.
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -487,20 +565,19 @@ fn start_monitor(output_path: &Path) -> ProcessGuard {
     }
 
     ProcessGuard {
-        child,
+        child: Some(child),
         label: "monitor",
     }
 }
 
 /// Start the daemon via `keymapper daemon start --config-dir <path>`.
-fn start_daemon(config_dir: &Path) {
+///
+/// Returns a guard that stops the daemon on `Drop`, so the daemon is
+/// cleaned up even when the test fails.
+fn start_daemon(config_dir: &Path) -> DaemonGuard {
     let status = Command::new(cli_bin_path())
-        .args([
-            "daemon",
-            "start",
-            "--config-dir",
-            config_dir.to_str().expect("config_dir is not valid utf-8"),
-        ])
+        .args(["daemon", "start", "--config-dir"])
+        .arg(config_dir)
         .status()
         .expect("failed to run keymapper daemon start");
 
@@ -510,22 +587,11 @@ fn start_daemon(config_dir: &Path) {
 
     // Allow the daemon to initialize (grab devices, create uinput, etc.).
     thread::sleep(Duration::from_millis(500));
-}
 
-/// Stop the daemon via `keymapper daemon stop`.
-fn stop_daemon(config_dir: &Path) {
-    let _status = Command::new(cli_bin_path())
-        .args([
-            "daemon",
-            "stop",
-            "--config-dir",
-            config_dir.to_str().expect("config_dir is not valid utf-8"),
-        ])
-        .status()
-        .expect("failed to run keymapper daemon stop");
-
-    // Allow the daemon to clean up.
-    thread::sleep(Duration::from_millis(200));
+    DaemonGuard {
+        config_dir: config_dir.to_path_buf(),
+        stopped: false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,8 +683,11 @@ fn e2e_comprehensive_config() {
         return;
     }
 
-    // a. Create temp directory.
+    // a. Create temp directory.  The guard removes it on drop, even when
+    //    the test fails.  Declared first so it drops last: the daemon's
+    //    PID file (needed to stop it) lives in this directory.
     let temp_dir = create_test_dir();
+    let mut dir_guard = TempDirGuard::new(temp_dir.clone());
     eprintln!("test dir: {:?}", temp_dir);
 
     // b. Copy fixture config into temp directory.
@@ -647,8 +716,9 @@ fn e2e_comprehensive_config() {
         .expect("injector not available on this platform");
     injector.setup().expect("failed to setup injector");
 
-    // f. Start the daemon.
-    start_daemon(&temp_dir);
+    // f. Start the daemon.  The guard stops it on drop, even when the test
+    //    fails.
+    let mut daemon = start_daemon(&temp_dir);
 
     // g. Inject keys from the test sequence.
     eprintln!("injecting {} steps...", sequences.steps.len());
@@ -658,7 +728,7 @@ fn e2e_comprehensive_config() {
     }
 
     // j. Stop the daemon.
-    stop_daemon(&temp_dir);
+    daemon.stop();
 
     // k. Stop the monitor.
     monitor.kill();
@@ -680,7 +750,7 @@ fn e2e_comprehensive_config() {
     );
 
     // o. Clean up.
-    std::fs::remove_dir_all(&temp_dir).ok();
+    dir_guard.remove();
 
     eprintln!("e2e_comprehensive_config PASSED");
 }
@@ -700,8 +770,11 @@ fn e2e_config_hot_reload() {
         return;
     }
 
-    // a. Create temp directory.
+    // a. Create temp directory.  The guard removes it on drop, even when
+    //    the test fails.  Declared first so it drops last: the daemon's
+    //    PID file (needed to stop it) lives in this directory.
     let temp_dir = create_test_dir();
+    let mut dir_guard = TempDirGuard::new(temp_dir.clone());
     eprintln!("test dir: {:?}", temp_dir);
 
     // b. Copy initial fixture config into temp directory.
@@ -730,8 +803,9 @@ fn e2e_config_hot_reload() {
         .expect("injector not available on this platform");
     injector.setup().expect("failed to setup injector");
 
-    // f. Start the daemon.
-    start_daemon(&temp_dir);
+    // f. Start the daemon.  The guard stops it on drop, even when the test
+    //    fails.
+    let mut daemon = start_daemon(&temp_dir);
 
     // g. Inject keys from phase 1 sequence.
     eprintln!(
@@ -769,7 +843,7 @@ fn e2e_config_hot_reload() {
     }
 
     // j. Stop the daemon.
-    stop_daemon(&temp_dir);
+    daemon.stop();
 
     // k. Stop the monitor.
     monitor.kill();
@@ -795,7 +869,7 @@ fn e2e_config_hot_reload() {
     );
 
     // o. Clean up.
-    std::fs::remove_dir_all(&temp_dir).ok();
+    dir_guard.remove();
 
     eprintln!("e2e_config_hot_reload PASSED");
 }
