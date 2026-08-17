@@ -11,8 +11,8 @@
 set -e
 
 sign_macos() {
-    # Find the e2e_sandbox test binary (the executable has no extension).
-    bin=$(find target/debug/deps -maxdepth 1 -name 'e2e_sandbox-*' \
+    # Find the e2e_tests test binary (the executable has no extension).
+    bin=$(find target/debug/deps -maxdepth 1 -name 'e2e_tests-*' \
           ! -name '*.*' -type f 2>/dev/null | head -1)
 
     if [ -n "$bin" ]; then
@@ -36,7 +36,7 @@ build_and_install_driver() {
 cargo build --bin keymapperd "$@"
 
 # Build and sign the test binary without running it.
-cargo nextest run --test e2e_sandbox --no-run "$@"
+cargo nextest run --test e2e_tests --no-run "$@"
 
 # Sign on macOS and install the virtual HID driver.
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -47,7 +47,7 @@ fi
 # Run the tests.  On macOS, running as root bypasses TCC Accessibility
 # permission checks required for CGEventTap creation.
 if [ "$(uname -s)" = "Darwin" ]; then
-    sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_sandbox "$@"
+    sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests "$@"
 else
-    cargo nextest run --no-capture --test e2e_sandbox "$@"
+    cargo nextest run --no-capture --test e2e_tests "$@"
 fi
