@@ -547,27 +547,36 @@ impl Drop for DaemonGuard {
 /// Spawn the monitor binary as a subprocess.  Returns a guard that ensures
 /// the child is killed on `Drop`.
 fn start_monitor(output_path: &Path) -> ProcessGuard {
-    let mut child = Command::new(monitor_bin_path())
+    let child = Command::new(monitor_bin_path())
         .arg("--output")
         .arg(output_path)
         .spawn()
         .expect("failed to spawn keymapper_monitor");
 
+    // Wrap the child in the guard before the readiness check, so the
+    // monitor is still killed when the check panics.
+    let mut guard = ProcessGuard {
+        child: Some(child),
+        label: "monitor",
+    };
+
     // Give the egui window time to open and become ready.
     thread::sleep(Duration::from_secs(2));
 
-    // Check that the process is still alive.  `try_wait()` returns `None`
-    // when the process has not yet exited.
-    if child.try_wait().ok().is_none() {
-        // Still running — good.
-    } else {
-        panic!("keymapper_monitor exited prematurely");
+    // Check that the monitor is still alive.  `try_wait` returns
+    // `Ok(None)` while the process has not yet exited, so `None` means
+    // "still running".
+    let exited = guard
+        .child
+        .as_mut()
+        .expect("child is present")
+        .try_wait()
+        .expect("failed to poll keymapper_monitor");
+    if let Some(status) = exited {
+        panic!("keymapper_monitor exited prematurely: {status}");
     }
 
-    ProcessGuard {
-        child: Some(child),
-        label: "monitor",
-    }
+    guard
 }
 
 /// Start the daemon via `keymapper daemon start --config-dir <path>`.
