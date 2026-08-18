@@ -15,4 +15,5 @@ mod mapping;
 pub(crate) use active_app::get_active_app_name;
 pub use key::Key;
 pub use keyboard::{discover_and_open_keyboards, list_keyboards};
+pub(crate) use mapping::VIRTUAL_KEYBOARD_NAME;
 pub use mapping::start_mapping;

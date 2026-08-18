@@ -9,8 +9,10 @@
 
 //! egui/eframe application for the keyboard monitor.
 //!
-//! Creates a small focused window that captures all keyboard events and
-//! writes them to the output file.  Exits cleanly on SIGTERM/SIGINT.
+//! On Linux the monitor runs headless and captures the daemon's output
+//! directly (see [`super::linux`]); on other platforms it creates a small
+//! focused window that captures all keyboard events.  Both write events
+//! to the output file and exit cleanly on SIGTERM/SIGINT.
 
 use std::{
     path::PathBuf,
@@ -22,10 +24,9 @@ use std::{
 
 use eframe::egui;
 
-use super::{
-    ModifierState, OutputEvent, map_egui_key, register_signal_handlers,
-    writer::EventWriter,
-};
+#[cfg(not(target_os = "linux"))]
+use super::register_signal_handlers;
+use super::{ModifierState, OutputEvent, map_egui_key, writer::EventWriter};
 use crate::common::Key;
 
 /// The egui application state.
@@ -95,13 +96,18 @@ impl eframe::App for MonitorApp {
 
         // --- Modifier keys ---
         // Use the `Modifiers` struct which provides individual modifier state.
+        //
+        // Only `mac_cmd` may drive the super slot: on non-macOS platforms
+        // the egui backend maps `command` to the ctrl state (and drops the
+        // super key entirely), so including it here would log every ctrl
+        // press a second time as `LeftCommand`.
         let current_mods = ctx.input(|i| {
             let mods = i.modifiers;
             ModifierState {
                 left_control: mods.ctrl,
                 left_shift: mods.shift,
                 left_alt: mods.alt,
-                left_super: mods.mac_cmd || mods.command,
+                left_super: mods.mac_cmd,
             }
         });
 
@@ -153,19 +159,30 @@ pub fn build_native_options() -> eframe::NativeOptions {
 
 /// Entry point for the monitor application.
 ///
-/// Creates the egui window, starts the event capture loop, and exits
-/// cleanly on SIGTERM/SIGINT.
+/// On Linux, grabs the daemon's uinput output device directly (no window,
+/// no window-manager focus dependency).  On other platforms, creates the
+/// egui window and starts the per-frame event capture.  Exits cleanly on
+/// SIGTERM/SIGINT.
 pub fn run(output_path: PathBuf) {
-    let shutdown = register_signal_handlers();
+    #[cfg(target_os = "linux")]
+    {
+        super::linux::run(&output_path);
+        return;
+    }
 
-    let native_options = build_native_options();
+    #[cfg(not(target_os = "linux"))]
+    {
+        let shutdown = register_signal_handlers();
 
-    eframe::run_native(
-        "keymapper_monitor",
-        native_options,
-        Box::new(move |_cc| {
-            Ok(Box::new(MonitorApp::new(output_path, shutdown)))
-        }),
-    )
-    .expect("eframe failed to run");
+        let native_options = build_native_options();
+
+        eframe::run_native(
+            "keymapper_monitor",
+            native_options,
+            Box::new(move |_cc| {
+                Ok(Box::new(MonitorApp::new(output_path, shutdown)))
+            }),
+        )
+        .expect("eframe failed to run");
+    }
 }

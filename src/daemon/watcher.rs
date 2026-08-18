@@ -59,23 +59,24 @@ fn spawn_reload_thread(
         let mut last_log: Option<Instant> = None;
 
         loop {
-            // Wait for an event, but timeout after DEBOUNCE_INTERVAL.
-            // If we receive more events during that window they queue up;
-            // once the channel is empty after a quiet period we proceed.
-            match rx.recv_timeout(DEBOUNCE_INTERVAL) {
-                Ok(()) => {
-                    // An event arrived — consume any others that queued up
-                    // during the debounce window.
-                    drain_channel(&rx);
-                    // Reset the debounce: wait for a quiet period.
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Quiet period elapsed — proceed with reload.
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // The watcher was dropped; exit the thread.
-                    break;
+            // Block until a filesystem event arrives.  Only real events may
+            // trigger a reload — the previous design treated every debounce
+            // timeout as a quiet period, which reloaded an unmodified config
+            // every DEBOUNCE_INTERVAL.
+            if rx.recv().is_err() {
+                // The watcher was dropped; exit the thread.
+                break;
+            }
+
+            // Debounce: keep consuming events until the file system goes
+            // quiet for DEBOUNCE_INTERVAL after the last event.  Editors
+            // that write atomically (write-to-temp + rename) emit several
+            // events per save; this coalesces them into one reload.
+            loop {
+                match rx.recv_timeout(DEBOUNCE_INTERVAL) {
+                    Ok(()) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
 
@@ -122,12 +123,6 @@ fn spawn_reload_thread(
     });
 
     tx
-}
-
-/// Drain any pending messages from the channel so we only reload once per
-/// burst of filesystem events.
-fn drain_channel(rx: &mpsc::Receiver<()>) {
-    while rx.try_recv().is_ok() {}
 }
 
 /// Attempt a single reload of the configuration file, performing security

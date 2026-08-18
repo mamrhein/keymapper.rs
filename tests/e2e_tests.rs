@@ -9,20 +9,29 @@
 
 //! End-to-end integration tests using file-based event validation.
 //!
-//! These tests spawn `keymapper_monitor` as a subprocess to capture keyboard
-//! events into a log file, inject synthetic key events via the platform
-//! injector, and validate the daemon's remapped output against expected
-//! sequences derived from the config fixture files.
+//! These tests spawn `keymapper_monitor` as a subprocess to capture the
+//! daemon's output into a log file, inject synthetic key events via the
+//! platform injector, and validate the daemon's remapped output against
+//! expected sequences derived from the config fixture files.
+//!
+//! On Linux the monitor runs headless: it grabs the daemon's uinput output
+//! device directly, so the capture is deterministic, works on interactive
+//! sessions, and the daemon's output can never leak into the compositor or
+//! a focused window.  The daemon's active-app query is pinned to the
+//! monitor's app name via `KEYMAPPER_ACTIVE_APP`, so app-scoped rules are
+//! evaluated deterministically even though the monitor has no window.
 //!
 //! The test flow is:
 //! 1. Create a temp directory and copy a fixture config into it.
-//! 2. Parse the config to extract trigger keys and their mapped outputs from
-//!    all rule groups (regardless of app/keyboard context).
-//! 3. Build an injection sequence containing triggers plus passthrough keys.
-//! 4. Build an expected sequence containing mapped outputs plus passthrough.
+//! 2. Parse the config and collect all trigger rules with their app scope.
+//! 3. Build an injection sequence interleaving triggers with passthrough keys
+//!    that no rule uses.
+//! 4. Build the expected sequence by simulating the daemon's per-event
+//!    behaviour (rule firing, swallow, passthrough, chord output taps) and the
+//!    monitor's platform-specific key reporting.
 //! 5. Start the monitor, injector, and daemon.
-//! 6. Inject keys from the sequence and assert the event log matches the
-//!    expected sequence.
+//! 6. Inject a canary key to verify the full capture path is live, then inject
+//!    the sequence and assert the event log matches the expected sequence.
 //!
 //! The temp directory, the monitor process, and the daemon are wrapped in
 //! RAII guards, so the environment is cleaned up even when a test fails.
@@ -52,6 +61,61 @@ use keymapper::{
 /// rather than per-test, because the result is a global property of the CI
 /// environment (Accessibility permission, HID driver availability, etc.).
 static CAN_RUN_E2E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Cross-process lock that serializes the e2e tests.
+///
+/// The tests drive the system-wide input stack (they grab the physical
+/// keyboard and create virtual devices), so two e2e tests must never run
+/// concurrently: a second daemon would fail to grab the already grabbed
+/// keyboards and abort.  Holding the lock for the duration of the test
+/// serializes the e2e tests while leaving the unit tests free to run in
+/// parallel.
+#[cfg(unix)]
+struct E2eLock {
+    /// The lock is released when this file (and its descriptor) is closed.
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl E2eLock {
+    /// Block until the exclusive e2e lock is acquired.
+    fn acquire() -> Self {
+        use std::os::unix::io::AsRawFd;
+
+        let path = env::temp_dir().join("keymapper_e2e.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|e| {
+                panic!("failed to open e2e lock file {path:?}: {e}")
+            });
+
+        // Safety: flock(2) on a descriptor owned by `file`.
+        loop {
+            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if ret == 0 {
+                return E2eLock { _file: file };
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                panic!("failed to acquire e2e lock {path:?}: {err}");
+            }
+        }
+    }
+}
+
+/// Windows: no cross-process input-stack lock available; the Windows e2e
+/// path is expected to run one test at a time.
+#[cfg(not(unix))]
+struct E2eLock;
+
+#[cfg(not(unix))]
+impl E2eLock {
+    fn acquire() -> Self {
+        E2eLock
+    }
+}
 
 fn can_run_e2e() -> bool {
     *CAN_RUN_E2E.get_or_init(|| {
@@ -133,18 +197,43 @@ struct InjectionStep {
 
 /// The result of parsing a config file for test sequence generation.
 struct TestSequences {
-    /// Ordered injection steps: triggers followed by passthrough keys.
+    /// Ordered injection steps: triggers interleaved with passthrough keys.
     steps: Vec<InjectionStep>,
     /// Expected log events corresponding to each injection step.
     expected: Vec<LogEvent>,
 }
 
+/// Application name the monitor window reports as the active app while the
+/// test runs.  App-scoped rules for this app are expected to fire; rules
+/// scoped to any other app (e.g. "to_be_ignored") must not.
+const MONITOR_APP_NAME: &str = "keymapper_monitor";
+
+/// A rule collected from the config, annotated with its app scope.
+struct CollectedRule<'a> {
+    /// The trigger key event (base plus held modifiers).
+    trigger: &'a keymapper::common::config::KeyEvent,
+    /// The rule's output key events.
+    outputs: Vec<&'a keymapper::common::config::KeyEvent>,
+    /// App names the rule is scoped to; empty means global.
+    apps: Vec<String>,
+}
+
+impl CollectedRule<'_> {
+    /// Whether the rule is expected to fire while the monitor window is the
+    /// active application.
+    fn fires_for_monitor(&self) -> bool {
+        self.apps.is_empty() || self.apps.iter().any(|a| a == MONITOR_APP_NAME)
+    }
+}
+
 /// Parse the config file at *config_path* and build test sequences.
 ///
-/// Extracts all trigger keys from every rule group (regardless of app or
-/// keyboard context), and adds passthrough keys that are not used by any
-/// rule.  The injection sequence interleaves mapped triggers with
-/// passthrough keys to exercise both remapping and transparent forwarding.
+/// Collects all trigger rules from every group (keeping app scope) and adds
+/// passthrough keys that no rule uses.  The injection sequence interleaves
+/// triggers with passthrough keys to exercise both remapping and transparent
+/// forwarding.  The expected sequence simulates the daemon's per-event
+/// behaviour (see [`rule_expected_events`]) and the monitor's reporting
+/// semantics (see [`monitor_key_name`]).
 fn build_test_sequences(config_path: &Path) -> TestSequences {
     let content = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
         panic!("failed to read config fixture {config_path:?}: {e}")
@@ -154,29 +243,28 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
         panic!("failed to parse config fixture {config_path:?}: {e}")
     });
 
-    // Collect all triggers and their outputs from every rule group.
-    let mut triggers: Vec<&keymapper::common::config::KeyEvent> = Vec::new();
-    let mut outputs: Vec<Vec<keymapper::common::config::KeyEvent>> =
-        Vec::new();
-
+    // Collect all rules from every group, keeping app scope so firing
+    // expectations can account for the active app.
+    let mut rules: Vec<CollectedRule> = Vec::new();
     for group in &app_config.groups {
         for (trigger, output_events) in group.mappings.iter() {
-            triggers.push(trigger);
-            outputs.push(output_events.to_vec());
+            rules.push(CollectedRule {
+                trigger,
+                outputs: output_events.iter().collect(),
+                apps: group.apps.clone(),
+            });
         }
     }
 
     // Collect all keys used in triggers and outputs to find passthrough
     // candidates.
     let mut used_keys = std::collections::HashSet::new();
-    for trigger in &triggers {
-        used_keys.insert(trigger.base);
-        for mod_key in &trigger.modifiers {
+    for rule in &rules {
+        used_keys.insert(rule.trigger.base);
+        for mod_key in &rule.trigger.modifiers {
             used_keys.insert(*mod_key);
         }
-    }
-    for output_group in &outputs {
-        for output in output_group {
+        for output in &rule.outputs {
             used_keys.insert(output.base);
             for mod_key in &output.modifiers {
                 used_keys.insert(*mod_key);
@@ -202,8 +290,8 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
     }
 
     // Build injection steps and expected events.  The sequence alternates
-    // between mapped triggers and passthrough keys to thoroughly exercise
-    // both code paths.
+    // between triggers and passthrough keys to thoroughly exercise both
+    // code paths.
     let mut steps: Vec<InjectionStep> = Vec::new();
     let mut expected: Vec<LogEvent> = Vec::new();
 
@@ -211,48 +299,202 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
 
     // Interleave triggers with passthrough keys.  Insert a passthrough
     // after every two triggers to keep the test sequence manageable.
-    let mut trigger_idx = 0;
+    let mut rule_idx = 0;
     let mut passthrough_count = 0;
 
-    while trigger_idx < triggers.len() || passthrough_count < 5 {
+    while rule_idx < rules.len() || passthrough_count < 5 {
         // Add up to 2 triggers before the next passthrough.
-        let triggers_to_add = std::cmp::min(2, triggers.len() - trigger_idx);
+        let triggers_to_add = std::cmp::min(2, rules.len() - rule_idx);
         for _ in 0..triggers_to_add {
-            let trigger = triggers[trigger_idx];
-            let output_group = &outputs[trigger_idx];
+            let rule = &rules[rule_idx];
 
             // Build injection step for the trigger.
-            let step = key_event_to_injection_step(trigger);
-            steps.push(step);
+            steps.push(key_event_to_injection_step(rule.trigger));
 
-            // Build expected events for the mapped output.
-            #[allow(clippy::needless_borrow)]
-            let trigger_down_events =
-                build_expected_output_events(&output_group, true);
-            #[allow(clippy::needless_borrow)]
-            let trigger_up_events =
-                build_expected_output_events(&output_group, false);
+            // Build expected events for the step.
+            expected.extend(rule_expected_events(rule, &rules));
 
-            expected.extend(trigger_down_events);
-            expected.extend(trigger_up_events);
-
-            trigger_idx += 1;
+            rule_idx += 1;
         }
 
         // Add a passthrough key if we still have some left.
         if let Some(&passthrough_key) = passthrough_iter.next() {
-            let step = single_key_injection_step(passthrough_key);
-            steps.push(step);
+            steps.push(single_key_injection_step(passthrough_key));
 
-            // Passthrough keys pass through unchanged.
-            expected.push(event_str(passthrough_key.as_str(), true));
-            expected.push(event_str(passthrough_key.as_str(), false));
+            // Passthrough keys are forwarded unchanged (subject to the
+            // monitor's visibility).
+            expected.extend(passthrough_expected(passthrough_key));
 
             passthrough_count += 1;
         }
     }
 
     TestSequences { steps, expected }
+}
+
+/// The key name the monitor logs for a given key, or `None` when the
+/// monitor cannot see the key on this platform.
+///
+/// On Linux the monitor captures the daemon's output device directly, so
+/// every emitted key is visible under its exact name (left/right sides
+/// are distinguished, Super and CapsLock included).  On other platforms
+/// the monitor observes keyboard state through the windowing system, which
+/// is side-agnostic: right-side modifiers are reported under their
+/// left-side names, Super/Command is only visible on macOS (the egui
+/// backend drops the super key on other platforms), and CapsLock is not
+/// tracked by egui at all.
+fn monitor_key_name(key: Key) -> Option<&'static str> {
+    // Linux direct-capture mode sees every key under its exact name.
+    #[cfg(target_os = "linux")]
+    {
+        Some(key.as_str())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        match key {
+            Key::LeftControl | Key::RightControl => Some("LeftControl"),
+            Key::LeftShift | Key::RightShift => Some("LeftShift"),
+            Key::LeftAlt | Key::RightAlt => Some("LeftAlt"),
+            Key::LeftCommand | Key::RightCommand => {
+                if cfg!(target_os = "macos") {
+                    Some("LeftCommand")
+                } else {
+                    None
+                }
+            }
+            Key::CapsLock => None,
+            other => Some(other.as_str()),
+        }
+    }
+}
+
+/// Modifier bit position, mirroring the daemon's bitmask layout (see
+/// `src/daemon/mapping_cache.rs`).  The daemon emits output modifiers in
+/// ascending bit order.
+fn modifier_bit(key: Key) -> Option<u8> {
+    Some(match key {
+        Key::LeftControl => 0,
+        Key::RightControl => 1,
+        Key::LeftShift => 2,
+        Key::RightShift => 3,
+        Key::LeftAlt => 4,
+        Key::RightAlt => 5,
+        Key::LeftCommand => 6,
+        Key::RightCommand => 7,
+        _ => return None,
+    })
+}
+
+/// Build the expected monitor events for a forwarded (passthrough) key
+/// press+release.
+fn passthrough_expected(key: Key) -> Vec<LogEvent> {
+    match monitor_key_name(key) {
+        Some(name) => vec![event_str(name, true), event_str(name, false)],
+        None => Vec::new(),
+    }
+}
+
+/// Find a firing rule whose trigger is the bare modifier *mod_key* (no
+/// modifiers held), if one exists.
+fn find_bare_modifier_rule<'a>(
+    mod_key: Key,
+    rules: &'a [CollectedRule<'a>],
+) -> Option<&'a CollectedRule<'a>> {
+    rules.iter().find(|rule| {
+        rule.trigger.base == mod_key
+            && rule.trigger.modifiers.is_empty()
+            && rule.fires_for_monitor()
+    })
+}
+
+/// Build the expected monitor events for one daemon-emitted output tap.
+///
+/// The daemon emits each output as a complete tap: modifiers down (bit
+/// order), base down, base up, modifiers up (reverse).  Sub-events the
+/// monitor cannot see on this platform (e.g. Super on Linux) are omitted.
+fn output_tap_events<'a>(
+    outputs: &[&'a keymapper::common::config::KeyEvent],
+) -> Vec<LogEvent> {
+    let mut events = Vec::new();
+
+    for output in outputs {
+        let mut mod_keys: Vec<Key> = output.modifiers.clone();
+        mod_keys.sort_by_key(|k| modifier_bit(*k).unwrap_or(8));
+
+        for mod_key in &mod_keys {
+            if let Some(name) = monitor_key_name(*mod_key) {
+                events.push(event_str(name, true));
+            }
+        }
+
+        if let Some(name) = monitor_key_name(output.base) {
+            events.push(event_str(name, true));
+            events.push(event_str(name, false));
+        }
+
+        for mod_key in mod_keys.iter().rev() {
+            if let Some(name) = monitor_key_name(*mod_key) {
+                events.push(event_str(name, false));
+            }
+        }
+    }
+
+    events
+}
+
+/// Build the expected monitor events for one trigger injection step.
+///
+/// Models the daemon's processing of the step's events in order: each
+/// trigger modifier press/release is forwarded to the virtual device
+/// (unless the bare modifier is itself a firing trigger, in which case the
+/// press emits that rule's output and the release is swallowed), the base
+/// press fires this rule (emitting each output as a complete tap, with the
+/// base release swallowed) when the rule applies to the active app, or is
+/// forwarded together with the release when the rule is scoped to another
+/// app.
+fn rule_expected_events<'a>(
+    rule: &CollectedRule<'a>,
+    rules: &'a [CollectedRule<'a>],
+) -> Vec<LogEvent> {
+    let mut events = Vec::new();
+    let trigger = rule.trigger;
+
+    // Modifier presses are processed before the base key.  A forwarded
+    // (passthrough) modifier press emits only its down event here; the
+    // matching up event is emitted in the release phase below, after the
+    // base key, mirroring the daemon's forwarding order.
+    for mod_key in &trigger.modifiers {
+        if let Some(bare) = find_bare_modifier_rule(*mod_key, rules) {
+            events.extend(output_tap_events(&bare.outputs));
+        } else if let Some(name) = monitor_key_name(*mod_key) {
+            events.push(event_str(name, true));
+        }
+    }
+
+    if rule.fires_for_monitor() {
+        // Base press fires the rule; the base release is swallowed.
+        for output in &rule.outputs {
+            events.extend(output_tap_events(std::slice::from_ref(output)));
+        }
+    } else {
+        // Rule does not apply (scoped to another app): the whole step
+        // passes through unchanged.
+        events.extend(passthrough_expected(trigger.base));
+    }
+
+    // Modifier releases are processed after the base key, in reverse order.
+    for mod_key in trigger.modifiers.iter().rev() {
+        if find_bare_modifier_rule(*mod_key, rules).is_none() {
+            if let Some(name) = monitor_key_name(*mod_key) {
+                events.push(event_str(name, false));
+            }
+        }
+        // A bare-modifier trigger swallows the release (no emission on
+        // key-up), so nothing is expected for it here.
+    }
+
+    events
 }
 
 /// Convert a `[KeyEvent]` into an injection step with properly ordered
@@ -285,42 +527,6 @@ fn single_key_injection_step(key: Key) -> InjectionStep {
         keys_down: vec![code],
         keys_up: vec![code],
     }
-}
-
-/// Build the expected log events for a group of output KeyEvents.
-///
-/// When *is_down* is true, emits down events for each output key in order.
-/// When false, emits up events in reverse order (matching the daemon's
-/// chord output semantics).
-fn build_expected_output_events(
-    outputs: &[keymapper::common::config::KeyEvent],
-    is_down: bool,
-) -> Vec<LogEvent> {
-    let mut events = Vec::new();
-
-    let ordered_outputs = if is_down {
-        outputs.to_vec()
-    } else {
-        outputs.iter().rev().cloned().collect()
-    };
-
-    for output in &ordered_outputs {
-        // For a chord output, emit modifier downs first, then base.
-        if is_down {
-            for mod_key in &output.modifiers {
-                events.push(event_str(mod_key.as_str(), true));
-            }
-            events.push(event_str(output.base.as_str(), true));
-        } else {
-            // Release base first, then modifiers in reverse.
-            events.push(event_str(output.base.as_str(), false));
-            for mod_key in output.modifiers.iter().rev() {
-                events.push(event_str(mod_key.as_str(), false));
-            }
-        }
-    }
-
-    events
 }
 
 /// Convert a platform-agnostic `[Key]` to the platform-specific native
@@ -584,9 +790,14 @@ fn start_monitor(output_path: &Path) -> ProcessGuard {
 /// Returns a guard that stops the daemon on `Drop`, so the daemon is
 /// cleaned up even when the test fails.
 fn start_daemon(config_dir: &Path) -> DaemonGuard {
+    // Pin the daemon's active-app query to the monitor's app name so
+    // app-scoped rule evaluation is deterministic: the monitor is
+    // windowless on Linux and can never be the compositor's active
+    // window, yet the test expects the monitor-scoped rules to fire.
     let status = Command::new(cli_bin_path())
         .args(["daemon", "start", "--config-dir"])
         .arg(config_dir)
+        .env("KEYMAPPER_ACTIVE_APP", MONITOR_APP_NAME)
         .status()
         .expect("failed to run keymapper daemon start");
 
@@ -643,8 +854,10 @@ fn inject_step(injector: &dyn KeyInjector, step: &InjectionStep) {
         thread::sleep(Duration::from_millis(3));
     }
 
-    // Brief hold time for the full chord.
-    thread::sleep(Duration::from_millis(10));
+    // Hold the full chord long enough to span at least one frame of the
+    // monitor's per-frame keyboard sampling, so the press is never
+    // coalesced away between two samples.
+    thread::sleep(Duration::from_millis(50));
 
     for &code in &step.keys_up {
         injector
@@ -674,6 +887,77 @@ fn create_test_dir() -> PathBuf {
     dir
 }
 
+/// Wait until udev tags the injector's virtual device as a keyboard.
+///
+/// The daemon's startup discovery snapshots the udev database, and a
+/// freshly created uinput device only appears as a keyboard once udevd has
+/// processed its add event and tagged it with `ID_INPUT_KEYBOARD`.  Waiting
+/// here makes the daemon's discovery deterministic; the daemon's post-listen
+/// resync additionally covers the case where tagging still finishes late.
+#[cfg(target_os = "linux")]
+fn wait_for_injector_device(injector: &dyn KeyInjector) {
+    let Some(path) = injector.input_device_path() else {
+        eprintln!(
+            "warning: injector reports no device path; skipping udev wait"
+        );
+        return;
+    };
+
+    use std::os::unix::fs::MetadataExt;
+
+    for attempt in 0..100 {
+        let tagged = std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| {
+                let device = udev::Device::from_devnum(
+                    udev::DeviceType::Character,
+                    meta.rdev(),
+                )
+                .ok()?;
+                device
+                    .property_value("ID_INPUT_KEYBOARD")
+                    .map(|value| value == "1")
+            })
+            .unwrap_or(false);
+        if tagged {
+            return;
+        }
+        if attempt % 10 == 0 {
+            eprintln!("waiting for udev to tag {path} as a keyboard...");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    eprintln!(
+        "warning: udev did not tag {path} within 5s; the daemon's hot-plug \
+         resync may grab it late"
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wait_for_injector_device(_injector: &dyn KeyInjector) {}
+
+/// Check whether the daemon recorded in the config directory's PID file is
+/// still alive.
+#[cfg(unix)]
+fn daemon_alive(config_dir: &Path) -> bool {
+    let Ok(pid_str) =
+        std::fs::read_to_string(config_dir.join("keymapperd.pid"))
+    else {
+        return false;
+    };
+    let Ok(pid) = pid_str.trim().parse::<u32>() else {
+        return false;
+    };
+    // Safety: signal 0 is a pure liveness probe; no signal is delivered.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn daemon_alive(_config_dir: &Path) -> bool {
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
@@ -691,6 +975,9 @@ fn e2e_comprehensive_config() {
         );
         return;
     }
+
+    // Serialize with the other e2e test (system-wide input stack access).
+    let _e2e_lock = E2eLock::acquire();
 
     // a. Create temp directory.  The guard removes it on drop, even when
     //    the test fails.  Declared first so it drops last: the daemon's
@@ -725,11 +1012,26 @@ fn e2e_comprehensive_config() {
         .expect("injector not available on this platform");
     injector.setup().expect("failed to setup injector");
 
+    // e2. Wait until udev has tagged the injector device as a keyboard, so
+    //     the daemon's startup discovery sees it deterministically.
+    wait_for_injector_device(&*injector);
+
     // f. Start the daemon.  The guard stops it on drop, even when the test
     //    fails.
     let mut daemon = start_daemon(&temp_dir);
 
-    // g. Inject keys from the test sequence.
+    // f2. Verify the daemon survived initialisation.
+    if !daemon_alive(&temp_dir) {
+        panic!("daemon exited after startup");
+    }
+
+    // g. Inject a canary key first to verify the full capture path
+    //    (injector -> daemon -> virtual device -> compositor -> monitor
+    //    window) is live before running the real sequence.
+    eprintln!("injecting canary key (Space)...");
+    inject_step(&*injector, &single_key_injection_step(Key::Space));
+
+    // g2. Inject keys from the test sequence.
     eprintln!("injecting {} steps...", sequences.steps.len());
     for (i, step) in sequences.steps.iter().enumerate() {
         eprintln!("  step {}: {:?} / {:?}", i, step.keys_down, step.keys_up);
@@ -751,10 +1053,20 @@ fn e2e_comprehensive_config() {
     });
     eprintln!("captured {} events from log", actual.len());
 
-    // n. Assert the event log matches the expected sequence.
+    if actual.is_empty() {
+        panic!(
+            "monitor captured no events at all — its window probably does \
+             not have keyboard focus"
+        );
+    }
+
+    // n. Assert the event log matches the expected sequence (canary + main
+    //    sequence).
+    let mut expected_combined = passthrough_expected(Key::Space);
+    expected_combined.extend(sequences.expected);
     assert_events_match(
         &actual,
-        &sequences.expected,
+        &expected_combined,
         "event log does not match expected sequence",
     );
 
@@ -778,6 +1090,9 @@ fn e2e_config_hot_reload() {
         );
         return;
     }
+
+    // Serialize with the other e2e test (system-wide input stack access).
+    let _e2e_lock = E2eLock::acquire();
 
     // a. Create temp directory.  The guard removes it on drop, even when
     //    the test fails.  Declared first so it drops last: the daemon's
@@ -812,11 +1127,24 @@ fn e2e_config_hot_reload() {
         .expect("injector not available on this platform");
     injector.setup().expect("failed to setup injector");
 
+    // e2. Wait until udev has tagged the injector device as a keyboard, so
+    //     the daemon's startup discovery sees it deterministically.
+    wait_for_injector_device(&*injector);
+
     // f. Start the daemon.  The guard stops it on drop, even when the test
     //    fails.
     let mut daemon = start_daemon(&temp_dir);
 
-    // g. Inject keys from phase 1 sequence.
+    // f2. Verify the daemon survived initialisation.
+    if !daemon_alive(&temp_dir) {
+        panic!("daemon exited after startup");
+    }
+
+    // g. Inject a canary key first to verify the full capture path is live.
+    eprintln!("injecting canary key (Space)...");
+    inject_step(&*injector, &single_key_injection_step(Key::Space));
+
+    // g2. Inject keys from phase 1 sequence.
     eprintln!(
         "phase 1: injecting {} steps...",
         sequences_phase1.steps.len()
@@ -866,8 +1194,16 @@ fn e2e_config_hot_reload() {
     });
     eprintln!("captured {} events from log", actual.len());
 
-    // n. Build the combined expected sequence: phase 1 + phase 2.
-    let mut expected_combined = sequences_phase1.expected.clone();
+    if actual.is_empty() {
+        panic!(
+            "monitor captured no events at all — its window probably does \
+             not have keyboard focus"
+        );
+    }
+
+    // n. Build the combined expected sequence: canary + phase 1 + phase 2.
+    let mut expected_combined = passthrough_expected(Key::Space);
+    expected_combined.extend(sequences_phase1.expected.iter().cloned());
     expected_combined.extend(sequences_phase2.expected.iter().cloned());
 
     assert_events_match(

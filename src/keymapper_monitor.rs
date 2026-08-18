@@ -13,16 +13,21 @@ use clap::Parser;
 
 /// Cross-platform keyboard event monitor for e2e testing.
 ///
-/// Creates a small focused window, captures all keyboard events, and writes
-/// them to an output file in the format `down <Key>` / `up <Key>`.
+/// On Linux, grabs the daemon's uinput output device and logs its raw key
+/// events (no window, deterministic, headless-friendly).  On other
+/// platforms, creates a small focused window that captures keyboard
+/// events.  Events are written to an output file in the format
+/// `down <Key>` / `up <Key>`.
 #[derive(Parser, Debug)]
 #[command(
     name = "keymapper_monitor",
     version,
     about = "Cross-platform keyboard event monitor for e2e testing.",
-    long_about = "Creates a small focused window, captures all keyboard \
-                  events,\nand writes them to an output file in the format \
-                  `down <Key>` / `up <Key>`."
+    long_about = "On Linux, grabs the daemon's uinput output device and logs \
+                  its raw\nkey events. On other platforms, creates a small \
+                  focused window that\ncaptures keyboard events. Events are \
+                  written to an output file\nin the format `down <Key>` / \
+                  `up <Key>`."
 )]
 struct Args {
     /// Path to the output file where captured events are written.

@@ -7,10 +7,46 @@
 // $Source$
 // $Revision$
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use parking_lot::Mutex;
 
 use super::mapping_cache::{CompiledRule, NativeKey, RuntimeLookupCache};
 use crate::common::keyboard::{KeyboardInfo, KeyboardSpecifier};
+
+/// How long a cached active-app name stays fresh.
+///
+/// The platform query is expensive (a synchronous D-Bus round-trip on
+/// Wayland, potentially establishing a new connection), while keyboard
+/// focus changes are rare.  A short TTL keeps per-event lookups cheap
+/// without lagging focus switches in any perceptible way.
+const ACTIVE_APP_TTL: Duration = Duration::from_millis(100);
+
+/// Environment variable that overrides the platform's active-app query.
+///
+/// The e2e tests run a windowless monitor that can never become the
+/// active window; setting this variable (to the monitor's app name) makes
+/// app-scoped rule evaluation deterministic in tests.
+const ACTIVE_APP_OVERRIDE_ENV: &str = "KEYMAPPER_ACTIVE_APP";
+
+/// Resolve the active application name, honoring the test override.
+fn resolved_active_app_name() -> String {
+    match std::env::var(ACTIVE_APP_OVERRIDE_ENV) {
+        Ok(name) if !name.is_empty() => name,
+        _ => crate::platform::get_active_app_name(),
+    }
+}
+
+/// Cached result of the most recent active-app query.
+#[derive(Debug)]
+struct CachedActiveApp {
+    name: Arc<str>,
+    queried_at: Instant,
+}
 
 /// Read-only interface for OS event-loop callbacks and state managers.
 /// Deliberately small so that platform modules never learn about the
@@ -68,6 +104,9 @@ pub struct RuntimeState {
     /// at startup from the platform's keyboard discovery and used to resolve
     /// device IDs to [`KeyboardInfo`] for keyboard filtering.
     keyboard_registry: HashMap<String, KeyboardInfo>,
+    /// Short-TTL cache for the expensive active-app platform query, which is
+    /// performed on every key event.
+    active_app_cache: Mutex<CachedActiveApp>,
 }
 
 impl RuntimeState {
@@ -81,6 +120,13 @@ impl RuntimeState {
                 .into_iter()
                 .map(|kb| (kb.device.clone(), kb))
                 .collect(),
+            // Start stale-on-purpose: the first key event within
+            // ACTIVE_APP_TTL of daemon startup uses "unknown", which only
+            // skips app-scoped rules for that brief window.
+            active_app_cache: Mutex::new(CachedActiveApp {
+                name: Arc::from("unknown"),
+                queried_at: Instant::now(),
+            }),
         }
     }
 
@@ -188,7 +234,12 @@ impl Lookup for RuntimeState {
     }
 
     fn active_app(&self) -> Arc<str> {
-        crate::platform::get_active_app_name().into()
+        let mut cache = self.active_app_cache.lock();
+        if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
+            cache.name = resolved_active_app_name().into();
+            cache.queried_at = Instant::now();
+        }
+        Arc::clone(&cache.name)
     }
 }
 

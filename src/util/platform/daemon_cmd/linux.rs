@@ -14,6 +14,22 @@
 
 use std::path::Path;
 
+/// Resolve the path to the `keymapperd` binary as a `CString`.
+///
+/// Prefers the binary located next to this CLI executable so that a
+/// development build never silently falls back to a stale `keymapperd`
+/// installed on `PATH`.  Returns `None` when no sibling binary exists;
+/// callers then fall back to a plain `PATH` lookup.
+fn resolve_daemon_binary() -> Option<std::ffi::CString> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("keymapperd")))
+        .filter(|path| path.is_file())
+        .and_then(|path| {
+            std::ffi::CString::new(path.to_string_lossy().into_owned()).ok()
+        })
+}
+
 /// Spawn `keymapperd` as a background child process with the given current
 /// directory.  Returns the child PID and an optional error captured from the
 /// daemon's stderr (if available before it detaches).
@@ -50,8 +66,15 @@ pub fn spawn_daemon(
                 libc::chdir(c_dir.as_ptr());
 
                 // Replace this process with the keymapperd binary.
-                let exe = c"keymapperd";
-                libc::execvp(exe.as_ptr(), std::ptr::null());
+                match resolve_daemon_binary() {
+                    Some(c_exe) => {
+                        libc::execvp(c_exe.as_ptr(), std::ptr::null());
+                    }
+                    None => {
+                        let exe = c"keymapperd";
+                        libc::execvp(exe.as_ptr(), std::ptr::null());
+                    }
+                }
 
                 // execvp returned — it failed.  Exit the child gracefully.
                 std::process::exit(1);

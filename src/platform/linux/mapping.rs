@@ -27,7 +27,7 @@ use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
     flag::register,
 };
-use udev::MonitorBuilder;
+use udev::{Enumerator, MonitorBuilder};
 
 use super::key::Key;
 use crate::{
@@ -39,6 +39,14 @@ use crate::{
     },
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
+
+/// Name of the daemon's own uinput output device.
+///
+/// Exposed so the e2e monitor (Linux direct-capture mode) can locate and
+/// grab the device; the daemon itself never grabs it (see
+/// [`handle_device_add`]).
+pub(crate) const VIRTUAL_KEYBOARD_NAME: &str =
+    "CrossPlatform_Virtual_Keyboard";
 
 // ---------------------------------------------------------------------------
 // Raw epoll FFI for cross-thread operations
@@ -193,6 +201,14 @@ fn modifier_bit_to_code(bit: u8) -> Option<u16> {
     Some(key.as_native())
 }
 
+/// Spacing between sub-events of a chord emission.
+///
+/// Windowing backends and e2e monitor windows sample keyboard state once
+/// per frame (typically 16-30 ms).  A tap that fits entirely between two
+/// samples is invisible to them, so each sub-event is held long enough to
+/// guarantee at least one sample inside the press window.
+const EMIT_SPACING: Duration = Duration::from_millis(20);
+
 /// Emit a complete key event (press+release) through the virtual device.
 ///
 /// Handles chord emission: modifiers are pressed, the base key is toggled,
@@ -226,7 +242,7 @@ fn emit_key_event(
     let cleanup = |dev: &mut VirtualDevice, codes: &[u16]| {
         for code in codes.iter().rev() {
             let _ = emit(dev, *code, 0);
-            thread::sleep(Duration::from_millis(1));
+            thread::sleep(EMIT_SPACING);
         }
     };
 
@@ -237,15 +253,15 @@ fn emit_key_event(
         {
             emit(device, code, 1)?;
             pressed.push(code);
-            thread::sleep(Duration::from_millis(1));
+            thread::sleep(EMIT_SPACING);
         }
     }
 
     // Press and release the base key.
     emit(device, native_key.base, 1)?;
-    thread::sleep(Duration::from_millis(1));
+    thread::sleep(EMIT_SPACING);
     emit(device, native_key.base, 0)?;
-    thread::sleep(Duration::from_millis(1));
+    thread::sleep(EMIT_SPACING);
 
     // Release modifiers in reverse order.
     cleanup(device, &pressed);
@@ -419,6 +435,15 @@ fn start_hotplug_monitor(
 
             println!("Hot-plug monitor started.");
 
+            // Resync: the startup udev snapshot in `start_mapping` and this
+            // monitor's `listen()` call are not atomic.  A keyboard added in
+            // between (e.g. a test injector created moments before daemon
+            // start, or a device whose udev tagging finished after the
+            // snapshot) never emits a fresh "add" event to this monitor and
+            // would otherwise never be grabbed.  Rescan and adopt any
+            // missing keyboards to close that window.
+            resync_devices(&managed_devices, epoll_fd, &global_filter);
+
             for event in socket.iter() {
                 let udev_device = event.device();
 
@@ -455,6 +480,44 @@ fn start_hotplug_monitor(
         .expect("failed to spawn hot-plug monitor thread");
 }
 
+/// Rescan udev for keyboards that are not yet managed and adopt them.
+///
+/// Called once after the hot-plug monitor starts listening, to cover the
+/// race window between the startup snapshot and the monitor's `listen()`
+/// call.  Reuses [`handle_device_add`], which skips devices that are
+/// already managed.
+fn resync_devices(
+    managed_devices: &Arc<Mutex<Vec<ManagedDevice>>>,
+    epoll_fd: RawFd,
+    global_filter: &Option<Vec<KeyboardSpecifier>>,
+) {
+    let Ok(mut enumerator) = Enumerator::new() else {
+        eprintln!("warning: resync: failed to create udev enumerator");
+        return;
+    };
+
+    if enumerator.match_subsystem("input").is_err()
+        || enumerator.match_property("ID_INPUT_KEYBOARD", "1").is_err()
+    {
+        eprintln!("warning: resync: failed to configure udev enumerator");
+        return;
+    }
+
+    let Ok(devices) = enumerator.scan_devices() else {
+        eprintln!("warning: resync: failed to scan udev devices");
+        return;
+    };
+
+    for udev_device in devices {
+        handle_device_add(
+            &udev_device,
+            managed_devices,
+            epoll_fd,
+            global_filter,
+        );
+    }
+}
+
 /// Handle a udev "add" event for a keyboard device.
 ///
 /// Opens the device, checks the global filter, grabs it, and registers it
@@ -471,6 +534,13 @@ fn handle_device_add(
     else {
         return;
     };
+
+    // Skip the daemon's own virtual output device, which udev also tags as
+    // a keyboard.  Grabbing it would feed the daemon's emitted events back
+    // into its input loop, causing them to be re-emitted indefinitely.
+    if kb.name == VIRTUAL_KEYBOARD_NAME {
+        return;
+    }
 
     // Check if it matches the global filter.
     let filtered = filter_keyboards_by_specifiers(
@@ -609,7 +679,7 @@ pub fn start_mapping(
     let all_keys: AttributeSet<KeyCode> =
         (0..KEY_CNT).map(KeyCode::new).collect();
     let mut virtual_device = VirtualDevice::builder()?
-        .name("CrossPlatform_Virtual_Keyboard")
+        .name(VIRTUAL_KEYBOARD_NAME)
         .with_keys(&all_keys)?
         .build()?;
 

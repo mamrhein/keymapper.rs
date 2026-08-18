@@ -17,6 +17,8 @@ mod windows;
 // Only the public API surface is re-exported.  Internal helpers (signal
 // handlers, static flags) stay private to the platform module.
 #[cfg(target_os = "linux")]
+pub(crate) use linux::VIRTUAL_KEYBOARD_NAME;
+#[cfg(target_os = "linux")]
 pub(crate) use linux::get_active_app_name;
 #[cfg(target_os = "linux")]
 pub use linux::{

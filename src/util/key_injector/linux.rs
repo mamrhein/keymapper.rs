@@ -157,11 +157,6 @@ impl LinuxInjector {
 
         Ok(())
     }
-
-    /// Return the path of the virtual input device, if one was created.
-    pub fn input_device_path(&self) -> Option<&str> {
-        self.input_device_path.as_deref()
-    }
 }
 
 impl KeyInjector for LinuxInjector {
@@ -210,6 +205,10 @@ impl KeyInjector for LinuxInjector {
         self.input_device_path.take();
 
         self.is_setup = false;
+    }
+
+    fn input_device_path(&self) -> Option<&str> {
+        self.input_device_path.as_deref()
     }
 }
 

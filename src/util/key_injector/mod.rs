@@ -91,6 +91,14 @@ pub trait KeyInjector {
     /// implementation, but explicit teardown allows tests to check for
     /// cleanup errors.
     fn teardown(&mut self);
+
+    /// Path of the virtual input device node (e.g. `/dev/input/event3`),
+    /// available after a successful `setup()` on platforms that inject via
+    /// a device node.  Returns `None` on platforms without a device-node
+    /// based injection mechanism (e.g. macOS, Windows).
+    fn input_device_path(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,8 @@ use egui::Key as EguiKey;
 use crate::common::Key;
 
 pub mod app;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux;
 pub mod writer;
 
 /// A single captured keyboard event.
