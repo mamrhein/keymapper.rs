@@ -85,6 +85,7 @@ impl E2eLock {
         let path = env::temp_dir().join("keymapper_e2e.lock");
         let file = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(&path)
             .unwrap_or_else(|e| {
@@ -413,8 +414,8 @@ fn find_bare_modifier_rule<'a>(
 /// The daemon emits each output as a complete tap: modifiers down (bit
 /// order), base down, base up, modifiers up (reverse).  Sub-events the
 /// monitor cannot see on this platform (e.g. Super on Linux) are omitted.
-fn output_tap_events<'a>(
-    outputs: &[&'a keymapper::common::config::KeyEvent],
+fn output_tap_events(
+    outputs: &[&keymapper::common::config::KeyEvent],
 ) -> Vec<LogEvent> {
     let mut events = Vec::new();
 
@@ -485,10 +486,10 @@ fn rule_expected_events<'a>(
 
     // Modifier releases are processed after the base key, in reverse order.
     for mod_key in trigger.modifiers.iter().rev() {
-        if find_bare_modifier_rule(*mod_key, rules).is_none() {
-            if let Some(name) = monitor_key_name(*mod_key) {
-                events.push(event_str(name, false));
-            }
+        if find_bare_modifier_rule(*mod_key, rules).is_none()
+            && let Some(name) = monitor_key_name(*mod_key)
+        {
+            events.push(event_str(name, false));
         }
         // A bare-modifier trigger swallows the release (no emission on
         // key-up), so nothing is expected for it here.

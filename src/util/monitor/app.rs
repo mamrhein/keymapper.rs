@@ -167,7 +167,6 @@ pub fn run(output_path: PathBuf) {
     #[cfg(target_os = "linux")]
     {
         super::linux::run(&output_path);
-        return;
     }
 
     #[cfg(not(target_os = "linux"))]

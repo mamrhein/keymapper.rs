@@ -48,10 +48,10 @@ fn find_virtual_device() -> Option<PathBuf> {
     for entry in entries.filter_map(Result::ok) {
         let file_name = entry.file_name();
         let name_path = entry.path().join("device/name");
-        if let Ok(name) = fs::read_to_string(&name_path) {
-            if name.trim() == VIRTUAL_KEYBOARD_NAME {
-                return Some(Path::new("/dev/input").join(file_name));
-            }
+        if let Ok(name) = fs::read_to_string(&name_path)
+            && name.trim() == VIRTUAL_KEYBOARD_NAME
+        {
+            return Some(Path::new("/dev/input").join(file_name));
         }
     }
 
@@ -69,14 +69,13 @@ fn wait_for_and_grab_device() -> Device {
     loop {
         if let Some(path) = find_virtual_device()
             && let Ok(mut device) = Device::open(&path)
+            && device.set_nonblocking(true).is_ok()
+            && device.grab().is_ok()
         {
-            if device.set_nonblocking(true).is_ok() && device.grab().is_ok() {
-                eprintln!("monitor: grabbing {path:?}");
-                return device;
-            }
-            // Grab failed (e.g. EBUSY from a stale monitor) — retry.
+            eprintln!("monitor: grabbing {path:?}");
+            return device;
         }
-
+        // Grab failed (e.g. EBUSY from a stale monitor) — retry.
         if Instant::now() >= deadline {
             panic!(
                 "the daemon's virtual device ({VIRTUAL_KEYBOARD_NAME}) did \
