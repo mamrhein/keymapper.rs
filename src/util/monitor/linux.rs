@@ -19,7 +19,7 @@
 //! keystrokes or, worse, steal focus from the user's editor).
 
 use std::{
-    fs,
+    fs, mem,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
     thread,
@@ -91,12 +91,16 @@ fn wait_for_and_grab_device() -> Device {
 /// Entry point for the Linux direct-capture monitor.
 ///
 /// Waits for the daemon's virtual output device, grabs it, and logs every
-/// key event to the output file until SIGTERM/SIGINT.
+/// key event to the output file until SIGTERM/SIGINT, or until the daemon
+/// destroys its device on shutdown (whichever comes first).
 pub fn run(output_path: &Path) {
     let mut writer = EventWriter::new(output_path)
         .expect("failed to open output file for event logging");
     let mut device = wait_for_and_grab_device();
     let shutdown = register_signal_handlers();
+
+    // Set when the loop exits because the daemon destroyed its device.
+    let mut device_removed = false;
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -134,9 +138,26 @@ pub fn run(output_path: &Path) {
                 thread::sleep(READ_POLL_INTERVAL);
             }
             Err(e) => {
-                eprintln!("monitor: read error: {e}");
+                if e.raw_os_error() == Some(libc::ENODEV) {
+                    // The daemon destroyed its uinput device on
+                    // shutdown, and the kernel rejects further reads on
+                    // the vanished device with ENODEV.  This is the
+                    // expected end of the capture, not a fault.
+                    eprintln!("monitor: device removed, exiting");
+                    device_removed = true;
+                } else {
+                    eprintln!("monitor: read error: {e}");
+                }
                 break;
             }
         }
+    }
+
+    if device_removed {
+        // evdev's Drop glue unconditionally ungrabs the device, which
+        // fails on the destroyed device and prints a spurious error.
+        // Leak the fd instead; the kernel reclaims it when this
+        // short-lived process exits.
+        mem::forget(device);
     }
 }
