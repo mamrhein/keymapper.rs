@@ -11,9 +11,8 @@ use std::{fs, path::Path};
 
 use indexmap::IndexMap;
 
-use crate::{
-    common::{config::AppConfig, keyboard::KeyboardSpecifier},
-    platform::Key,
+use crate::common::{
+    config::AppConfig, hid_usage::HidUsage, keyboard::KeyboardSpecifier,
 };
 
 // ---------------------------------------------------------------------------
@@ -143,9 +142,8 @@ impl RuntimeLookupCache {
                 // Expand modifier variants for "either side" semantics.
                 let variants = expand_modifier_bits(&trigger.modifiers);
 
-                let trigger_base = Key::from_common(trigger.base)
-                    .expect("key not supported on this platform")
-                    .as_native();
+                let trigger_base =
+                    HidUsage::from_common_key(trigger.base).id();
 
                 for mod_bits in variants {
                     let rule = CompiledRule {
@@ -184,9 +182,7 @@ fn compile_outputs(
         .iter()
         .map(|event| NativeKey {
             modifiers: compile_modifier_bits(&event.modifiers),
-            base: Key::from_common(event.base)
-                .expect("key not supported on this platform")
-                .as_native(),
+            base: HidUsage::from_common_key(event.base).id(),
         })
         .collect()
 }
@@ -198,8 +194,8 @@ fn compile_outputs(
 fn compile_modifier_bits(keys: &[crate::common::Key]) -> u8 {
     let mut bits: u8 = 0;
     for key in keys {
-        if let Some(platform_key) = Key::from_common(*key)
-            && let Some(bit) = platform_key.as_modifier_bit()
+        if let Some(bit) =
+            HidUsage::hid_usage_to_modifier_bit(hid_from_common(*key))
         {
             bits |= 1 << bit;
         }
@@ -220,18 +216,22 @@ fn expand_modifier_bits(modifiers: &[crate::common::Key]) -> Vec<u8> {
         return vec![0];
     }
 
-    // Collect the possible bit positions for each modifier.
+    // Collect the possible bit positions for each modifier.  Generic aliases
+    // (LeftControl, LeftShift, etc.) match both left and right bits.
+    // Explicit right-side keys (RightControl, etc.) match only their
+    // specific bit.
     let choices: Vec<Vec<u8>> = modifiers
         .iter()
-        .map(|key| {
-            if let Some(platform_key) = Key::from_common(*key)
-                && let Some(positions) = platform_key.as_modifier_positions()
-            {
-                return positions;
-            }
-            // Non-modifier in modifier position -- should not happen,
-            // but treat as no contribution.
-            vec![0]
+        .map(|key| match key {
+            crate::common::Key::LeftControl => vec![0, 1],
+            crate::common::Key::RightControl => vec![1],
+            crate::common::Key::LeftShift => vec![2, 3],
+            crate::common::Key::RightShift => vec![3],
+            crate::common::Key::LeftAlt => vec![4, 5],
+            crate::common::Key::RightAlt => vec![5],
+            crate::common::Key::LeftCommand => vec![6, 7],
+            crate::common::Key::RightCommand => vec![7],
+            _ => vec![0], // Non-modifier in modifier position
         })
         .collect();
 
@@ -250,6 +250,121 @@ fn expand_modifier_bits(modifiers: &[crate::common::Key]) -> Vec<u8> {
     results
 }
 
+/// Map a `common::Key` to its HID usage.
+fn hid_from_common(key: crate::common::Key) -> HidUsage {
+    match key {
+        crate::common::Key::LeftControl => HidUsage::LeftControl,
+        crate::common::Key::RightControl => HidUsage::RightControl,
+        crate::common::Key::LeftShift => HidUsage::LeftShift,
+        crate::common::Key::RightShift => HidUsage::RightShift,
+        crate::common::Key::LeftAlt => HidUsage::LeftAlt,
+        crate::common::Key::RightAlt => HidUsage::RightAlt,
+        crate::common::Key::LeftCommand => HidUsage::LeftCommand,
+        crate::common::Key::RightCommand => HidUsage::RightCommand,
+        crate::common::Key::CapsLock => HidUsage::CapsLock,
+        crate::common::Key::Tab => HidUsage::Tab,
+        crate::common::Key::Space => HidUsage::Space,
+        crate::common::Key::Return => HidUsage::Return,
+        crate::common::Key::Backspace => HidUsage::Backspace,
+        crate::common::Key::Delete => HidUsage::Delete,
+        crate::common::Key::Escape => HidUsage::Escape,
+        crate::common::Key::UpArrow => HidUsage::UpArrow,
+        crate::common::Key::DownArrow => HidUsage::DownArrow,
+        crate::common::Key::LeftArrow => HidUsage::LeftArrow,
+        crate::common::Key::RightArrow => HidUsage::RightArrow,
+        crate::common::Key::PageUp => HidUsage::PageUp,
+        crate::common::Key::PageDown => HidUsage::PageDown,
+        crate::common::Key::Home => HidUsage::Home,
+        crate::common::Key::End => HidUsage::End,
+        crate::common::Key::F1 => HidUsage::F1,
+        crate::common::Key::F2 => HidUsage::F2,
+        crate::common::Key::F3 => HidUsage::F3,
+        crate::common::Key::F4 => HidUsage::F4,
+        crate::common::Key::F5 => HidUsage::F5,
+        crate::common::Key::F6 => HidUsage::F6,
+        crate::common::Key::F7 => HidUsage::F7,
+        crate::common::Key::F8 => HidUsage::F8,
+        crate::common::Key::F9 => HidUsage::F9,
+        crate::common::Key::F10 => HidUsage::F10,
+        crate::common::Key::F11 => HidUsage::F11,
+        crate::common::Key::F12 => HidUsage::F12,
+        crate::common::Key::A => HidUsage::A,
+        crate::common::Key::B => HidUsage::B,
+        crate::common::Key::C => HidUsage::C,
+        crate::common::Key::D => HidUsage::D,
+        crate::common::Key::E => HidUsage::E,
+        crate::common::Key::F => HidUsage::F,
+        crate::common::Key::G => HidUsage::G,
+        crate::common::Key::H => HidUsage::H,
+        crate::common::Key::I => HidUsage::I,
+        crate::common::Key::J => HidUsage::J,
+        crate::common::Key::K => HidUsage::K,
+        crate::common::Key::L => HidUsage::L,
+        crate::common::Key::M => HidUsage::M,
+        crate::common::Key::N => HidUsage::N,
+        crate::common::Key::O => HidUsage::O,
+        crate::common::Key::P => HidUsage::P,
+        crate::common::Key::Q => HidUsage::Q,
+        crate::common::Key::R => HidUsage::R,
+        crate::common::Key::S => HidUsage::S,
+        crate::common::Key::T => HidUsage::T,
+        crate::common::Key::U => HidUsage::U,
+        crate::common::Key::V => HidUsage::V,
+        crate::common::Key::W => HidUsage::W,
+        crate::common::Key::X => HidUsage::X,
+        crate::common::Key::Y => HidUsage::Y,
+        crate::common::Key::Z => HidUsage::Z,
+        crate::common::Key::Number1 => HidUsage::Number1,
+        crate::common::Key::Number2 => HidUsage::Number2,
+        crate::common::Key::Number3 => HidUsage::Number3,
+        crate::common::Key::Number4 => HidUsage::Number4,
+        crate::common::Key::Number5 => HidUsage::Number5,
+        crate::common::Key::Number6 => HidUsage::Number6,
+        crate::common::Key::Number7 => HidUsage::Number7,
+        crate::common::Key::Number8 => HidUsage::Number8,
+        crate::common::Key::Number9 => HidUsage::Number9,
+        crate::common::Key::Number0 => HidUsage::Number0,
+        crate::common::Key::Numpad0 => HidUsage::Numpad0,
+        crate::common::Key::Numpad1 => HidUsage::Numpad1,
+        crate::common::Key::Numpad2 => HidUsage::Numpad2,
+        crate::common::Key::Numpad3 => HidUsage::Numpad3,
+        crate::common::Key::Numpad4 => HidUsage::Numpad4,
+        crate::common::Key::Numpad5 => HidUsage::Numpad5,
+        crate::common::Key::Numpad6 => HidUsage::Numpad6,
+        crate::common::Key::Numpad7 => HidUsage::Numpad7,
+        crate::common::Key::Numpad8 => HidUsage::Numpad8,
+        crate::common::Key::Numpad9 => HidUsage::Numpad9,
+        crate::common::Key::NumpadDecimal => HidUsage::NumpadDecimal,
+        crate::common::Key::NumpadMultiply => HidUsage::NumpadMultiply,
+        crate::common::Key::NumpadPlus => HidUsage::NumpadPlus,
+        crate::common::Key::NumpadDivide => HidUsage::NumpadDivide,
+        crate::common::Key::NumpadEnter => HidUsage::NumpadEnter,
+        crate::common::Key::NumpadMinus => HidUsage::NumpadMinus,
+        crate::common::Key::NumpadClear => HidUsage::NumpadClear,
+        crate::common::Key::NumpadEqual => HidUsage::NumpadEqual,
+        crate::common::Key::Minus => HidUsage::Minus,
+        crate::common::Key::Equal => HidUsage::Equal,
+        crate::common::Key::BracketLeft => HidUsage::BracketLeft,
+        crate::common::Key::BracketRight => HidUsage::BracketRight,
+        crate::common::Key::Backslash => HidUsage::Backslash,
+        crate::common::Key::Semicolon => HidUsage::Semicolon,
+        crate::common::Key::Quote => HidUsage::Quote,
+        crate::common::Key::Comma => HidUsage::Comma,
+        crate::common::Key::Period => HidUsage::Period,
+        crate::common::Key::Slash => HidUsage::Slash,
+        crate::common::Key::Grave => HidUsage::Grave,
+        crate::common::Key::IsoExtra => HidUsage::IsoExtra,
+        crate::common::Key::IsoHash => HidUsage::IsoHash,
+    }
+}
+
+impl HidUsage {
+    /// Convert from `common::Key`.
+    fn from_common_key(key: crate::common::Key) -> Self {
+        hid_from_common(key)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -258,6 +373,12 @@ fn expand_modifier_bits(modifiers: &[crate::common::Key]) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::common::Key as CommonKey;
+
+    /// Shortcut to get the HID usage id for a key.
+    #[inline]
+    fn id(usage: HidUsage) -> u16 {
+        usage.id()
+    }
 
     // Bit positions per the header comment:
     // bit 0: left control,   bit 1: right control
@@ -284,10 +405,9 @@ mod tests {
 
     #[test]
     fn expand_single_specific_modifier() {
-        // RightControl also maps to group [0, 1] — the enum variant does not
-        // narrow matching; narrowing only affects output emission.
+        // RightControl matches only its own bit (bit 1).
         let result = expand_modifier_bits(&[CommonKey::RightControl]);
-        assert_eq!(result, vec![1 << 0, 1 << 1]);
+        assert_eq!(result, vec![1 << 1]);
     }
 
     #[test]
@@ -393,10 +513,10 @@ mod tests {
         assert!(cache.process_rules("any").is_none());
 
         let rule = &cache.global_rules()[0];
-        assert_eq!(rule.base, Key::CapsLock.as_native());
+        assert_eq!(rule.base, id(HidUsage::CapsLock));
         assert_eq!(rule.modifiers, 0);
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, Key::LeftControl.as_native());
+        assert_eq!(rule.outputs[0].base, id(HidUsage::LeftControl));
     }
 
     #[test]
@@ -434,7 +554,7 @@ mod tests {
         let mods: Vec<u8> =
             cache.global_rules().iter().map(|r| r.modifiers).collect();
 
-        assert!(bases.contains(&Key::H.as_native()));
+        assert!(bases.contains(&id(HidUsage::H)));
         assert_eq!(mods.len(), 2);
         assert!(mods.contains(&(1 << 0))); // left control
         assert!(mods.contains(&(1 << 1))); // right control
@@ -450,7 +570,7 @@ mod tests {
         let rule = &cache.global_rules()[0];
 
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, Key::LeftArrow.as_native());
+        assert_eq!(rule.outputs[0].base, id(HidUsage::LeftArrow));
         // Cmd resolves to LeftCommand → bit 6.
         assert_eq!(rule.outputs[0].modifiers, 1 << 6);
     }
@@ -465,9 +585,9 @@ mod tests {
         let rule = &cache.global_rules()[0];
 
         assert_eq!(rule.outputs.len(), 2);
-        assert_eq!(rule.outputs[0].base, Key::T.as_native());
+        assert_eq!(rule.outputs[0].base, id(HidUsage::T));
         assert_eq!(rule.outputs[0].modifiers, 1 << 6); // Cmd
-        assert_eq!(rule.outputs[1].base, Key::F1.as_native());
+        assert_eq!(rule.outputs[1].base, id(HidUsage::F1));
         assert_eq!(rule.outputs[1].modifiers, 0);
     }
 
@@ -517,7 +637,7 @@ mod tests {
         assert_eq!(rules.len(), 7);
 
         // The first entry should be the Ctrl+Shift+A rule.
-        assert_eq!(rules[0].base, Key::A.as_native());
+        assert_eq!(rules[0].base, id(HidUsage::A));
     }
 
     #[test]
@@ -547,10 +667,10 @@ mod tests {
         let cache = build_cache(yaml);
         let rule = &cache.global_rules()[0];
 
-        assert_eq!(rule.base, Key::CapsLock.as_native());
+        assert_eq!(rule.base, id(HidUsage::CapsLock));
         assert_eq!(rule.modifiers, 0); // bare key, no modifiers
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, Key::L.as_native());
+        assert_eq!(rule.outputs[0].base, id(HidUsage::L));
         assert_eq!(rule.outputs[0].modifiers, 1 << 4); // LeftAlt → bit 4
     }
 
@@ -567,8 +687,8 @@ mod tests {
 
         // All rules should have base = A and output = F12.
         for rule in cache.global_rules() {
-            assert_eq!(rule.base, Key::A.as_native());
-            assert_eq!(rule.outputs[0].base, Key::F12.as_native());
+            assert_eq!(rule.base, id(HidUsage::A));
+            assert_eq!(rule.outputs[0].base, id(HidUsage::F12));
         }
     }
 
@@ -591,11 +711,12 @@ mod tests {
         // The first rule should output LeftControl, the second RightControl.
         assert_eq!(
             cache.global_rules()[0].outputs[0].base,
-            Key::LeftControl.as_native()
+            id(HidUsage::LeftControl)
         );
+
         assert_eq!(
             cache.global_rules()[1].outputs[0].base,
-            Key::RightControl.as_native()
+            id(HidUsage::RightControl)
         );
     }
 

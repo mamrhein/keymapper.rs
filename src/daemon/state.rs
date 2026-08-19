@@ -227,7 +227,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{common::config::AppConfig, platform::Key};
+    use crate::common::{config::AppConfig, hid_usage::HidUsage};
+
+    #[inline]
+    fn native_id(usage: HidUsage) -> u16 {
+        usage.id()
+    }
 
     fn build_keyboard(
         name: &str,
@@ -263,7 +268,7 @@ groups:
       CapsLock: LeftControl
 "#;
         let state = build_state(yaml, vec![]);
-        let result = state.global(Key::CapsLock.as_native(), 0, None);
+        let result = state.global(native_id(HidUsage::CapsLock), 0, None);
         assert!(result.is_some());
     }
 
@@ -287,7 +292,7 @@ groups:
 
         // Matching device passes.
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event3"),
         );
@@ -314,7 +319,7 @@ groups:
 
         // Non-matching device is blocked.
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event5"),
         );
@@ -333,7 +338,7 @@ groups:
       CapsLock: LeftControl
 "#;
         let state = build_state(yaml, vec![]);
-        let result = state.global(Key::CapsLock.as_native(), 0, None);
+        let result = state.global(native_id(HidUsage::CapsLock), 0, None);
         assert!(result.is_some());
     }
 
@@ -359,7 +364,7 @@ groups:
 
         // Device not in registry passes through.
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event99"),
         );
@@ -389,7 +394,7 @@ groups:
         let state = build_state(yaml, keyboards);
 
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event3"),
         );
@@ -415,7 +420,7 @@ groups:
         let state = build_state(yaml, keyboards);
 
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event5"),
         );
@@ -434,7 +439,7 @@ groups:
 "#;
         let state = build_state(yaml, vec![]);
 
-        let result = state.global(Key::CapsLock.as_native(), 0, None);
+        let result = state.global(native_id(HidUsage::CapsLock), 0, None);
         assert!(result.is_some());
     }
 
@@ -466,7 +471,7 @@ groups:
 
         // Global filter requires Logitech; this device is Apple.
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event3"),
         );
@@ -496,7 +501,7 @@ groups:
         // Matches both global (vendor=Apple) and per-rule (name=Magic
         // Keyboard).
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event3"),
         );
@@ -533,14 +538,14 @@ groups:
 
         // First rule is filtered out; second rule fires.
         let result = state.global(
-            Key::CapsLock.as_native(),
+            native_id(HidUsage::CapsLock),
             0,
             Some("/dev/input/event5"),
         );
         assert!(result.is_some());
         let result = result.unwrap();
         // Output is LeftShift (from the second rule), not LeftControl.
-        assert_eq!(result[0].base, Key::LeftShift.as_native());
+        assert_eq!(result[0].base, native_id(HidUsage::LeftShift));
     }
 
     // -----------------------------------------------------------------------
@@ -570,7 +575,7 @@ groups:
         // Device doesn't match the rule's keyboard filter.
         let result = state.for_app(
             "MyApp",
-            Key::A.as_native(),
+            native_id(HidUsage::A),
             0,
             Some("/dev/input/event5"),
         );
@@ -668,9 +673,10 @@ groups:
     /// Simulates the full mapping engine flow: modifier tracking, lookup,
     /// and output emission.  Returns the sequence of [`NativeKey`] outputs
     /// that would be emitted for each input event.
+    /// Simulate a sequence of key events through the lookup engine.
     ///
-    /// Each element is `Some(outputs)` if the key was mapped (swallowed and
-    /// remapped), or `None` if it passed through unchanged.
+    /// `events` are (hid_usage_id, is_down) pairs.  Modifier tracking and
+    /// keyboard filtering semantics match the real event-loop callback.
     fn simulate_mapping(
         lookup: &dyn Lookup,
         events: &[(u16, bool)],
@@ -679,9 +685,13 @@ groups:
         let mut results = Vec::new();
 
         for &(key, is_down) in events {
-            // Map keycode to modifier bit.
-            let modifier_bit =
-                Key::from_native(key).and_then(|k| k.as_modifier_bit());
+            // Map HID usage id to modifier bit.  Modifier usages are
+            // 0xE0–0xE7 on the Keyboard page; bit = id - 0xE0.
+            let modifier_bit = if (0xE0..=0xE7).contains(&key) {
+                Some((key - 0xE0) as u8)
+            } else {
+                None
+            };
 
             // Capture modifier state before updating (for concurrent
             // matching).
@@ -716,6 +726,13 @@ groups:
         results
     }
 
+    /// Shortcut to get the HID usage id for a key, used as the "native"
+    /// key code in tests.
+    #[inline]
+    fn id(usage: HidUsage) -> u16 {
+        usage.id()
+    }
+
     // -----------------------------------------------------------------------
     // In-process mapping engine integration tests
     // -----------------------------------------------------------------------
@@ -729,8 +746,8 @@ groups:
         let results = simulate_mapping(
             &lookup,
             &[
-                (Key::CapsLock.as_native(), true),
-                (Key::CapsLock.as_native(), false),
+                (id(HidUsage::CapsLock), true),
+                (id(HidUsage::CapsLock), false),
             ],
         );
 
@@ -740,14 +757,14 @@ groups:
             results[0],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::LeftControl.as_native(),
+                base: id(HidUsage::LeftControl),
             }])
         );
         assert_eq!(
             results[1],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::LeftControl.as_native(),
+                base: id(HidUsage::LeftControl),
             }])
         );
     }
@@ -760,7 +777,7 @@ groups:
 
         let results = simulate_mapping(
             &lookup,
-            &[(Key::A.as_native(), true), (Key::A.as_native(), false)],
+            &[(id(HidUsage::A), true), (id(HidUsage::A), false)],
         );
 
         // 'A' has no mapping, so it passes through.
@@ -777,7 +794,7 @@ groups:
 
         let results = simulate_mapping(
             &lookup,
-            &[(Key::A.as_native(), true), (Key::A.as_native(), false)],
+            &[(id(HidUsage::A), true), (id(HidUsage::A), false)],
         );
 
         assert_eq!(results.len(), 2);
@@ -785,14 +802,14 @@ groups:
             results[0],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::B.as_native(),
+                base: id(HidUsage::B),
             }])
         );
         assert_eq!(
             results[1],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::B.as_native(),
+                base: id(HidUsage::B),
             }])
         );
     }
@@ -806,8 +823,8 @@ groups:
         let results = simulate_mapping(
             &lookup,
             &[
-                (Key::CapsLock.as_native(), true),
-                (Key::CapsLock.as_native(), false),
+                (id(HidUsage::CapsLock), true),
+                (id(HidUsage::CapsLock), false),
             ],
         );
 
@@ -816,7 +833,7 @@ groups:
         let down_outputs = results[0].as_ref().unwrap();
         assert_eq!(down_outputs.len(), 1);
         let chord = &down_outputs[0];
-        assert_eq!(chord.base, Key::A.as_native());
+        assert_eq!(chord.base, id(HidUsage::A));
         // Cmd modifier bit should be set (bit 6 for LeftCommand).
         assert!((chord.modifiers & (1 << 6)) != 0);
 
@@ -834,8 +851,8 @@ groups:
         let results = simulate_mapping(
             &lookup,
             &[
-                (Key::CapsLock.as_native(), true),
-                (Key::CapsLock.as_native(), false),
+                (id(HidUsage::CapsLock), true),
+                (id(HidUsage::CapsLock), false),
             ],
         );
 
@@ -843,8 +860,8 @@ groups:
         // Key-down produces two outputs: LeftControl then A.
         let down_outputs = results[0].as_ref().unwrap();
         assert_eq!(down_outputs.len(), 2);
-        assert_eq!(down_outputs[0].base, Key::LeftControl.as_native());
-        assert_eq!(down_outputs[1].base, Key::A.as_native());
+        assert_eq!(down_outputs[0].base, id(HidUsage::LeftControl));
+        assert_eq!(down_outputs[1].base, id(HidUsage::A));
 
         // Key-up produces the same two outputs.
         let up_outputs = results[1].as_ref().unwrap();
@@ -860,10 +877,10 @@ groups:
         let results = simulate_mapping(
             &lookup,
             &[
-                (Key::LeftControl.as_native(), true), // Ctrl down
-                (Key::A.as_native(), true),           // A down (with Ctrl)
-                (Key::A.as_native(), false),          // A up
-                (Key::LeftControl.as_native(), false), // Ctrl up
+                (id(HidUsage::LeftControl), true), // Ctrl down
+                (id(HidUsage::A), true),           // A down (with Ctrl)
+                (id(HidUsage::A), false),          // A up
+                (id(HidUsage::LeftControl), false), // Ctrl up
             ],
         );
 
@@ -875,7 +892,7 @@ groups:
             results[1],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::B.as_native(),
+                base: id(HidUsage::B),
             }])
         );
         // A up is also remapped (key-up of the trigger).
@@ -883,7 +900,7 @@ groups:
             results[2],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::B.as_native(),
+                base: id(HidUsage::B),
             }])
         );
         // Ctrl up passes through.
@@ -901,8 +918,8 @@ groups:
         let results = simulate_mapping(
             &lookup,
             &[
-                (Key::CapsLock.as_native(), true),
-                (Key::CapsLock.as_native(), false),
+                (id(HidUsage::CapsLock), true),
+                (id(HidUsage::CapsLock), false),
             ],
         );
 
@@ -911,14 +928,14 @@ groups:
             results[0],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::LeftControl.as_native(),
+                base: id(HidUsage::LeftControl),
             }])
         );
         assert_eq!(
             results[1],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::LeftControl.as_native(),
+                base: id(HidUsage::LeftControl),
             }])
         );
 
@@ -926,8 +943,8 @@ groups:
         let results = simulate_mapping(
             &lookup,
             &[
-                (Key::LeftControl.as_native(), true),
-                (Key::LeftControl.as_native(), false),
+                (id(HidUsage::LeftControl), true),
+                (id(HidUsage::LeftControl), false),
             ],
         );
 
@@ -936,14 +953,14 @@ groups:
             results[0],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::CapsLock.as_native(),
+                base: id(HidUsage::CapsLock),
             }])
         );
         assert_eq!(
             results[1],
             Some(vec![NativeKey {
                 modifiers: 0,
-                base: Key::CapsLock.as_native(),
+                base: id(HidUsage::CapsLock),
             }])
         );
     }
@@ -959,10 +976,10 @@ groups:
         let results = simulate_mapping(
             &lookup,
             &[
-                (Key::CapsLock.as_native(), true), // mapped to Ctrl
-                (Key::A.as_native(), true),        // A with Ctrl modifier
-                (Key::A.as_native(), false),       // A up
-                (Key::CapsLock.as_native(), false), // Ctrl up
+                (id(HidUsage::CapsLock), true),  // mapped to Ctrl
+                (id(HidUsage::A), true),         // A with Ctrl modifier
+                (id(HidUsage::A), false),        // A up
+                (id(HidUsage::CapsLock), false), // Ctrl up
             ],
         );
 

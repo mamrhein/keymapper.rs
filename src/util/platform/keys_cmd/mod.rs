@@ -17,7 +17,7 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-use crate::platform::Key;
+use crate::common::hid_usage::HidUsage;
 
 /// Print all recognised key names grouped by category, with abbreviated ranges
 /// for large groups (letters, numbers, function keys, numpad digits).
@@ -25,41 +25,41 @@ pub fn list() {
     print_group(
         "Modifiers",
         &[
-            Key::LeftControl,
-            Key::RightControl,
-            Key::LeftShift,
-            Key::RightShift,
-            Key::LeftAlt,
-            Key::RightAlt,
-            Key::LeftCommand,
-            Key::RightCommand,
-            Key::CapsLock,
+            HidUsage::LeftControl,
+            HidUsage::RightControl,
+            HidUsage::LeftShift,
+            HidUsage::RightShift,
+            HidUsage::LeftAlt,
+            HidUsage::RightAlt,
+            HidUsage::LeftCommand,
+            HidUsage::RightCommand,
+            HidUsage::CapsLock,
         ],
     );
 
     print_group(
         "Editor/misc",
         &[
-            Key::Tab,
-            Key::Space,
-            Key::Return,
-            Key::Backspace,
-            Key::Delete,
-            Key::Escape,
+            HidUsage::Tab,
+            HidUsage::Space,
+            HidUsage::Return,
+            HidUsage::Backspace,
+            HidUsage::Delete,
+            HidUsage::Escape,
         ],
     );
 
     print_group(
         "Navigation",
         &[
-            Key::UpArrow,
-            Key::DownArrow,
-            Key::LeftArrow,
-            Key::RightArrow,
-            Key::PageUp,
-            Key::PageDown,
-            Key::Home,
-            Key::End,
+            HidUsage::UpArrow,
+            HidUsage::DownArrow,
+            HidUsage::LeftArrow,
+            HidUsage::RightArrow,
+            HidUsage::PageUp,
+            HidUsage::PageDown,
+            HidUsage::Home,
+            HidUsage::End,
         ],
     );
 
@@ -78,12 +78,12 @@ pub fn list() {
     print_group(
         "Numpad",
         &[
-            Key::NumpadDecimal,
-            Key::NumpadMultiply,
-            Key::NumpadPlus,
-            Key::NumpadDivide,
-            Key::NumpadEnter,
-            Key::NumpadMinus,
+            HidUsage::NumpadDecimal,
+            HidUsage::NumpadMultiply,
+            HidUsage::NumpadPlus,
+            HidUsage::NumpadDivide,
+            HidUsage::NumpadEnter,
+            HidUsage::NumpadMinus,
         ],
     );
 
@@ -96,32 +96,46 @@ pub fn list() {
     print_group(
         "Symbols",
         &[
-            Key::Minus,
-            Key::Equal,
-            Key::BracketLeft,
-            Key::BracketRight,
-            Key::Backslash,
-            Key::Semicolon,
-            Key::Quote,
-            Key::Comma,
-            Key::Period,
-            Key::Slash,
-            Key::Grave,
-            Key::IsoExtra,
+            HidUsage::Minus,
+            HidUsage::Equal,
+            HidUsage::BracketLeft,
+            HidUsage::BracketRight,
+            HidUsage::Backslash,
+            HidUsage::Semicolon,
+            HidUsage::Quote,
+            HidUsage::Comma,
+            HidUsage::Period,
+            HidUsage::Slash,
+            HidUsage::Grave,
+            HidUsage::IsoExtra,
         ],
     );
 
     // Platform-specific symbol keys.
     print_symbols_platform_keys();
 
+    // Consumer page media controls.
+    println!("  Media:");
+    println!("    {}", HidUsage::PlayPause.as_str());
+    println!("    {}", HidUsage::VolumeUp.as_str());
+    println!("    {}", HidUsage::VolumeDown.as_str());
+    println!("    {}", HidUsage::Mute.as_str());
+    println!("    {}", HidUsage::NextTrack.as_str());
+    println!("    {}", HidUsage::PreviousTrack.as_str());
+    println!("    {}", HidUsage::Stop.as_str());
+
+    // Consumer page display controls.
+    println!("  Display:");
+    println!("    {}", HidUsage::BrightnessUp.as_str());
+    println!("    {}", HidUsage::BrightnessDown.as_str());
+
     println!();
-    println!("Total: {} keys", Key::ALL.len());
+    println!("Total: {} keys", HidUsage::ALL.len());
 }
 
 #[cfg(target_os = "macos")]
 fn print_numpad_platform_keys() {
-    println!("    {}", Key::NumpadClear.as_str());
-    println!("    {}", Key::NumpadEqual.as_str());
+    // All numpad keys are available via HidUsage.
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -131,7 +145,7 @@ fn print_numpad_platform_keys() {
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn print_symbols_platform_keys() {
-    println!("    {}", Key::IsoHash.as_str());
+    println!("    {}", HidUsage::IsoHash.as_str());
 }
 
 #[cfg(target_os = "macos")]
@@ -140,7 +154,7 @@ fn print_symbols_platform_keys() {
 }
 
 /// Print a group header and its keys.
-fn print_group(name: &str, keys: &[Key]) {
+fn print_group(name: &str, keys: &[HidUsage]) {
     println!("  {name}:");
     for k in keys {
         println!("    {}", k.as_str());
