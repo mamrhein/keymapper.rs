@@ -18,7 +18,7 @@ use std::{
 };
 
 use evdev::{
-    AttributeSet, Device, EventType, InputEvent, KeyCode,
+    AttributeSet, Device, EventType, InputEvent, KeyCode, MiscCode,
     uinput::VirtualDevice,
 };
 use libc::{c_int, epoll_event, epoll_wait as libc_epoll_wait};
@@ -29,13 +29,13 @@ use signal_hook::{
 };
 use udev::MonitorBuilder;
 
-use super::key::Key;
+use super::hid_translate::{hid_usage_to_keycode, keycode_to_hid_usage};
 use crate::{
     common::{
+        hid_usage::{HidUsage, PAGE_KEYBOARD},
         keyboard::{
             KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
         },
-        modifier::ModifierRole,
     },
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
@@ -154,43 +154,28 @@ struct ManagedDevice {
     path: String,
     /// Bitmask of currently active modifiers for this device only.
     modifiers: u8,
+    /// Last received `MSC_SCAN` value, consumed by the next `EV_KEY`
+    /// event.  The kernel emits the scan code before the key event of the
+    /// same press; key-ups and repeats carry no scan code, so those fall
+    /// back to the `EV_KEY` reverse lookup.
+    pending_scan: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
 // Modifier handling
 // ---------------------------------------------------------------------------
 
-/// Map a raw evdev keycode to its modifier bit position via the shared
-/// `ModifierRole` type.
-fn keycode_to_modifier_bit(code: u16) -> Option<u8> {
-    let role = match code {
-        29 => ModifierRole::LeftControl, // KEY_LEFTCTRL
-        97 => ModifierRole::RightControl, // KEY_RIGHTCTRL
-        42 => ModifierRole::LeftShift,   // KEY_LEFTSHIFT
-        54 => ModifierRole::RightShift,  // KEY_RIGHTSHIFT
-        56 => ModifierRole::LeftAlt,     // KEY_LEFTALT
-        100 => ModifierRole::RightAlt,   // KEY_RIGHTALT
-        125 => ModifierRole::LeftCommand, // KEY_LEFTMETA
-        126 => ModifierRole::RightCommand, // KEY_RIGHTMETA
-        _ => return None,
-    };
-    Some(role.bit())
-}
-
-/// Map a modifier bit position back to the native evdev keycode for emission.
-fn modifier_bit_to_code(bit: u8) -> Option<u16> {
-    let role = ModifierRole::try_from_bit(bit)?;
-    let key = match role {
-        ModifierRole::LeftControl => Key::LeftControl,
-        ModifierRole::RightControl => Key::RightControl,
-        ModifierRole::LeftShift => Key::LeftShift,
-        ModifierRole::RightShift => Key::RightShift,
-        ModifierRole::LeftAlt => Key::LeftAlt,
-        ModifierRole::RightAlt => Key::RightAlt,
-        ModifierRole::LeftCommand => Key::LeftCommand,
-        ModifierRole::RightCommand => Key::RightCommand,
-    };
-    Some(key.as_native())
+/// Map a modifier bit position to the evdev `KEY_*` code for emission.
+///
+/// Modifier HID usage ids run 0xE0-0xE7 on the keyboard page, so the bit
+/// position is the offset from 0xE0 (see
+/// `HidUsage::hid_usage_to_modifier_bit`).  The resolved modifier usage is
+/// looked up in the shared `hid_translate` table like any other key.
+fn modifier_bit_to_keycode(bit: u8) -> Option<u16> {
+    let usage = HidUsage::from_code(
+        ((PAGE_KEYBOARD as u32) << 16) | ((0xE0 + bit) as u32),
+    )?;
+    hid_usage_to_keycode(usage)
 }
 
 /// Emit a complete key event (press+release) through the virtual device.
@@ -198,14 +183,34 @@ fn modifier_bit_to_code(bit: u8) -> Option<u16> {
 /// Handles chord emission: modifiers are pressed, the base key is toggled,
 /// then modifiers are released in reverse order. On failure, any keys that
 /// were pressed are released to prevent stuck state.
+///
+/// `trigger` is the `HidUsage` of the key that fired the rule.  Since
+/// `NativeKey::base` stores only the HID usage id (the lookup cache is
+/// keyed by id), the trigger's page disambiguates the output usage's page.
 fn emit_key_event(
     device: &mut VirtualDevice,
+    trigger: HidUsage,
     native_key: &NativeKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Raw evdev event type codes.
     const EV_KEY: u16 = 1;
     const EV_SYN: u16 = 0;
     const SYN_REPORT: u16 = 0;
+
+    // Resolve the output's base key to an evdev `KEY_*` code via the
+    // static HID translation table.
+    let output_usage = if trigger.page() == PAGE_KEYBOARD {
+        HidUsage::keyboard(native_key.base)
+    } else {
+        HidUsage::consumer(native_key.base)
+    };
+    let Some(base_code) = output_usage.and_then(hid_usage_to_keycode) else {
+        return Err(format!(
+            "no evdev key code for HID usage id 0x{:02X}",
+            native_key.base
+        )
+        .into());
+    };
 
     // Track all pressed codes so they can be released on failure.
     let mut pressed: Vec<u16> = Vec::new();
@@ -233,7 +238,7 @@ fn emit_key_event(
     // Press modifiers.
     for bit in 0..8 {
         if (native_key.modifiers >> bit) & 1 == 1
-            && let Some(code) = modifier_bit_to_code(bit)
+            && let Some(code) = modifier_bit_to_keycode(bit)
         {
             emit(device, code, 1)?;
             pressed.push(code);
@@ -242,9 +247,9 @@ fn emit_key_event(
     }
 
     // Press and release the base key.
-    emit(device, native_key.base, 1)?;
+    emit(device, base_code, 1)?;
     thread::sleep(Duration::from_millis(1));
-    emit(device, native_key.base, 0)?;
+    emit(device, base_code, 0)?;
     thread::sleep(Duration::from_millis(1));
 
     // Release modifiers in reverse order.
@@ -282,6 +287,17 @@ fn process_device_events(
     };
 
     for event in events {
+        // MSC_SCAN events carry the raw HID usage as
+        // `(page << 16) | id`, and the kernel emits them before the
+        // EV_KEY event of the same key press.  Buffer the scan code for
+        // the next key event.
+        if event.event_type() == EventType::MISC
+            && event.code() == MiscCode::MSC_SCAN.0
+        {
+            managed.pending_scan = Some(event.value() as u32);
+            continue;
+        }
+
         if event.event_type() != EventType::KEY {
             continue;
         }
@@ -289,13 +305,29 @@ fn process_device_events(
         let code = event.code();
         let value = event.value();
 
+        // Derive the HID identity of this key.  MSC_SCAN is preferred;
+        // the EV_KEY reverse lookup covers key-ups, auto-repeats, and
+        // devices that do not emit MSC_SCAN.
+        let usage = managed
+            .pending_scan
+            .take()
+            .and_then(HidUsage::from_code)
+            .or_else(|| keycode_to_hid_usage(code));
+
+        let Some(usage) = usage else {
+            // Unknown key with no resolvable HID identity: forward it
+            // unchanged.
+            forward_key_event(virtual_device, code, value);
+            continue;
+        };
+
         // Capture the modifier state to use for rule matching.  For modifier
         // keys this is the pre-update snapshot so that bare-modifier triggers
         // (e.g. "LeftControl: A") match correctly against the concurrent
         // modifier set.
         let lookup_modifiers = managed.modifiers;
 
-        if let Some(bit) = keycode_to_modifier_bit(code) {
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
             if value == 1 {
                 managed.modifiers |= 1 << bit;
             } else if value == 0 {
@@ -305,16 +337,18 @@ fn process_device_events(
 
         let device_path = &managed.path;
 
+        // Compiled rules store the trigger as the HID usage id, so the
+        // lookup is keyed by `usage.id()` rather than the evdev code.
         let guard = lookup.read();
         let active_outputs = guard
             .for_app(
                 &guard.active_app(),
-                code,
+                usage.id(),
                 lookup_modifiers,
                 Some(device_path),
             )
             .or_else(|| {
-                guard.global(code, lookup_modifiers, Some(device_path))
+                guard.global(usage.id(), lookup_modifiers, Some(device_path))
             })
             .map(|v| v.to_vec());
         drop(guard);
@@ -327,7 +361,8 @@ fn process_device_events(
             // virtual device, preventing double emission.
             if value == 1 {
                 for native_key in &outputs {
-                    if let Err(e) = emit_key_event(virtual_device, native_key)
+                    if let Err(e) =
+                        emit_key_event(virtual_device, usage, native_key)
                     {
                         eprintln!("emit error: {}", e);
                     }
@@ -337,35 +372,36 @@ fn process_device_events(
         }
 
         // Forward the event to the virtual device.
-        const EV_KEY: u16 = 1;
-        const EV_SYN: u16 = 0;
-        const SYN_REPORT: u16 = 0;
+        forward_key_event(virtual_device, code, value);
+    }
+}
 
-        if value == 1 {
-            if let Err(e) = virtual_device.emit(&[
-                InputEvent::new(EV_KEY, code, 1),
-                InputEvent::new(EV_SYN, SYN_REPORT, 0),
-            ]) {
-                eprintln!("emit error: {}", e);
-            }
-        } else if value == 0 {
-            if let Err(e) = virtual_device.emit(&[
-                InputEvent::new(EV_KEY, code, 0),
-                InputEvent::new(EV_SYN, SYN_REPORT, 0),
-            ]) {
-                eprintln!("emit error: {}", e);
-            }
-        } else {
-            // Repeat event (value == 2): emit as press+release to avoid
-            // key-stick on the virtual device.
-            if let Err(e) = virtual_device.emit(&[
-                InputEvent::new(EV_KEY, code, 1),
-                InputEvent::new(EV_KEY, code, 0),
-                InputEvent::new(EV_SYN, SYN_REPORT, 0),
-            ]) {
-                eprintln!("emit error: {}", e);
-            }
-        }
+/// Forward a raw evdev key event to the virtual device.
+///
+/// Repeat events (value == 2) are emitted as a press+release pair to
+/// avoid key-stick on the virtual device.
+fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
+    // Raw evdev event type codes.
+    const EV_KEY: u16 = 1;
+    const EV_SYN: u16 = 0;
+    const SYN_REPORT: u16 = 0;
+
+    let events = if value == 2 {
+        // Repeat event: emit as press+release to avoid key-stick.
+        vec![
+            InputEvent::new(EV_KEY, code, 1),
+            InputEvent::new(EV_KEY, code, 0),
+            InputEvent::new(EV_SYN, SYN_REPORT, 0),
+        ]
+    } else {
+        vec![
+            InputEvent::new(EV_KEY, code, value),
+            InputEvent::new(EV_SYN, SYN_REPORT, 0),
+        ]
+    };
+
+    if let Err(e) = device.emit(&events) {
+        eprintln!("emit error: {e}");
     }
 }
 
@@ -509,6 +545,7 @@ fn handle_device_add(
         device,
         path: kb.device.clone(),
         modifiers: 0,
+        pending_scan: None,
     };
 
     // Register with managed devices.
@@ -600,6 +637,7 @@ pub fn start_mapping(
             device,
             path: kb.device,
             modifiers: 0,
+            pending_scan: None,
         });
     }
 
@@ -785,33 +823,40 @@ mod tests {
     // device B.
 
     #[test]
-    fn keycode_to_modifier_bit_maps_all_modifiers() {
-        // Left and right variants of all four modifier types.
-        assert_eq!(keycode_to_modifier_bit(29), Some(0)); // LeftControl
-        assert_eq!(keycode_to_modifier_bit(97), Some(1)); // RightControl
-        assert_eq!(keycode_to_modifier_bit(42), Some(2)); // LeftShift
-        assert_eq!(keycode_to_modifier_bit(54), Some(3)); // RightShift
-        assert_eq!(keycode_to_modifier_bit(56), Some(4)); // LeftAlt
-        assert_eq!(keycode_to_modifier_bit(100), Some(5)); // RightAlt
-        assert_eq!(keycode_to_modifier_bit(125), Some(6)); // LeftMeta
-        assert_eq!(keycode_to_modifier_bit(126), Some(7)); // RightMeta
+    fn modifier_bit_to_keycode_maps_all_modifiers() {
+        // All eight modifier bits resolve to the corresponding evdev
+        // codes; bit 8 is out of range.
+        assert_eq!(modifier_bit_to_keycode(0), Some(29)); // KEY_LEFTCTRL
+        assert_eq!(modifier_bit_to_keycode(1), Some(97)); // KEY_RIGHTCTRL
+        assert_eq!(modifier_bit_to_keycode(2), Some(42)); // KEY_LEFTSHIFT
+        assert_eq!(modifier_bit_to_keycode(3), Some(54)); // KEY_RIGHTSHIFT
+        assert_eq!(modifier_bit_to_keycode(4), Some(56)); // KEY_LEFTALT
+        assert_eq!(modifier_bit_to_keycode(5), Some(100)); // KEY_RIGHTALT
+        assert_eq!(modifier_bit_to_keycode(6), Some(125)); // KEY_LEFTMETA
+        assert_eq!(modifier_bit_to_keycode(7), Some(126)); // KEY_RIGHTMETA
+        assert_eq!(modifier_bit_to_keycode(8), None);
     }
 
     #[test]
-    fn keycode_to_modifier_bit_ignores_non_modifiers() {
-        assert_eq!(keycode_to_modifier_bit(4), None); // 'a'
-        assert_eq!(keycode_to_modifier_bit(58), None); // Enter
-        assert_eq!(keycode_to_modifier_bit(70), None); // Escape
-    }
-
-    #[test]
-    fn modifier_bit_to_code_round_trips() {
-        for code in [29, 97, 42, 54, 56, 100, 125, 126] {
-            let bit = keycode_to_modifier_bit(code).expect("known modifier");
-            let roundtrip = modifier_bit_to_code(bit).expect("bit -> code");
+    fn modifier_bit_matches_hid_usage_table() {
+        // The bit->keycode path must agree with the shared HID usage
+        // table for all eight modifier usages.
+        for usage in [
+            HidUsage::LeftControl,
+            HidUsage::RightControl,
+            HidUsage::LeftShift,
+            HidUsage::RightShift,
+            HidUsage::LeftAlt,
+            HidUsage::RightAlt,
+            HidUsage::LeftCommand,
+            HidUsage::RightCommand,
+        ] {
+            let bit = HidUsage::hid_usage_to_modifier_bit(usage)
+                .expect("modifier usage");
             assert_eq!(
-                roundtrip, code,
-                "round-trip failed for keycode {code}"
+                modifier_bit_to_keycode(bit),
+                hid_usage_to_keycode(usage),
+                "modifier round-trip failed for {usage:?}"
             );
         }
     }
@@ -824,33 +869,39 @@ mod tests {
         let mut mods_b: u8 = 0;
 
         // Device A: press LeftControl (bit 0).
-        let bit = keycode_to_modifier_bit(29).unwrap();
+        let bit = HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftControl)
+            .unwrap();
         mods_a |= 1 << bit;
         assert_eq!(mods_a, 0b0000_0001);
         assert_eq!(mods_b, 0); // Device B unaffected.
 
         // Device A: press LeftShift (bit 2).
-        let bit = keycode_to_modifier_bit(42).unwrap();
+        let bit =
+            HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftShift).unwrap();
         mods_a |= 1 << bit;
         assert_eq!(mods_a, 0b0000_0101);
-        assert_eq!(mods_b, 0);
+        assert_eq!(mods_b, 0); // Device B unaffected.
 
         // Device B: press RightAlt (bit 5).
-        let bit = keycode_to_modifier_bit(100).unwrap();
+        let bit =
+            HidUsage::hid_usage_to_modifier_bit(HidUsage::RightAlt).unwrap();
         mods_b |= 1 << bit;
         assert_eq!(mods_a, 0b0000_0101); // Device A unaffected.
         assert_eq!(mods_b, 0b0010_0000);
 
         // Device A: release LeftControl.
-        let bit = keycode_to_modifier_bit(29).unwrap();
+        let bit = HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftControl)
+            .unwrap();
         mods_a &= !(1 << bit);
         assert_eq!(mods_a, 0b0000_0100);
         assert_eq!(mods_b, 0b0010_0000);
 
-        // Device B: release RightAlt, press LeftMeta (bit 6).
-        let bit = keycode_to_modifier_bit(100).unwrap();
+        // Device B: release RightAlt, press LeftCommand (bit 6).
+        let bit =
+            HidUsage::hid_usage_to_modifier_bit(HidUsage::RightAlt).unwrap();
         mods_b &= !(1 << bit);
-        let bit = keycode_to_modifier_bit(125).unwrap();
+        let bit = HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftCommand)
+            .unwrap();
         mods_b |= 1 << bit;
         assert_eq!(mods_a, 0b0000_0100);
         assert_eq!(mods_b, 0b0100_0000);

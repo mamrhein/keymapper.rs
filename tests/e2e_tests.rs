@@ -436,12 +436,27 @@ fn common_to_platform_code(common_key: Key) -> u16 {
     }
 }
 
-/// Convert a platform-agnostic `[Key]` to the platform-specific native
-/// key code for injection.
-#[cfg(not(target_os = "macos"))]
+/// Convert a platform-agnostic `[Key]` to the evdev `KEY_*` code for
+/// injection on Linux.
+///
+/// The injector emits real evdev key codes plus an `MSC_SCAN` carrying the
+/// HID usage, mirroring a physical HID keyboard.  The daemon's static
+/// translation table is the single source of truth for the mapping.
+#[cfg(target_os = "linux")]
 fn common_to_platform_code(common_key: Key) -> u16 {
-    // On non-macOS platforms, use HidUsage.id() directly as the native code.
-    // This works because compiled rules store `base` as `HidUsage::id()`.
+    keymapper::platform::hid_translate::hid_usage_to_keycode(hid_from_common(
+        common_key,
+    ))
+    .expect("every common key has an evdev code")
+}
+
+/// Convert a platform-agnostic `[Key]` to the platform-specific native
+/// key code for injection on Windows.
+///
+/// The Windows e2e tests are not active yet; keep the HID-usage-id
+/// convention until the Windows platform work lands.
+#[cfg(windows)]
+fn common_to_platform_code(common_key: Key) -> u16 {
     hid_from_common(common_key).id()
 }
 

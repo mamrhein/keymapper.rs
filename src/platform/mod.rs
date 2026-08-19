@@ -19,6 +19,8 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::get_active_app_name;
 #[cfg(target_os = "linux")]
+pub use linux::hid_translate;
+#[cfg(target_os = "linux")]
 pub use linux::{
     Key, discover_and_open_keyboards, list_keyboards, start_mapping,
 };

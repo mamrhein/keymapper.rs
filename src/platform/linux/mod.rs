@@ -8,6 +8,7 @@
 // $Revision$
 
 mod active_app;
+pub mod hid_translate;
 mod key;
 mod keyboard;
 mod mapping;
