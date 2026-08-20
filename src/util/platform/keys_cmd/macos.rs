@@ -146,10 +146,10 @@ fn is_modifier_keycode(code: u16) -> bool {
 /// raw CGKeyCode for unrecognized keys.
 fn cg_keycode_to_description(code: u16) -> (String, String) {
     // Try to convert CGKeyCode to a HID usage id.
-    if let Some(usage_id) = cg_keycode_to_hid_usage(code) {
-        if let Some(hu) = HidUsage::keyboard(usage_id) {
-            return (hu.as_str().to_string(), format!("0x{usage_id:02X}"));
-        }
+    if let Some(usage_id) = cg_keycode_to_hid_usage(code)
+        && let Some(hu) = HidUsage::keyboard(usage_id)
+    {
+        return (hu.as_str().to_string(), format!("0x{usage_id:02X}"));
     }
 
     (format!("Unknown({code})"), format!("{code}"))
