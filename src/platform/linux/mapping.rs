@@ -183,13 +183,8 @@ fn modifier_bit_to_keycode(bit: u8) -> Option<u16> {
 /// Handles chord emission: modifiers are pressed, the base key is toggled,
 /// then modifiers are released in reverse order. On failure, any keys that
 /// were pressed are released to prevent stuck state.
-///
-/// `trigger` is the `HidUsage` of the key that fired the rule.  Since
-/// `NativeKey::base` stores only the HID usage id (the lookup cache is
-/// keyed by id), the trigger's page disambiguates the output usage's page.
 fn emit_key_event(
     device: &mut VirtualDevice,
-    trigger: HidUsage,
     native_key: &NativeKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Raw evdev event type codes.
@@ -199,15 +194,10 @@ fn emit_key_event(
 
     // Resolve the output's base key to an evdev `KEY_*` code via the
     // static HID translation table.
-    let output_usage = if trigger.page() == PAGE_KEYBOARD {
-        HidUsage::keyboard(native_key.base)
-    } else {
-        HidUsage::consumer(native_key.base)
-    };
-    let Some(base_code) = output_usage.and_then(hid_usage_to_keycode) else {
+    let Some(base_code) = hid_usage_to_keycode(native_key.usage) else {
         return Err(format!(
-            "no evdev key code for HID usage id 0x{:02X}",
-            native_key.base
+            "no evdev key code for HID usage {:?}",
+            native_key.usage
         )
         .into());
     };
@@ -337,18 +327,18 @@ fn process_device_events(
 
         let device_path = &managed.path;
 
-        // Compiled rules store the trigger as the HID usage id, so the
-        // lookup is keyed by `usage.id()` rather than the evdev code.
+        // Compiled rules store the trigger as a `HidUsage`, so the
+        // lookup is keyed by the full page-specific usage.
         let guard = lookup.read();
         let active_outputs = guard
             .for_app(
                 &guard.active_app(),
-                usage.id(),
+                usage,
                 lookup_modifiers,
                 Some(device_path),
             )
             .or_else(|| {
-                guard.global(usage.id(), lookup_modifiers, Some(device_path))
+                guard.global(usage, lookup_modifiers, Some(device_path))
             })
             .map(|v| v.to_vec());
         drop(guard);
@@ -361,8 +351,7 @@ fn process_device_events(
             // virtual device, preventing double emission.
             if value == 1 {
                 for native_key in &outputs {
-                    if let Err(e) =
-                        emit_key_event(virtual_device, usage, native_key)
+                    if let Err(e) = emit_key_event(virtual_device, native_key)
                     {
                         eprintln!("emit error: {}", e);
                     }

@@ -52,11 +52,11 @@ use windows::Win32::{
 
 use super::{
     dispatch::{Decision, HookEvent, spawn_worker},
-    key::Key,
+    key::{Key, hid_to_vk},
     raw_input::start_raw_input_loop,
 };
 use crate::{
-    common::modifier::ModifierRole,
+    common::{hid_usage::HidUsage, modifier::ModifierRole},
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
 
@@ -137,7 +137,7 @@ fn clear_injected(vk: u16, is_down: bool) {
 // Modifier handling
 // ---------------------------------------------------------------------------
 
-fn extract_modifier_bits() -> u8 {
+pub(super) fn extract_modifier_bits() -> u8 {
     let mut bits: u8 = 0;
     if unsafe { GetAsyncKeyState(Key::LeftControl.as_native() as i32) } < 0 {
         bits |= ModifierRole::LeftControl.mask();
@@ -239,7 +239,12 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
     }
 }
 
-fn emit_key_event(native_key: &NativeKey) {
+/// Emit a complete key event (chord press + release) via `SendInput`.
+///
+/// The output's `HidUsage` is resolved to a virtual-key code: Keyboard
+/// page usages through their `Key` variant's VK code, Consumer Page
+/// usages through the static `hid_to_vk` translation table.
+pub(super) fn emit_key_event(native_key: &NativeKey) {
     let mut pressed_modifiers: Vec<VIRTUAL_KEY> = Vec::new();
 
     for bit in 0..8 {
@@ -252,33 +257,34 @@ fn emit_key_event(native_key: &NativeKey) {
         }
     }
 
-    simulate_key_event(VIRTUAL_KEY(native_key.base), false);
+    let base_vk = Key::from_hid_usage(native_key.usage)
+        .map(Key::as_native)
+        .or_else(|| hid_to_vk(native_key.usage));
+
+    let Some(base_vk) = base_vk else {
+        eprintln!(
+            "Windows: no VK code for output HID usage {:?}",
+            native_key.usage
+        );
+        // Release the modifiers that were already pressed to avoid a
+        // stuck-modifier state.
+        for vk in pressed_modifiers.into_iter().rev() {
+            simulate_key_event(vk, true);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        return;
+    };
+
+    simulate_key_event(VIRTUAL_KEY(base_vk), false);
     std::thread::sleep(std::time::Duration::from_millis(1));
 
-    simulate_key_event(VIRTUAL_KEY(native_key.base), true);
+    simulate_key_event(VIRTUAL_KEY(base_vk), true);
     std::thread::sleep(std::time::Duration::from_millis(1));
 
     for vk in pressed_modifiers.into_iter().rev() {
         simulate_key_event(vk, true);
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-}
-
-/// Map a raw VIRTUAL_KEY to its modifier bit position via the shared
-/// \`ModifierRole\` type.
-fn vk_to_modifier_bit(vk: VIRTUAL_KEY) -> Option<u8> {
-    let role = match vk.0 {
-        0xA2 => ModifierRole::LeftControl,
-        0xA3 => ModifierRole::RightControl,
-        0xA0 => ModifierRole::LeftShift,
-        0xA1 => ModifierRole::RightShift,
-        0xA4 => ModifierRole::LeftAlt,
-        0xA5 => ModifierRole::RightAlt,
-        0x5B => ModifierRole::LeftCommand,
-        0x5C => ModifierRole::RightCommand,
-        _ => return None,
-    };
-    Some(role.bit())
 }
 
 // ---------------------------------------------------------------------------
@@ -308,6 +314,11 @@ extern "system" fn low_level_keyboard_proc(
         w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
     let is_key_up = !is_key_down;
 
+    // Derive the HID identity of the key — the lookup key space of the
+    // compiled rules.  `None` for virtual-key codes without a `HidUsage`
+    // (e.g. Print Screen); such keys always pass through.
+    let usage = Key::from_native(vk_code.0).map(Key::to_hid_usage);
+
     // Skip keys injected by the daemon itself to avoid processing our own
     // output as new input, which would create duplicate or recursive mappings.
     if is_injected_key(vk_code.0, is_key_down) {
@@ -319,7 +330,9 @@ extern "system" fn low_level_keyboard_proc(
     // bare-modifier triggers (e.g. "LeftControl: A") match correctly against
     // the concurrent modifier set.
     let mut pressed_modifiers = extract_modifier_bits();
-    if let Some(bit) = vk_to_modifier_bit(vk_code) {
+    if let Some(usage) = usage
+        && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
+    {
         pressed_modifiers &= !(1 << bit);
     }
 
@@ -329,6 +342,7 @@ extern "system" fn low_level_keyboard_proc(
 
     let hook_event = HookEvent {
         vk_code,
+        usage,
         is_key_up,
         modifiers: pressed_modifiers,
         reply_tx,
@@ -472,21 +486,6 @@ mod tests {
     #[test]
     fn is_extended_key_returns_false_for_normal_key() {
         assert!(!is_extended_key(VIRTUAL_KEY(0x41))); // 'A'
-    }
-
-    #[test]
-    fn vk_to_modifier_bit_maps_left_control() {
-        assert_eq!(vk_to_modifier_bit(VIRTUAL_KEY(0xA2)), Some(0));
-    }
-
-    #[test]
-    fn vk_to_modifier_bit_maps_right_alt() {
-        assert_eq!(vk_to_modifier_bit(VIRTUAL_KEY(0xA5)), Some(5));
-    }
-
-    #[test]
-    fn vk_to_modifier_bit_returns_none_for_normal_key() {
-        assert!(vk_to_modifier_bit(VIRTUAL_KEY(0x41)).is_none());
     }
 
     #[test]

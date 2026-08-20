@@ -34,16 +34,16 @@ use crate::common::{
 pub struct NativeKey {
     /// Bitmask of specific modifier keys currently held.
     pub modifiers: u8,
-    /// Native key code of the base key (any key, including modifier keys).
-    pub base: u16,
+    /// HID usage of the base key (any key, including modifier keys).
+    pub usage: HidUsage,
 }
 
 /// A single compiled rule: trigger key paired with output events.
 /// Multiple entries may share the same base key but differ in modifiers.
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
-    /// Native key code of the trigger's base key.
-    pub base: u16,
+    /// HID usage of the trigger's base key.
+    pub usage: HidUsage,
     /// Exact modifier bitmask for matching.
     pub modifiers: u8,
     /// Output events to emit when this rule matches.
@@ -56,10 +56,11 @@ pub struct CompiledRule {
 
 /// Compiled key-mapping cache optimised for fast runtime lookups.
 ///
-/// All rules use a unified `IndexMap` keyed by the base key code.  Modifier
-/// discrimination happens at lookup time by scanning entries with matching
-/// modifier bits.  The first match wins, preserving definition order within
-/// each app scope.
+/// All rules store the trigger as a `HidUsage`, so lookups are keyed by the
+/// full page-specific usage and ids that repeat across pages never collide.
+/// Modifier discrimination happens at lookup time by scanning entries with
+/// matching modifier bits.  The first match wins, preserving definition
+/// order within each app scope.
 #[derive(Debug)]
 pub struct RuntimeLookupCache {
     /// Per-app rules: app name -> list of compiled rules.
@@ -142,12 +143,11 @@ impl RuntimeLookupCache {
                 // Expand modifier variants for "either side" semantics.
                 let variants = expand_modifier_bits(&trigger.modifiers);
 
-                let trigger_base =
-                    HidUsage::from_common_key(trigger.base).id();
+                let trigger_usage = HidUsage::from_common_key(trigger.base);
 
                 for mod_bits in variants {
                     let rule = CompiledRule {
-                        base: trigger_base,
+                        usage: trigger_usage,
                         modifiers: mod_bits,
                         outputs: native_outputs.clone(),
                         keyboards: group_keyboards.clone(),
@@ -182,7 +182,7 @@ fn compile_outputs(
         .iter()
         .map(|event| NativeKey {
             modifiers: compile_modifier_bits(&event.modifiers),
-            base: HidUsage::from_common_key(event.base).id(),
+            usage: HidUsage::from_common_key(event.base),
         })
         .collect()
 }
@@ -374,12 +374,6 @@ mod tests {
     use super::*;
     use crate::common::Key as CommonKey;
 
-    /// Shortcut to get the HID usage id for a key.
-    #[inline]
-    fn id(usage: HidUsage) -> u16 {
-        usage.id()
-    }
-
     // Bit positions per the header comment:
     // bit 0: left control,   bit 1: right control
     // bit 2: left shift,     bit 3: right shift
@@ -513,10 +507,10 @@ mod tests {
         assert!(cache.process_rules("any").is_none());
 
         let rule = &cache.global_rules()[0];
-        assert_eq!(rule.base, id(HidUsage::CapsLock));
+        assert_eq!(rule.usage, HidUsage::CapsLock);
         assert_eq!(rule.modifiers, 0);
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, id(HidUsage::LeftControl));
+        assert_eq!(rule.outputs[0].usage, HidUsage::LeftControl);
     }
 
     #[test]
@@ -549,12 +543,12 @@ mod tests {
         let cache = build_cache(yaml);
         assert_eq!(cache.global_rules().len(), 2);
 
-        let bases: Vec<u16> =
-            cache.global_rules().iter().map(|r| r.base).collect();
+        let usages: Vec<HidUsage> =
+            cache.global_rules().iter().map(|r| r.usage).collect();
         let mods: Vec<u8> =
             cache.global_rules().iter().map(|r| r.modifiers).collect();
 
-        assert!(bases.contains(&id(HidUsage::H)));
+        assert!(usages.contains(&HidUsage::H));
         assert_eq!(mods.len(), 2);
         assert!(mods.contains(&(1 << 0))); // left control
         assert!(mods.contains(&(1 << 1))); // right control
@@ -570,7 +564,7 @@ mod tests {
         let rule = &cache.global_rules()[0];
 
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, id(HidUsage::LeftArrow));
+        assert_eq!(rule.outputs[0].usage, HidUsage::LeftArrow);
         // Cmd resolves to LeftCommand → bit 6.
         assert_eq!(rule.outputs[0].modifiers, 1 << 6);
     }
@@ -585,9 +579,9 @@ mod tests {
         let rule = &cache.global_rules()[0];
 
         assert_eq!(rule.outputs.len(), 2);
-        assert_eq!(rule.outputs[0].base, id(HidUsage::T));
+        assert_eq!(rule.outputs[0].usage, HidUsage::T);
         assert_eq!(rule.outputs[0].modifiers, 1 << 6); // Cmd
-        assert_eq!(rule.outputs[1].base, id(HidUsage::F1));
+        assert_eq!(rule.outputs[1].usage, HidUsage::F1);
         assert_eq!(rule.outputs[1].modifiers, 0);
     }
 
@@ -637,7 +631,7 @@ mod tests {
         assert_eq!(rules.len(), 7);
 
         // The first entry should be the Ctrl+Shift+A rule.
-        assert_eq!(rules[0].base, id(HidUsage::A));
+        assert_eq!(rules[0].usage, HidUsage::A);
     }
 
     #[test]
@@ -667,10 +661,10 @@ mod tests {
         let cache = build_cache(yaml);
         let rule = &cache.global_rules()[0];
 
-        assert_eq!(rule.base, id(HidUsage::CapsLock));
+        assert_eq!(rule.usage, HidUsage::CapsLock);
         assert_eq!(rule.modifiers, 0); // bare key, no modifiers
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, id(HidUsage::L));
+        assert_eq!(rule.outputs[0].usage, HidUsage::L);
         assert_eq!(rule.outputs[0].modifiers, 1 << 4); // LeftAlt → bit 4
     }
 
@@ -687,8 +681,8 @@ mod tests {
 
         // All rules should have base = A and output = F12.
         for rule in cache.global_rules() {
-            assert_eq!(rule.base, id(HidUsage::A));
-            assert_eq!(rule.outputs[0].base, id(HidUsage::F12));
+            assert_eq!(rule.usage, HidUsage::A);
+            assert_eq!(rule.outputs[0].usage, HidUsage::F12);
         }
     }
 
@@ -710,13 +704,13 @@ mod tests {
 
         // The first rule should output LeftControl, the second RightControl.
         assert_eq!(
-            cache.global_rules()[0].outputs[0].base,
-            id(HidUsage::LeftControl)
+            cache.global_rules()[0].outputs[0].usage,
+            HidUsage::LeftControl
         );
 
         assert_eq!(
-            cache.global_rules()[1].outputs[0].base,
-            id(HidUsage::RightControl)
+            cache.global_rules()[1].outputs[0].usage,
+            HidUsage::RightControl
         );
     }
 

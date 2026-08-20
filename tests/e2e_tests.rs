@@ -450,14 +450,17 @@ fn common_to_platform_code(common_key: Key) -> u16 {
     .expect("every common key has an evdev code")
 }
 
-/// Convert a platform-agnostic `[Key]` to the platform-specific native
-/// key code for injection on Windows.
+/// Convert a platform-agnostic `[Key]` to the Windows virtual-key code
+/// for injection.
 ///
-/// The Windows e2e tests are not active yet; keep the HID-usage-id
-/// convention until the Windows platform work lands.
+/// The daemon's low-level hook receives the injected VK code and converts
+/// it to a `HidUsage` via the platform `Key` table, mirroring the physical
+/// keyboard path.
 #[cfg(windows)]
 fn common_to_platform_code(common_key: Key) -> u16 {
-    hid_from_common(common_key).id()
+    keymapper::platform::Key::from_hid_usage(hid_from_common(common_key))
+        .expect("every common key has a VK code on Windows")
+        .as_native()
 }
 
 /// Map a `common::Key` to its HID usage.

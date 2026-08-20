@@ -973,19 +973,25 @@ unsafe extern "C" fn hid_queue_value_callback(
             context.modifier_state |= 1 << bit;
         }
 
-        // Perform the lookup using the raw HID usage id.  Compiled rules
-        // store `base` as `HidUsage::id()`, so the lookup key must match.
+        // Perform the lookup.  Compiled rules store the trigger as a
+        // `HidUsage`, so the lookup is keyed by the full page-specific
+        // usage.
         let guard = context.lookup.read();
         let active_outputs = guard
-            .for_app(&guard.active_app(), key_id, lookup_modifiers, device_id)
-            .or_else(|| guard.global(key_id, lookup_modifiers, device_id))
+            .for_app(
+                &guard.active_app(),
+                hid_usage,
+                lookup_modifiers,
+                device_id,
+            )
+            .or_else(|| guard.global(hid_usage, lookup_modifiers, device_id))
             .map(|v| v.to_vec());
         drop(guard);
 
         // Emit mapped outputs via the virtual HID keyboard.
         if let Some(outputs) = active_outputs {
             for native_key in &outputs {
-                emit_hid_report(&context.socket, hid_usage, native_key);
+                emit_hid_report(&context.socket, native_key);
             }
         }
     }
@@ -994,20 +1000,19 @@ unsafe extern "C" fn hid_queue_value_callback(
 /// Emit a single `NativeKey` as USB HID reports.
 ///
 /// Sends a report with the modifier and base key pressed, followed by
-/// an empty report to release.  Dispatches on the usage page:
+/// an empty report to release.  Dispatches on the output usage's page:
 /// - Keyboard page (0x07): standard USB keyboard report.
 /// - Consumer page (0x0C): consumer control report.
 fn emit_hid_report(
     socket: &std::sync::Arc<super::hid_socket::HidSocket>,
-    hid_usage: crate::common::hid_usage::HidUsage,
     native_key: &crate::daemon::mapping_cache::NativeKey,
 ) {
     use super::hid_socket::{build_consumer_report, build_keyboard_report};
     use crate::common::hid_usage::PAGE_KEYBOARD;
 
-    if hid_usage.page() == PAGE_KEYBOARD {
-        // Keyboard page: write usage id directly into the report.
-        let usage_byte = (native_key.base & 0xFF) as u8;
+    if native_key.usage.page() == PAGE_KEYBOARD {
+        // Keyboard page: write the usage id directly into the report.
+        let usage_byte = native_key.usage.id() as u8;
 
         if let Ok(report) =
             build_keyboard_report(native_key.modifiers, Some(usage_byte))
@@ -1021,7 +1026,7 @@ fn emit_hid_report(
         }
     } else {
         // Consumer page: build a consumer control report.
-        if let Ok(report) = build_consumer_report(native_key.base) {
+        if let Ok(report) = build_consumer_report(native_key.usage.id()) {
             let _ = socket.send_report(&report);
 
             // Release the consumer key by sending an empty report.
