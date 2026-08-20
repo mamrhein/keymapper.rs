@@ -39,7 +39,10 @@ use std::{
 
 use event_log::{LogEvent, assert_events_match, event_str};
 use keymapper::{
-    common::{Key, config::AppConfig, hid_usage::HidUsage},
+    common::{
+        config::AppConfig,
+        hid_usage::{HidUsage, PAGE_CONSUMER},
+    },
     util::key_injector::{InjectorError, KeyInjector},
 };
 
@@ -183,11 +186,14 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
         }
     }
 
-    // Pick 5 passthrough keys that are not used by any rule.
-    let passthrough_keys: Vec<Key> = Key::all()
+    // Pick 5 passthrough keys that are not used by any rule.  Consumer
+    // page usages are excluded: the egui monitor cannot capture them and
+    // the macOS injector has no CGKeyCode for them.
+    let passthrough_keys: Vec<HidUsage> = HidUsage::all()
         .iter()
+        .copied()
+        .filter(|k| k.page() != PAGE_CONSUMER)
         .filter(|k| !used_keys.contains(k))
-        .cloned()
         .take(5)
         .collect();
 
@@ -196,7 +202,7 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
             "config uses too many unique keys to find 5 passthrough \
              candidates (used {} out of {})",
             used_keys.len(),
-            Key::all().len()
+            HidUsage::all().len()
         );
     }
 
@@ -259,7 +265,7 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
 fn key_event_to_injection_step(
     key_event: &keymapper::common::config::KeyEvent,
 ) -> InjectionStep {
-    // Convert common Key to platform native code.
+    // Convert each HidUsage to its platform native code.
     let mut keys_down: Vec<u16> = key_event
         .modifiers
         .iter()
@@ -278,7 +284,7 @@ fn key_event_to_injection_step(
 }
 
 /// Build an injection step for a single key with no modifiers.
-fn single_key_injection_step(key: Key) -> InjectionStep {
+fn single_key_injection_step(key: HidUsage) -> InjectionStep {
     let code = common_to_platform_code(key);
     InjectionStep {
         keys_down: vec![code],
@@ -322,254 +328,147 @@ fn build_expected_output_events(
     events
 }
 
-/// Convert a platform-agnostic `[Key]` to the platform-specific native
-/// key code for injection.
+/// Convert a platform-agnostic `[HidUsage]` to the platform-specific
+/// native key code for injection.
 ///
 /// On macOS this returns CGKeyCodes for use with the CGEvent-based injector.
 /// On other platforms it returns the platform-native key code.
 #[cfg(target_os = "macos")]
-fn common_to_platform_code(common_key: Key) -> u16 {
+fn common_to_platform_code(usage: HidUsage) -> u16 {
     // CGKeyCode lookup derived from USB HID Usage Tables.
-    match common_key {
-        Key::A => 0,
-        Key::S => 1,
-        Key::D => 2,
-        Key::F => 3,
-        Key::H => 4,
-        Key::G => 5,
-        Key::Z => 6,
-        Key::X => 7,
-        Key::C => 8,
-        Key::V => 9,
-        Key::IsoExtra => 10,
-        Key::B => 11,
-        Key::Q => 12,
-        Key::W => 13,
-        Key::E => 14,
-        Key::R => 15,
-        Key::Y => 16,
-        Key::T => 17,
-        Key::Number1 => 18,
-        Key::Number2 => 19,
-        Key::Number3 => 20,
-        Key::Number4 => 21,
-        Key::Number6 => 22,
-        Key::Number5 => 23,
-        Key::Equal => 24,
-        Key::Number9 => 25,
-        Key::Number7 => 26,
-        Key::Minus => 27,
-        Key::Number8 => 28,
-        Key::Number0 => 29,
-        Key::BracketRight => 30,
-        Key::O => 31,
-        Key::U => 32,
-        Key::BracketLeft => 33,
-        Key::I => 34,
-        Key::P => 35,
-        Key::Return => 36,
-        Key::L => 37,
-        Key::J => 38,
-        Key::Quote => 39,
-        Key::K => 40,
-        Key::Semicolon => 41,
-        Key::Backslash => 42,
-        Key::Comma => 43,
-        Key::Slash => 44,
-        Key::N => 45,
-        Key::M => 46,
-        Key::Period => 47,
-        Key::Tab => 48,
-        Key::Space => 49,
-        Key::Grave => 50,
-        Key::Backspace => 51,
-        Key::Escape => 53,
-        Key::Delete => 117,
-        Key::RightCommand => 54,
-        Key::LeftCommand => 55,
-        Key::LeftShift => 56,
-        Key::CapsLock => 57,
-        Key::LeftAlt => 58,
-        Key::LeftControl => 59,
-        Key::RightShift => 60,
-        Key::RightAlt => 61,
-        Key::RightControl => 62,
-        Key::NumpadDecimal => 65,
-        Key::NumpadPlus => 69,
-        Key::NumpadClear => 71,
-        Key::NumpadDivide => 73,
-        Key::NumpadMultiply => 75,
-        Key::NumpadEnter => 76,
-        Key::NumpadMinus => 78,
-        Key::NumpadEqual => 90,
-        Key::Numpad0 => 82,
-        Key::Numpad1 => 83,
-        Key::Numpad2 => 84,
-        Key::Numpad3 => 85,
-        Key::Numpad4 => 86,
-        Key::Numpad5 => 87,
-        Key::Numpad6 => 88,
-        Key::Numpad7 => 89,
-        Key::Numpad8 => 91,
-        Key::Numpad9 => 92,
-        Key::F5 => 96,
-        Key::F6 => 97,
-        Key::F7 => 98,
-        Key::F3 => 99,
-        Key::F8 => 100,
-        Key::F9 => 101,
-        Key::F11 => 103,
-        Key::F10 => 109,
-        Key::F12 => 111,
-        Key::Home => 115,
-        Key::PageUp => 116,
-        Key::F4 => 118,
-        Key::End => 119,
-        Key::F2 => 120,
-        Key::PageDown => 121,
-        Key::F1 => 122,
-        Key::LeftArrow => 123,
-        Key::RightArrow => 124,
-        Key::DownArrow => 125,
-        Key::UpArrow => 126,
-        Key::IsoHash => 50, // Non-US # and ~
+    match usage {
+        HidUsage::A => 0,
+        HidUsage::S => 1,
+        HidUsage::D => 2,
+        HidUsage::F => 3,
+        HidUsage::H => 4,
+        HidUsage::G => 5,
+        HidUsage::Z => 6,
+        HidUsage::X => 7,
+        HidUsage::C => 8,
+        HidUsage::V => 9,
+        HidUsage::IsoExtra => 10,
+        HidUsage::B => 11,
+        HidUsage::Q => 12,
+        HidUsage::W => 13,
+        HidUsage::E => 14,
+        HidUsage::R => 15,
+        HidUsage::Y => 16,
+        HidUsage::T => 17,
+        HidUsage::Number1 => 18,
+        HidUsage::Number2 => 19,
+        HidUsage::Number3 => 20,
+        HidUsage::Number4 => 21,
+        HidUsage::Number6 => 22,
+        HidUsage::Number5 => 23,
+        HidUsage::Equal => 24,
+        HidUsage::Number9 => 25,
+        HidUsage::Number7 => 26,
+        HidUsage::Minus => 27,
+        HidUsage::Number8 => 28,
+        HidUsage::Number0 => 29,
+        HidUsage::BracketRight => 30,
+        HidUsage::O => 31,
+        HidUsage::U => 32,
+        HidUsage::BracketLeft => 33,
+        HidUsage::I => 34,
+        HidUsage::P => 35,
+        HidUsage::Return => 36,
+        HidUsage::L => 37,
+        HidUsage::J => 38,
+        HidUsage::Quote => 39,
+        HidUsage::K => 40,
+        HidUsage::Semicolon => 41,
+        HidUsage::Backslash => 42,
+        HidUsage::Comma => 43,
+        HidUsage::Slash => 44,
+        HidUsage::N => 45,
+        HidUsage::M => 46,
+        HidUsage::Period => 47,
+        HidUsage::Tab => 48,
+        HidUsage::Space => 49,
+        HidUsage::Grave => 50,
+        HidUsage::Backspace => 51,
+        HidUsage::Escape => 53,
+        HidUsage::Delete => 117,
+        HidUsage::RightCommand => 54,
+        HidUsage::LeftCommand => 55,
+        HidUsage::LeftShift => 56,
+        HidUsage::CapsLock => 57,
+        HidUsage::LeftAlt => 58,
+        HidUsage::LeftControl => 59,
+        HidUsage::RightShift => 60,
+        HidUsage::RightAlt => 61,
+        HidUsage::RightControl => 62,
+        HidUsage::NumpadDecimal => 65,
+        HidUsage::NumpadPlus => 69,
+        HidUsage::NumpadClear => 71,
+        HidUsage::NumpadDivide => 73,
+        HidUsage::NumpadMultiply => 75,
+        HidUsage::NumpadEnter => 76,
+        HidUsage::NumpadMinus => 78,
+        HidUsage::NumpadEqual => 90,
+        HidUsage::Numpad0 => 82,
+        HidUsage::Numpad1 => 83,
+        HidUsage::Numpad2 => 84,
+        HidUsage::Numpad3 => 85,
+        HidUsage::Numpad4 => 86,
+        HidUsage::Numpad5 => 87,
+        HidUsage::Numpad6 => 88,
+        HidUsage::Numpad7 => 89,
+        HidUsage::Numpad8 => 91,
+        HidUsage::Numpad9 => 92,
+        HidUsage::F5 => 96,
+        HidUsage::F6 => 97,
+        HidUsage::F7 => 98,
+        HidUsage::F3 => 99,
+        HidUsage::F8 => 100,
+        HidUsage::F9 => 101,
+        HidUsage::F11 => 103,
+        HidUsage::F10 => 109,
+        HidUsage::F12 => 111,
+        HidUsage::Home => 115,
+        HidUsage::PageUp => 116,
+        HidUsage::F4 => 118,
+        HidUsage::End => 119,
+        HidUsage::F2 => 120,
+        HidUsage::PageDown => 121,
+        HidUsage::F1 => 122,
+        HidUsage::LeftArrow => 123,
+        HidUsage::RightArrow => 124,
+        HidUsage::DownArrow => 125,
+        HidUsage::UpArrow => 126,
+        HidUsage::IsoHash => 50, // Non-US # and ~
+        // Consumer page usages have no CGKeyCode and cannot be injected.
+        other => {
+            panic!("no CGKeyCode for consumer page usage {}", other.as_str())
+        }
     }
 }
 
-/// Convert a platform-agnostic `[Key]` to the evdev `KEY_*` code for
+/// Convert a platform-agnostic `[HidUsage]` to the evdev `KEY_*` code for
 /// injection on Linux.
 ///
 /// The injector emits real evdev key codes plus an `MSC_SCAN` carrying the
 /// HID usage, mirroring a physical HID keyboard.  The daemon's static
 /// translation table is the single source of truth for the mapping.
 #[cfg(target_os = "linux")]
-fn common_to_platform_code(common_key: Key) -> u16 {
-    keymapper::platform::hid_translate::hid_usage_to_keycode(hid_from_common(
-        common_key,
-    ))
-    .expect("every common key has an evdev code")
+fn common_to_platform_code(usage: HidUsage) -> u16 {
+    keymapper::platform::hid_translate::hid_usage_to_keycode(usage)
+        .expect("every HidUsage has an evdev code")
 }
 
-/// Convert a platform-agnostic `[Key]` to the Windows virtual-key code
-/// for injection.
+/// Convert a platform-agnostic `[HidUsage]` to the Windows virtual-key
+/// code for injection.
 ///
 /// The daemon's low-level hook receives the injected VK code and converts
 /// it to a `HidUsage` via the platform `Key` table, mirroring the physical
 /// keyboard path.
 #[cfg(windows)]
-fn common_to_platform_code(common_key: Key) -> u16 {
-    keymapper::platform::Key::from_hid_usage(hid_from_common(common_key))
-        .expect("every common key has a VK code on Windows")
+fn common_to_platform_code(usage: HidUsage) -> u16 {
+    keymapper::platform::Key::from_hid_usage(usage)
+        .expect("every HidUsage has a VK code on Windows")
         .as_native()
-}
-
-/// Map a `common::Key` to its HID usage.
-#[allow(dead_code)]
-fn hid_from_common(key: Key) -> HidUsage {
-    match key {
-        Key::LeftControl => HidUsage::LeftControl,
-        Key::RightControl => HidUsage::RightControl,
-        Key::LeftShift => HidUsage::LeftShift,
-        Key::RightShift => HidUsage::RightShift,
-        Key::LeftAlt => HidUsage::LeftAlt,
-        Key::RightAlt => HidUsage::RightAlt,
-        Key::LeftCommand => HidUsage::LeftCommand,
-        Key::RightCommand => HidUsage::RightCommand,
-        Key::CapsLock => HidUsage::CapsLock,
-        Key::Tab => HidUsage::Tab,
-        Key::Space => HidUsage::Space,
-        Key::Return => HidUsage::Return,
-        Key::Backspace => HidUsage::Backspace,
-        Key::Delete => HidUsage::Delete,
-        Key::Escape => HidUsage::Escape,
-        Key::UpArrow => HidUsage::UpArrow,
-        Key::DownArrow => HidUsage::DownArrow,
-        Key::LeftArrow => HidUsage::LeftArrow,
-        Key::RightArrow => HidUsage::RightArrow,
-        Key::PageUp => HidUsage::PageUp,
-        Key::PageDown => HidUsage::PageDown,
-        Key::Home => HidUsage::Home,
-        Key::End => HidUsage::End,
-        Key::F1 => HidUsage::F1,
-        Key::F2 => HidUsage::F2,
-        Key::F3 => HidUsage::F3,
-        Key::F4 => HidUsage::F4,
-        Key::F5 => HidUsage::F5,
-        Key::F6 => HidUsage::F6,
-        Key::F7 => HidUsage::F7,
-        Key::F8 => HidUsage::F8,
-        Key::F9 => HidUsage::F9,
-        Key::F10 => HidUsage::F10,
-        Key::F11 => HidUsage::F11,
-        Key::F12 => HidUsage::F12,
-        Key::A => HidUsage::A,
-        Key::B => HidUsage::B,
-        Key::C => HidUsage::C,
-        Key::D => HidUsage::D,
-        Key::E => HidUsage::E,
-        Key::F => HidUsage::F,
-        Key::G => HidUsage::G,
-        Key::H => HidUsage::H,
-        Key::I => HidUsage::I,
-        Key::J => HidUsage::J,
-        Key::K => HidUsage::K,
-        Key::L => HidUsage::L,
-        Key::M => HidUsage::M,
-        Key::N => HidUsage::N,
-        Key::O => HidUsage::O,
-        Key::P => HidUsage::P,
-        Key::Q => HidUsage::Q,
-        Key::R => HidUsage::R,
-        Key::S => HidUsage::S,
-        Key::T => HidUsage::T,
-        Key::U => HidUsage::U,
-        Key::V => HidUsage::V,
-        Key::W => HidUsage::W,
-        Key::X => HidUsage::X,
-        Key::Y => HidUsage::Y,
-        Key::Z => HidUsage::Z,
-        Key::Number1 => HidUsage::Number1,
-        Key::Number2 => HidUsage::Number2,
-        Key::Number3 => HidUsage::Number3,
-        Key::Number4 => HidUsage::Number4,
-        Key::Number5 => HidUsage::Number5,
-        Key::Number6 => HidUsage::Number6,
-        Key::Number7 => HidUsage::Number7,
-        Key::Number8 => HidUsage::Number8,
-        Key::Number9 => HidUsage::Number9,
-        Key::Number0 => HidUsage::Number0,
-        Key::Numpad0 => HidUsage::Numpad0,
-        Key::Numpad1 => HidUsage::Numpad1,
-        Key::Numpad2 => HidUsage::Numpad2,
-        Key::Numpad3 => HidUsage::Numpad3,
-        Key::Numpad4 => HidUsage::Numpad4,
-        Key::Numpad5 => HidUsage::Numpad5,
-        Key::Numpad6 => HidUsage::Numpad6,
-        Key::Numpad7 => HidUsage::Numpad7,
-        Key::Numpad8 => HidUsage::Numpad8,
-        Key::Numpad9 => HidUsage::Numpad9,
-        Key::NumpadDecimal => HidUsage::NumpadDecimal,
-        Key::NumpadMultiply => HidUsage::NumpadMultiply,
-        Key::NumpadPlus => HidUsage::NumpadPlus,
-        Key::NumpadDivide => HidUsage::NumpadDivide,
-        Key::NumpadEnter => HidUsage::NumpadEnter,
-        Key::NumpadMinus => HidUsage::NumpadMinus,
-        Key::NumpadClear => HidUsage::NumpadClear,
-        Key::NumpadEqual => HidUsage::NumpadEqual,
-        Key::Minus => HidUsage::Minus,
-        Key::Equal => HidUsage::Equal,
-        Key::BracketLeft => HidUsage::BracketLeft,
-        Key::BracketRight => HidUsage::BracketRight,
-        Key::Backslash => HidUsage::Backslash,
-        Key::Semicolon => HidUsage::Semicolon,
-        Key::Quote => HidUsage::Quote,
-        Key::Comma => HidUsage::Comma,
-        Key::Period => HidUsage::Period,
-        Key::Slash => HidUsage::Slash,
-        Key::Grave => HidUsage::Grave,
-        Key::IsoExtra => HidUsage::IsoExtra,
-        Key::IsoHash => HidUsage::IsoHash,
-    }
 }
 
 // ---------------------------------------------------------------------------

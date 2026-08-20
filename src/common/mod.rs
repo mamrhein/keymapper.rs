@@ -19,7 +19,6 @@ pub(crate) mod modifier;
 
 pub use hid_usage::HidUsage;
 pub use key::Key;
-pub(crate) use key::unknown_key_error;
 pub use keyboard::{
     KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
 };

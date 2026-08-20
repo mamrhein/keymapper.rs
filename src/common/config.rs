@@ -10,9 +10,13 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use super::{Key, KeyboardSpecifier, unknown_key_error};
+use super::{KeyboardSpecifier, hid_usage::HidUsage};
 
 /// A key event: modifiers held together with a base key press.
+///
+/// Keys are represented as `HidUsage`, which is platform-independent, so no
+/// platform-specific validation is needed at parse time.  Platform support
+/// is checked at injection time instead.
 ///
 /// Accepts compact `+`-separated strings in YAML:
 /// - `"CapsLock"` -- bare key press (no modifiers held)
@@ -22,10 +26,10 @@ use super::{Key, KeyboardSpecifier, unknown_key_error};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyEvent {
     /// Modifier keys held during the event (empty for bare key presses).
-    pub modifiers: Vec<Key>,
+    pub modifiers: Vec<HidUsage>,
     /// The base key that is pressed (may itself be a modifier key, e.g.
     /// CapsLock).
-    pub base: Key,
+    pub base: HidUsage,
 }
 
 impl<'de> Deserialize<'de> for KeyEvent {
@@ -78,7 +82,7 @@ impl KeyEvent {
             // Chord: "Ctrl+A", "Cmd+Shift+T"
             // Last token is the base key; preceding tokens are modifiers.
             let base = parse_key(parts[parts.len() - 1])?;
-            let modifiers: Result<Vec<Key>, _> = parts[..parts.len() - 1]
+            let modifiers: Result<Vec<HidUsage>, _> = parts[..parts.len() - 1]
                 .iter()
                 .map(|p| parse_key(p))
                 .collect();
@@ -90,16 +94,16 @@ impl KeyEvent {
     }
 }
 
-/// Parse a single token from the config string into a `Key`.
+/// Parse a single token from the config string into a `HidUsage`.
 ///
 /// Key names are matched case-sensitively.
-fn parse_key(token: &str) -> Result<Key, String> {
+fn parse_key(token: &str) -> Result<HidUsage, String> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
         return Err("empty key token in event string".to_string());
     }
 
-    Key::try_from_str(trimmed).ok_or_else(|| unknown_key_error(trimmed))
+    HidUsage::try_from(trimmed).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -541,10 +545,10 @@ mod tests {
         let mut mappings = group.mappings.iter();
         let (trigger, outputs) = mappings.next().unwrap();
         assert!(trigger.modifiers.is_empty());
-        assert!(matches!(trigger.base, Key::CapsLock));
+        assert!(matches!(trigger.base, HidUsage::CapsLock));
         assert_eq!(outputs.len(), 1);
         assert!(outputs[0].modifiers.is_empty());
-        assert!(matches!(outputs[0].base, Key::LeftControl));
+        assert!(matches!(outputs[0].base, HidUsage::LeftControl));
         assert!(mappings.next().is_none());
     }
 
@@ -569,17 +573,17 @@ mod tests {
         // Ctrl+H -> LeftArrow
         let (trigger, outputs) = mappings.next().unwrap();
         assert_eq!(trigger.modifiers.len(), 1);
-        assert!(matches!(trigger.modifiers[0], Key::LeftControl));
-        assert!(matches!(trigger.base, Key::H));
+        assert!(matches!(trigger.modifiers[0], HidUsage::LeftControl));
+        assert!(matches!(trigger.base, HidUsage::H));
         assert_eq!(outputs.len(), 1);
         assert!(outputs[0].modifiers.is_empty());
-        assert!(matches!(outputs[0].base, Key::LeftArrow));
+        assert!(matches!(outputs[0].base, HidUsage::LeftArrow));
 
         // Ctrl+L -> RightArrow
         let (trigger, outputs) = mappings.next().unwrap();
         assert_eq!(trigger.modifiers.len(), 1);
-        assert!(matches!(trigger.base, Key::L));
-        assert!(matches!(outputs[0].base, Key::RightArrow));
+        assert!(matches!(trigger.base, HidUsage::L));
+        assert!(matches!(outputs[0].base, HidUsage::RightArrow));
     }
 
     #[test]
@@ -611,13 +615,13 @@ mod tests {
 
         // Trigger: bare RightAlt
         assert!(trigger.modifiers.is_empty());
-        assert!(matches!(trigger.base, Key::RightAlt));
+        assert!(matches!(trigger.base, HidUsage::RightAlt));
 
         // Output: single event -- hold LeftAlt, press L
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].modifiers.len(), 1);
-        assert!(matches!(outputs[0].modifiers[0], Key::LeftAlt));
-        assert!(matches!(outputs[0].base, Key::L));
+        assert!(matches!(outputs[0].modifiers[0], HidUsage::LeftAlt));
+        assert!(matches!(outputs[0].base, HidUsage::L));
     }
 
     #[test]
@@ -700,8 +704,8 @@ mod tests {
         let group = &config.groups[0];
         let mut mappings = group.mappings.iter();
         let (trigger, outputs) = mappings.next().unwrap();
-        assert!(matches!(trigger.base, Key::LeftControl));
-        assert!(matches!(outputs[0].base, Key::CapsLock));
+        assert!(matches!(trigger.base, HidUsage::LeftControl));
+        assert!(matches!(outputs[0].base, HidUsage::CapsLock));
     }
 
     // -----------------------------------------------------------------------
