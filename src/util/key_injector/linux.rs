@@ -23,7 +23,9 @@ use std::{
     time::Duration,
 };
 
-use evdev::{AttributeSet, InputEvent, KeyCode, uinput::VirtualDevice};
+use evdev::{
+    AttributeSet, InputEvent, KeyCode, MiscCode, uinput::VirtualDevice,
+};
 
 use super::{InjectorError, KeyInjector};
 
@@ -131,6 +133,8 @@ impl LinuxInjector {
     /// Inject a keyboard event into the virtual input device.
     fn inject_key(&self, code: u16, value: i32) -> Result<(), InjectorError> {
         const EV_KEY: u16 = 1;
+        const EV_MSC: u16 = 4;
+        const MSC_SCAN: u16 = 4;
         const EV_SYN: u16 = 0;
         const SYN_REPORT: u16 = 0;
 
@@ -144,11 +148,25 @@ impl LinuxInjector {
             .lock()
             .map_err(|e| InjectorError::InjectionFailed(format!("{e}")))?;
 
-        dev.emit(&[
-            InputEvent::new(EV_KEY, code, value),
-            InputEvent::new(EV_SYN, SYN_REPORT, 0),
-        ])
-        .map_err(|e| InjectorError::InjectionFailed(format!("{e}")))?;
+        // A real HID keyboard emits an MSC_SCAN carrying the raw HID usage
+        // `(page << 16) | id` before each key press; the daemon prefers it
+        // over the EV_KEY code.  Key releases carry no scan code.
+        let mut events: Vec<InputEvent> = Vec::new();
+        if value == 1
+            && let Some(usage) =
+                crate::platform::hid_translate::keycode_to_hid_usage(code)
+        {
+            events.push(InputEvent::new(
+                EV_MSC,
+                MSC_SCAN,
+                usage.code() as i32,
+            ));
+        }
+        events.push(InputEvent::new(EV_KEY, code, value));
+        events.push(InputEvent::new(EV_SYN, SYN_REPORT, 0));
+
+        dev.emit(&events)
+            .map_err(|e| InjectorError::InjectionFailed(format!("{e}")))?;
 
         // Allow the kernel to propagate the event to readers of the event
         // node.  Without this delay the daemon may not have picked up the
@@ -236,6 +254,11 @@ fn create_uinput_device(
     const KEY_CNT: u16 = 0x2fe;
     let all_keys: AttributeSet<KeyCode> =
         (0..KEY_CNT).map(KeyCode::new).collect();
+
+    // Declare MSC_SCAN support so the kernel accepts injected scan codes.
+    let mut msc_codes = AttributeSet::<MiscCode>::new();
+    msc_codes.insert(MiscCode::MSC_SCAN);
+
     let device = VirtualDevice::builder()
         .map_err(|e| {
             InjectorError::DeviceCreationFailed(format!(
@@ -247,6 +270,12 @@ fn create_uinput_device(
         .map_err(|e| {
             InjectorError::DeviceCreationFailed(format!(
                 "failed to enable key events: {e}"
+            ))
+        })?
+        .with_msc(&msc_codes)
+        .map_err(|e| {
+            InjectorError::DeviceCreationFailed(format!(
+                "failed to enable misc events: {e}"
             ))
         })?
         .build()

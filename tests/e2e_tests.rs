@@ -48,8 +48,10 @@ use std::{
 
 use event_log::{LogEvent, assert_events_match, event_str};
 use keymapper::{
-    common::{Key, config::AppConfig},
-    platform::Key as PlatformKey,
+    common::{
+        config::AppConfig,
+        hid_usage::{HidUsage, PAGE_CONSUMER},
+    },
     util::key_injector::{InjectorError, KeyInjector},
 };
 
@@ -273,11 +275,14 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
         }
     }
 
-    // Pick 5 passthrough keys that are not used by any rule.
-    let passthrough_keys: Vec<Key> = Key::all()
+    // Pick 5 passthrough keys that are not used by any rule.  Consumer
+    // page usages are excluded: the egui monitor cannot capture them and
+    // the macOS injector has no CGKeyCode for them.
+    let passthrough_keys: Vec<HidUsage> = HidUsage::all()
         .iter()
+        .copied()
+        .filter(|k| k.page() != PAGE_CONSUMER)
         .filter(|k| !used_keys.contains(k))
-        .cloned()
         .take(5)
         .collect();
 
@@ -286,7 +291,7 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
             "config uses too many unique keys to find 5 passthrough \
              candidates (used {} out of {})",
             used_keys.len(),
-            Key::all().len()
+            HidUsage::all().len()
         );
     }
 
@@ -344,7 +349,7 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
 /// left-side names, Super/Command is only visible on macOS (the egui
 /// backend drops the super key on other platforms), and CapsLock is not
 /// tracked by egui at all.
-fn monitor_key_name(key: Key) -> Option<&'static str> {
+fn monitor_key_name(key: HidUsage) -> Option<&'static str> {
     // Linux direct-capture mode sees every key under its exact name.
     #[cfg(target_os = "linux")]
     {
@@ -354,42 +359,34 @@ fn monitor_key_name(key: Key) -> Option<&'static str> {
     #[cfg(not(target_os = "linux"))]
     {
         match key {
-            Key::LeftControl | Key::RightControl => Some("LeftControl"),
-            Key::LeftShift | Key::RightShift => Some("LeftShift"),
-            Key::LeftAlt | Key::RightAlt => Some("LeftAlt"),
-            Key::LeftCommand | Key::RightCommand => {
+            HidUsage::LeftControl | HidUsage::RightControl => {
+                Some("LeftControl")
+            }
+            HidUsage::LeftShift | HidUsage::RightShift => Some("LeftShift"),
+            HidUsage::LeftAlt | HidUsage::RightAlt => Some("LeftAlt"),
+            HidUsage::LeftCommand | HidUsage::RightCommand => {
                 if cfg!(target_os = "macos") {
                     Some("LeftCommand")
                 } else {
                     None
                 }
             }
-            Key::CapsLock => None,
+            HidUsage::CapsLock => None,
             other => Some(other.as_str()),
         }
     }
 }
 
-/// Modifier bit position, mirroring the daemon's bitmask layout (see
-/// `src/daemon/mapping_cache.rs`).  The daemon emits output modifiers in
-/// ascending bit order.
-fn modifier_bit(key: Key) -> Option<u8> {
-    Some(match key {
-        Key::LeftControl => 0,
-        Key::RightControl => 1,
-        Key::LeftShift => 2,
-        Key::RightShift => 3,
-        Key::LeftAlt => 4,
-        Key::RightAlt => 5,
-        Key::LeftCommand => 6,
-        Key::RightCommand => 7,
-        _ => return None,
-    })
+/// Modifier bit position, shared with the daemon's bitmask layout (see
+/// `HidUsage::hid_usage_to_modifier_bit`).  The daemon emits output modifiers
+/// in ascending bit order.
+fn modifier_bit(key: HidUsage) -> Option<u8> {
+    HidUsage::hid_usage_to_modifier_bit(key)
 }
 
 /// Build the expected monitor events for a forwarded (passthrough) key
 /// press+release.
-fn passthrough_expected(key: Key) -> Vec<LogEvent> {
+fn passthrough_expected(key: HidUsage) -> Vec<LogEvent> {
     match monitor_key_name(key) {
         Some(name) => vec![event_str(name, true), event_str(name, false)],
         None => Vec::new(),
@@ -399,7 +396,7 @@ fn passthrough_expected(key: Key) -> Vec<LogEvent> {
 /// Find a firing rule whose trigger is the bare modifier *mod_key* (no
 /// modifiers held), if one exists.
 fn find_bare_modifier_rule<'a>(
-    mod_key: Key,
+    mod_key: HidUsage,
     rules: &'a [CollectedRule<'a>],
 ) -> Option<&'a CollectedRule<'a>> {
     rules.iter().find(|rule| {
@@ -420,7 +417,7 @@ fn output_tap_events(
     let mut events = Vec::new();
 
     for output in outputs {
-        let mut mod_keys: Vec<Key> = output.modifiers.clone();
+        let mut mod_keys: Vec<HidUsage> = output.modifiers.clone();
         mod_keys.sort_by_key(|k| modifier_bit(*k).unwrap_or(8));
 
         for mod_key in &mod_keys {
@@ -503,7 +500,7 @@ fn rule_expected_events<'a>(
 fn key_event_to_injection_step(
     key_event: &keymapper::common::config::KeyEvent,
 ) -> InjectionStep {
-    // Convert common Key to platform native code.
+    // Convert each HidUsage to its platform native code.
     let mut keys_down: Vec<u16> = key_event
         .modifiers
         .iter()
@@ -522,7 +519,7 @@ fn key_event_to_injection_step(
 }
 
 /// Build an injection step for a single key with no modifiers.
-fn single_key_injection_step(key: Key) -> InjectionStep {
+fn single_key_injection_step(key: HidUsage) -> InjectionStep {
     let code = common_to_platform_code(key);
     InjectionStep {
         keys_down: vec![code],
@@ -530,126 +527,147 @@ fn single_key_injection_step(key: Key) -> InjectionStep {
     }
 }
 
-/// Convert a platform-agnostic `[Key]` to the platform-specific native
-/// key code.
-fn common_to_platform_code(common_key: Key) -> u16 {
-    // Convert the common Key to the platform-specific Key by matching
-    // variant names.  Both enums have identical variants in the same order,
-    // but the platform enum uses native key codes as discriminants.
-    let platform_key: PlatformKey = match common_key {
-        Key::LeftControl => PlatformKey::LeftControl,
-        Key::RightControl => PlatformKey::RightControl,
-        Key::LeftShift => PlatformKey::LeftShift,
-        Key::RightShift => PlatformKey::RightShift,
-        Key::LeftAlt => PlatformKey::LeftAlt,
-        Key::RightAlt => PlatformKey::RightAlt,
-        Key::LeftCommand => PlatformKey::LeftCommand,
-        Key::RightCommand => PlatformKey::RightCommand,
-        Key::CapsLock => PlatformKey::CapsLock,
-        Key::Tab => PlatformKey::Tab,
-        Key::Space => PlatformKey::Space,
-        Key::Return => PlatformKey::Return,
-        Key::Backspace => PlatformKey::Backspace,
-        Key::Delete => PlatformKey::Delete,
-        Key::Escape => PlatformKey::Escape,
-        Key::UpArrow => PlatformKey::UpArrow,
-        Key::DownArrow => PlatformKey::DownArrow,
-        Key::LeftArrow => PlatformKey::LeftArrow,
-        Key::RightArrow => PlatformKey::RightArrow,
-        Key::PageUp => PlatformKey::PageUp,
-        Key::PageDown => PlatformKey::PageDown,
-        Key::Home => PlatformKey::Home,
-        Key::End => PlatformKey::End,
-        Key::F1 => PlatformKey::F1,
-        Key::F2 => PlatformKey::F2,
-        Key::F3 => PlatformKey::F3,
-        Key::F4 => PlatformKey::F4,
-        Key::F5 => PlatformKey::F5,
-        Key::F6 => PlatformKey::F6,
-        Key::F7 => PlatformKey::F7,
-        Key::F8 => PlatformKey::F8,
-        Key::F9 => PlatformKey::F9,
-        Key::F10 => PlatformKey::F10,
-        Key::F11 => PlatformKey::F11,
-        Key::F12 => PlatformKey::F12,
-        Key::A => PlatformKey::A,
-        Key::B => PlatformKey::B,
-        Key::C => PlatformKey::C,
-        Key::D => PlatformKey::D,
-        Key::E => PlatformKey::E,
-        Key::F => PlatformKey::F,
-        Key::G => PlatformKey::G,
-        Key::H => PlatformKey::H,
-        Key::I => PlatformKey::I,
-        Key::J => PlatformKey::J,
-        Key::K => PlatformKey::K,
-        Key::L => PlatformKey::L,
-        Key::M => PlatformKey::M,
-        Key::N => PlatformKey::N,
-        Key::O => PlatformKey::O,
-        Key::P => PlatformKey::P,
-        Key::Q => PlatformKey::Q,
-        Key::R => PlatformKey::R,
-        Key::S => PlatformKey::S,
-        Key::T => PlatformKey::T,
-        Key::U => PlatformKey::U,
-        Key::V => PlatformKey::V,
-        Key::W => PlatformKey::W,
-        Key::X => PlatformKey::X,
-        Key::Y => PlatformKey::Y,
-        Key::Z => PlatformKey::Z,
-        Key::Number1 => PlatformKey::Number1,
-        Key::Number2 => PlatformKey::Number2,
-        Key::Number3 => PlatformKey::Number3,
-        Key::Number4 => PlatformKey::Number4,
-        Key::Number5 => PlatformKey::Number5,
-        Key::Number6 => PlatformKey::Number6,
-        Key::Number7 => PlatformKey::Number7,
-        Key::Number8 => PlatformKey::Number8,
-        Key::Number9 => PlatformKey::Number9,
-        Key::Number0 => PlatformKey::Number0,
-        Key::Numpad0 => PlatformKey::Numpad0,
-        Key::Numpad1 => PlatformKey::Numpad1,
-        Key::Numpad2 => PlatformKey::Numpad2,
-        Key::Numpad3 => PlatformKey::Numpad3,
-        Key::Numpad4 => PlatformKey::Numpad4,
-        Key::Numpad5 => PlatformKey::Numpad5,
-        Key::Numpad6 => PlatformKey::Numpad6,
-        Key::Numpad7 => PlatformKey::Numpad7,
-        Key::Numpad8 => PlatformKey::Numpad8,
-        Key::Numpad9 => PlatformKey::Numpad9,
-        Key::NumpadDecimal => PlatformKey::NumpadDecimal,
-        Key::NumpadMultiply => PlatformKey::NumpadMultiply,
-        Key::NumpadPlus => PlatformKey::NumpadPlus,
-        Key::NumpadDivide => PlatformKey::NumpadDivide,
-        Key::NumpadEnter => PlatformKey::NumpadEnter,
-        Key::NumpadMinus => PlatformKey::NumpadMinus,
-        #[cfg(target_os = "macos")]
-        Key::NumpadClear => PlatformKey::NumpadClear,
-        #[cfg(target_os = "macos")]
-        Key::NumpadEqual => PlatformKey::NumpadEqual,
-        #[cfg(not(target_os = "macos"))]
-        Key::NumpadClear => PlatformKey::IsoHash,
-        #[cfg(not(target_os = "macos"))]
-        Key::NumpadEqual => PlatformKey::IsoHash,
-        Key::Minus => PlatformKey::Minus,
-        Key::Equal => PlatformKey::Equal,
-        Key::BracketLeft => PlatformKey::BracketLeft,
-        Key::BracketRight => PlatformKey::BracketRight,
-        Key::Backslash => PlatformKey::Backslash,
-        Key::Semicolon => PlatformKey::Semicolon,
-        Key::Quote => PlatformKey::Quote,
-        Key::Comma => PlatformKey::Comma,
-        Key::Period => PlatformKey::Period,
-        Key::Slash => PlatformKey::Slash,
-        Key::Grave => PlatformKey::Grave,
-        Key::IsoExtra => PlatformKey::IsoExtra,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        Key::IsoHash => PlatformKey::IsoHash,
-        #[cfg(target_os = "macos")]
-        Key::IsoHash => PlatformKey::IsoExtra,
-    };
-    platform_key.as_native()
+/// Convert a platform-agnostic `[HidUsage]` to the platform-specific
+/// native key code for injection.
+///
+/// On macOS this returns CGKeyCodes for use with the CGEvent-based injector.
+/// On other platforms it returns the platform-native key code.
+#[cfg(target_os = "macos")]
+fn common_to_platform_code(usage: HidUsage) -> u16 {
+    // CGKeyCode lookup derived from USB HID Usage Tables.
+    match usage {
+        HidUsage::A => 0,
+        HidUsage::S => 1,
+        HidUsage::D => 2,
+        HidUsage::F => 3,
+        HidUsage::H => 4,
+        HidUsage::G => 5,
+        HidUsage::Z => 6,
+        HidUsage::X => 7,
+        HidUsage::C => 8,
+        HidUsage::V => 9,
+        HidUsage::IsoExtra => 10,
+        HidUsage::B => 11,
+        HidUsage::Q => 12,
+        HidUsage::W => 13,
+        HidUsage::E => 14,
+        HidUsage::R => 15,
+        HidUsage::Y => 16,
+        HidUsage::T => 17,
+        HidUsage::Number1 => 18,
+        HidUsage::Number2 => 19,
+        HidUsage::Number3 => 20,
+        HidUsage::Number4 => 21,
+        HidUsage::Number6 => 22,
+        HidUsage::Number5 => 23,
+        HidUsage::Equal => 24,
+        HidUsage::Number9 => 25,
+        HidUsage::Number7 => 26,
+        HidUsage::Minus => 27,
+        HidUsage::Number8 => 28,
+        HidUsage::Number0 => 29,
+        HidUsage::BracketRight => 30,
+        HidUsage::O => 31,
+        HidUsage::U => 32,
+        HidUsage::BracketLeft => 33,
+        HidUsage::I => 34,
+        HidUsage::P => 35,
+        HidUsage::Return => 36,
+        HidUsage::L => 37,
+        HidUsage::J => 38,
+        HidUsage::Quote => 39,
+        HidUsage::K => 40,
+        HidUsage::Semicolon => 41,
+        HidUsage::Backslash => 42,
+        HidUsage::Comma => 43,
+        HidUsage::Slash => 44,
+        HidUsage::N => 45,
+        HidUsage::M => 46,
+        HidUsage::Period => 47,
+        HidUsage::Tab => 48,
+        HidUsage::Space => 49,
+        HidUsage::Grave => 50,
+        HidUsage::Backspace => 51,
+        HidUsage::Escape => 53,
+        HidUsage::Delete => 117,
+        HidUsage::RightCommand => 54,
+        HidUsage::LeftCommand => 55,
+        HidUsage::LeftShift => 56,
+        HidUsage::CapsLock => 57,
+        HidUsage::LeftAlt => 58,
+        HidUsage::LeftControl => 59,
+        HidUsage::RightShift => 60,
+        HidUsage::RightAlt => 61,
+        HidUsage::RightControl => 62,
+        HidUsage::NumpadDecimal => 65,
+        HidUsage::NumpadPlus => 69,
+        HidUsage::NumpadClear => 71,
+        HidUsage::NumpadDivide => 73,
+        HidUsage::NumpadMultiply => 75,
+        HidUsage::NumpadEnter => 76,
+        HidUsage::NumpadMinus => 78,
+        HidUsage::NumpadEqual => 90,
+        HidUsage::Numpad0 => 82,
+        HidUsage::Numpad1 => 83,
+        HidUsage::Numpad2 => 84,
+        HidUsage::Numpad3 => 85,
+        HidUsage::Numpad4 => 86,
+        HidUsage::Numpad5 => 87,
+        HidUsage::Numpad6 => 88,
+        HidUsage::Numpad7 => 89,
+        HidUsage::Numpad8 => 91,
+        HidUsage::Numpad9 => 92,
+        HidUsage::F5 => 96,
+        HidUsage::F6 => 97,
+        HidUsage::F7 => 98,
+        HidUsage::F3 => 99,
+        HidUsage::F8 => 100,
+        HidUsage::F9 => 101,
+        HidUsage::F11 => 103,
+        HidUsage::F10 => 109,
+        HidUsage::F12 => 111,
+        HidUsage::Home => 115,
+        HidUsage::PageUp => 116,
+        HidUsage::F4 => 118,
+        HidUsage::End => 119,
+        HidUsage::F2 => 120,
+        HidUsage::PageDown => 121,
+        HidUsage::F1 => 122,
+        HidUsage::LeftArrow => 123,
+        HidUsage::RightArrow => 124,
+        HidUsage::DownArrow => 125,
+        HidUsage::UpArrow => 126,
+        HidUsage::IsoHash => 50, // Non-US # and ~
+        // Consumer page usages have no CGKeyCode and cannot be injected.
+        other => {
+            panic!("no CGKeyCode for consumer page usage {}", other.as_str())
+        }
+    }
+}
+
+/// Convert a platform-agnostic `[HidUsage]` to the evdev `KEY_*` code for
+/// injection on Linux.
+///
+/// The injector emits real evdev key codes plus an `MSC_SCAN` carrying the
+/// HID usage, mirroring a physical HID keyboard.  The daemon's static
+/// translation table is the single source of truth for the mapping.
+#[cfg(target_os = "linux")]
+fn common_to_platform_code(usage: HidUsage) -> u16 {
+    keymapper::platform::hid_translate::hid_usage_to_keycode(usage)
+        .expect("every HidUsage has an evdev code")
+}
+
+/// Convert a platform-agnostic `[HidUsage]` to the Windows virtual-key
+/// code for injection.
+///
+/// The daemon's low-level hook receives the injected VK code and converts
+/// it to a `HidUsage` via the platform `Key` table, mirroring the physical
+/// keyboard path.
+#[cfg(windows)]
+fn common_to_platform_code(usage: HidUsage) -> u16 {
+    keymapper::platform::Key::from_hid_usage(usage)
+        .expect("every HidUsage has a VK code on Windows")
+        .as_native()
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,7 +1048,7 @@ fn e2e_comprehensive_config() {
     //    (injector -> daemon -> virtual device -> compositor -> monitor
     //    window) is live before running the real sequence.
     eprintln!("injecting canary key (Space)...");
-    inject_step(&*injector, &single_key_injection_step(Key::Space));
+    inject_step(&*injector, &single_key_injection_step(HidUsage::Space));
 
     // g2. Inject keys from the test sequence.
     eprintln!("injecting {} steps...", sequences.steps.len());
@@ -1063,7 +1081,7 @@ fn e2e_comprehensive_config() {
 
     // n. Assert the event log matches the expected sequence (canary + main
     //    sequence).
-    let mut expected_combined = passthrough_expected(Key::Space);
+    let mut expected_combined = passthrough_expected(HidUsage::Space);
     expected_combined.extend(sequences.expected);
     assert_events_match(
         &actual,
@@ -1075,6 +1093,107 @@ fn e2e_comprehensive_config() {
     dir_guard.remove();
 
     eprintln!("e2e_comprehensive_config PASSED");
+}
+
+/// Run an e2e test that remaps a Consumer Page key (`PlayPause`) to a
+/// standard Keyboard Page key (`A`).
+///
+/// This exercises the full Consumer Page input path: the injector emits a
+/// real evdev `KEY_PLAYPAUSE` event plus an `MSC_SCAN` carrying the HID
+/// usage `(0x0C << 16) | 0xCD`, the daemon resolves the usage from the scan
+/// code, matches the `PlayPause` trigger, and emits the mapped `A` output,
+/// which the monitor then captures.
+///
+/// Linux-only: the injector can only emit Consumer Page keys on Linux (via
+/// `MSC_SCAN` + `KEY_*`).  On macOS the CGEvent-based injector has no
+/// CGKeyCode for media keys, and on Windows the injection helper resolves
+/// through `Key::from_hid_usage`, which has no Consumer Page variants.
+///
+/// The reverse direction (mapping a physical key *to* `PlayPause`) cannot be
+/// verified end-to-end: the monitor is egui-based and egui has no media keys,
+/// so a Consumer Page output is never written to the event log.
+#[cfg(target_os = "linux")]
+#[test]
+fn e2e_consumer_key_remap() {
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: injector not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
+        return;
+    }
+
+    // a. Create temp directory.  The guard removes it on drop, even when
+    //    the test fails.  Declared first so it drops last: the daemon's
+    //    PID file (needed to stop it) lives in this directory.
+    let temp_dir = create_test_dir();
+    let mut dir_guard = TempDirGuard::new(temp_dir.clone());
+    eprintln!("test dir: {:?}", temp_dir);
+
+    // b. Write a config that remaps the Consumer Page `PlayPause` key to
+    //    the standard `A` key.
+    let config_out = temp_dir.join("config.yaml");
+    std::fs::write(
+        &config_out,
+        "- name: \"consumer remap\"\n  mappings:\n    PlayPause: A\n",
+    )
+    .expect("failed to write config");
+
+    // c. Create events log path.
+    let events_log = temp_dir.join("events.log");
+
+    // d. Start the monitor.
+    let mut monitor = start_monitor(&events_log);
+
+    // e. Create and setup the injector.
+    let mut injector = create_injector()
+        .expect("failed to create injector")
+        .expect("injector not available on this platform");
+    injector.setup().expect("failed to setup injector");
+
+    // f. Start the daemon.  The guard stops it on drop, even when the test
+    //    fails.
+    let mut daemon = start_daemon(&temp_dir);
+
+    // g. Inject the `PlayPause` key.  On Linux this emits `KEY_PLAYPAUSE`
+    //    plus an `MSC_SCAN` carrying the Consumer Page HID usage.
+    let step = single_key_injection_step(HidUsage::PlayPause);
+    eprintln!(
+        "injecting PlayPause: {:?} / {:?}",
+        step.keys_down, step.keys_up
+    );
+    inject_step(&*injector, &step);
+
+    // h. Stop the daemon.
+    daemon.stop();
+
+    // i. Stop the monitor.
+    monitor.kill();
+
+    // j. Teardown the injector.
+    injector.teardown();
+
+    // k. Parse the event log.
+    let actual = event_log::parse(&events_log).unwrap_or_else(|e| {
+        panic!("failed to parse event log {:?}: {e}", events_log)
+    });
+    eprintln!("captured {} events from log", actual.len());
+
+    // l. The daemon must have remapped `PlayPause` to `A`, so the monitor
+    //    captures a standard-key press+release.  If the remap failed, the
+    //    original `PlayPause` would be forwarded but never captured (egui
+    //    has no media keys), leaving the log empty.
+    let expected = vec![event_str("A", true), event_str("A", false)];
+    assert_events_match(
+        &actual,
+        &expected,
+        "event log does not match expected PlayPause -> A remap",
+    );
+
+    // m. Clean up.
+    dir_guard.remove();
+
+    eprintln!("e2e_consumer_key_remap PASSED");
 }
 
 /// Run the full e2e test with a hot-reload of the config.
@@ -1143,7 +1262,7 @@ fn e2e_config_hot_reload() {
 
     // g. Inject a canary key first to verify the full capture path is live.
     eprintln!("injecting canary key (Space)...");
-    inject_step(&*injector, &single_key_injection_step(Key::Space));
+    inject_step(&*injector, &single_key_injection_step(HidUsage::Space));
 
     // g2. Inject keys from phase 1 sequence.
     eprintln!(
@@ -1203,7 +1322,7 @@ fn e2e_config_hot_reload() {
     }
 
     // n. Build the combined expected sequence: canary + phase 1 + phase 2.
-    let mut expected_combined = passthrough_expected(Key::Space);
+    let mut expected_combined = passthrough_expected(HidUsage::Space);
     expected_combined.extend(sequences_phase1.expected.iter().cloned());
     expected_combined.extend(sequences_phase2.expected.iter().cloned());
 

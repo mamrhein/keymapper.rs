@@ -39,28 +39,11 @@ pub(crate) enum ModifierRole {
 }
 
 impl ModifierRole {
-    /// Returns the bit position for this modifier.
-    pub(crate) const fn bit(self) -> u8 {
-        self as u8
-    }
-
     /// Returns the bit mask (power of two) for this modifier.  Used on
     /// Windows to build the modifier state from `GetAsyncKeyState`.
     #[allow(dead_code)]
     pub(crate) const fn mask(self) -> u8 {
         1u8 << self as u8
-    }
-
-    /// Returns both bit positions for the modifier family (left and right).
-    ///
-    /// For `LeftControl` or `RightControl` this returns `(0, 1)`, etc.
-    pub(crate) const fn family_positions(self) -> (u8, u8) {
-        match self {
-            Self::LeftControl | Self::RightControl => (0, 1),
-            Self::LeftShift | Self::RightShift => (2, 3),
-            Self::LeftAlt | Self::RightAlt => (4, 5),
-            Self::LeftCommand | Self::RightCommand => (6, 7),
-        }
     }
 
     /// Try to create a `ModifierRole` from a bit position.  Returns `None`

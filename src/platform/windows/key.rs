@@ -9,7 +9,10 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::common::modifier::ModifierRole;
+use crate::common::{
+    hid_usage::{HidUsage, PAGE_CONSUMER, PAGE_KEYBOARD},
+    modifier::ModifierRole,
+};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the VK_* codes
@@ -121,6 +124,14 @@ pub enum Key {
     Grave = 0xC0,        // VK_OEM_3
     IsoExtra = 0xE2,     // VK_OEM_102 (between Shift and Z on ISO)
     IsoHash = 0xDF,      // VK_OEM_8
+    // --- Consumer page (media keys) ---
+    PlayPause = 0xB3,     // VK_MEDIA_PLAY_PAUSE
+    VolumeUp = 0xAF,      // VK_VOLUME_UP
+    VolumeDown = 0xAE,    // VK_VOLUME_DOWN
+    Mute = 0xAD,          // VK_VOLUME_MUTE
+    NextTrack = 0xB0,     // VK_MEDIA_NEXT_TRACK
+    PreviousTrack = 0xB1, // VK_MEDIA_PREV_TRACK
+    Stop = 0xB2,          // VK_MEDIA_STOP
 }
 
 impl Key {
@@ -159,117 +170,261 @@ impl Key {
         Some(vec![a, b])
     }
 
-    /// Convert a platform-agnostic common `Key` to the Windows-native variant.
+    /// Convert a `HidUsage` to the Windows-native variant.
     ///
-    /// Returns `None` for keys not supported on Windows
+    /// Only Keyboard/Keypad page usages with a native `Key` variant are
+    /// resolvable; Consumer Page usages (media keys) return `None` — use
+    /// [`hid_to_vk`] for those — as do usages without a `Key` variant
     /// (`NumpadClear`, `NumpadEqual`).
-    pub const fn from_common(key: crate::common::Key) -> Option<Self> {
-        Some(match key {
-            crate::common::Key::LeftControl => Self::LeftControl,
-            crate::common::Key::RightControl => Self::RightControl,
-            crate::common::Key::LeftShift => Self::LeftShift,
-            crate::common::Key::RightShift => Self::RightShift,
-            crate::common::Key::LeftAlt => Self::LeftAlt,
-            crate::common::Key::RightAlt => Self::RightAlt,
-            crate::common::Key::LeftCommand => Self::LeftCommand,
-            crate::common::Key::RightCommand => Self::RightCommand,
-            crate::common::Key::CapsLock => Self::CapsLock,
-            crate::common::Key::Tab => Self::Tab,
-            crate::common::Key::Space => Self::Space,
-            crate::common::Key::Return => Self::Return,
-            crate::common::Key::Backspace => Self::Backspace,
-            crate::common::Key::Delete => Self::Delete,
-            crate::common::Key::Escape => Self::Escape,
-            crate::common::Key::UpArrow => Self::UpArrow,
-            crate::common::Key::DownArrow => Self::DownArrow,
-            crate::common::Key::LeftArrow => Self::LeftArrow,
-            crate::common::Key::RightArrow => Self::RightArrow,
-            crate::common::Key::PageUp => Self::PageUp,
-            crate::common::Key::PageDown => Self::PageDown,
-            crate::common::Key::Home => Self::Home,
-            crate::common::Key::End => Self::End,
-            crate::common::Key::F1 => Self::F1,
-            crate::common::Key::F2 => Self::F2,
-            crate::common::Key::F3 => Self::F3,
-            crate::common::Key::F4 => Self::F4,
-            crate::common::Key::F5 => Self::F5,
-            crate::common::Key::F6 => Self::F6,
-            crate::common::Key::F7 => Self::F7,
-            crate::common::Key::F8 => Self::F8,
-            crate::common::Key::F9 => Self::F9,
-            crate::common::Key::F10 => Self::F10,
-            crate::common::Key::F11 => Self::F11,
-            crate::common::Key::F12 => Self::F12,
-            crate::common::Key::A => Self::A,
-            crate::common::Key::B => Self::B,
-            crate::common::Key::C => Self::C,
-            crate::common::Key::D => Self::D,
-            crate::common::Key::E => Self::E,
-            crate::common::Key::F => Self::F,
-            crate::common::Key::G => Self::G,
-            crate::common::Key::H => Self::H,
-            crate::common::Key::I => Self::I,
-            crate::common::Key::J => Self::J,
-            crate::common::Key::K => Self::K,
-            crate::common::Key::L => Self::L,
-            crate::common::Key::M => Self::M,
-            crate::common::Key::N => Self::N,
-            crate::common::Key::O => Self::O,
-            crate::common::Key::P => Self::P,
-            crate::common::Key::Q => Self::Q,
-            crate::common::Key::R => Self::R,
-            crate::common::Key::S => Self::S,
-            crate::common::Key::T => Self::T,
-            crate::common::Key::U => Self::U,
-            crate::common::Key::V => Self::V,
-            crate::common::Key::W => Self::W,
-            crate::common::Key::X => Self::X,
-            crate::common::Key::Y => Self::Y,
-            crate::common::Key::Z => Self::Z,
-            crate::common::Key::Number1 => Self::Number1,
-            crate::common::Key::Number2 => Self::Number2,
-            crate::common::Key::Number3 => Self::Number3,
-            crate::common::Key::Number4 => Self::Number4,
-            crate::common::Key::Number5 => Self::Number5,
-            crate::common::Key::Number6 => Self::Number6,
-            crate::common::Key::Number7 => Self::Number7,
-            crate::common::Key::Number8 => Self::Number8,
-            crate::common::Key::Number9 => Self::Number9,
-            crate::common::Key::Number0 => Self::Number0,
-            crate::common::Key::Numpad0 => Self::Numpad0,
-            crate::common::Key::Numpad1 => Self::Numpad1,
-            crate::common::Key::Numpad2 => Self::Numpad2,
-            crate::common::Key::Numpad3 => Self::Numpad3,
-            crate::common::Key::Numpad4 => Self::Numpad4,
-            crate::common::Key::Numpad5 => Self::Numpad5,
-            crate::common::Key::Numpad6 => Self::Numpad6,
-            crate::common::Key::Numpad7 => Self::Numpad7,
-            crate::common::Key::Numpad8 => Self::Numpad8,
-            crate::common::Key::Numpad9 => Self::Numpad9,
-            crate::common::Key::NumpadDecimal => Self::NumpadDecimal,
-            crate::common::Key::NumpadMultiply => Self::NumpadMultiply,
-            crate::common::Key::NumpadPlus => Self::NumpadPlus,
-            crate::common::Key::NumpadDivide => Self::NumpadDivide,
-            crate::common::Key::NumpadEnter => Self::NumpadEnter,
-            crate::common::Key::NumpadMinus => Self::NumpadMinus,
-            crate::common::Key::Minus => Self::Minus,
-            crate::common::Key::Equal => Self::Equal,
-            crate::common::Key::BracketLeft => Self::BracketLeft,
-            crate::common::Key::BracketRight => Self::BracketRight,
-            crate::common::Key::Backslash => Self::Backslash,
-            crate::common::Key::Semicolon => Self::Semicolon,
-            crate::common::Key::Quote => Self::Quote,
-            crate::common::Key::Comma => Self::Comma,
-            crate::common::Key::Period => Self::Period,
-            crate::common::Key::Slash => Self::Slash,
-            crate::common::Key::Grave => Self::Grave,
-            crate::common::Key::IsoExtra => Self::IsoExtra,
-            crate::common::Key::IsoHash => Self::IsoHash,
-            crate::common::Key::NumpadClear => return None,
-            crate::common::Key::NumpadEqual => return None,
+    pub fn from_hid_usage(usage: HidUsage) -> Option<Self> {
+        if usage.page() != PAGE_KEYBOARD {
+            return None;
+        }
+        Some(match usage {
+            HidUsage::LeftControl => Self::LeftControl,
+            HidUsage::RightControl => Self::RightControl,
+            HidUsage::LeftShift => Self::LeftShift,
+            HidUsage::RightShift => Self::RightShift,
+            HidUsage::LeftAlt => Self::LeftAlt,
+            HidUsage::RightAlt => Self::RightAlt,
+            HidUsage::LeftCommand => Self::LeftCommand,
+            HidUsage::RightCommand => Self::RightCommand,
+            HidUsage::CapsLock => Self::CapsLock,
+            HidUsage::Tab => Self::Tab,
+            HidUsage::Space => Self::Space,
+            HidUsage::Return => Self::Return,
+            HidUsage::Backspace => Self::Backspace,
+            HidUsage::Delete => Self::Delete,
+            HidUsage::Escape => Self::Escape,
+            HidUsage::UpArrow => Self::UpArrow,
+            HidUsage::DownArrow => Self::DownArrow,
+            HidUsage::LeftArrow => Self::LeftArrow,
+            HidUsage::RightArrow => Self::RightArrow,
+            HidUsage::PageUp => Self::PageUp,
+            HidUsage::PageDown => Self::PageDown,
+            HidUsage::Home => Self::Home,
+            HidUsage::End => Self::End,
+            HidUsage::F1 => Self::F1,
+            HidUsage::F2 => Self::F2,
+            HidUsage::F3 => Self::F3,
+            HidUsage::F4 => Self::F4,
+            HidUsage::F5 => Self::F5,
+            HidUsage::F6 => Self::F6,
+            HidUsage::F7 => Self::F7,
+            HidUsage::F8 => Self::F8,
+            HidUsage::F9 => Self::F9,
+            HidUsage::F10 => Self::F10,
+            HidUsage::F11 => Self::F11,
+            HidUsage::F12 => Self::F12,
+            HidUsage::A => Self::A,
+            HidUsage::B => Self::B,
+            HidUsage::C => Self::C,
+            HidUsage::D => Self::D,
+            HidUsage::E => Self::E,
+            HidUsage::F => Self::F,
+            HidUsage::G => Self::G,
+            HidUsage::H => Self::H,
+            HidUsage::I => Self::I,
+            HidUsage::J => Self::J,
+            HidUsage::K => Self::K,
+            HidUsage::L => Self::L,
+            HidUsage::M => Self::M,
+            HidUsage::N => Self::N,
+            HidUsage::O => Self::O,
+            HidUsage::P => Self::P,
+            HidUsage::Q => Self::Q,
+            HidUsage::R => Self::R,
+            HidUsage::S => Self::S,
+            HidUsage::T => Self::T,
+            HidUsage::U => Self::U,
+            HidUsage::V => Self::V,
+            HidUsage::W => Self::W,
+            HidUsage::X => Self::X,
+            HidUsage::Y => Self::Y,
+            HidUsage::Z => Self::Z,
+            HidUsage::Number1 => Self::Number1,
+            HidUsage::Number2 => Self::Number2,
+            HidUsage::Number3 => Self::Number3,
+            HidUsage::Number4 => Self::Number4,
+            HidUsage::Number5 => Self::Number5,
+            HidUsage::Number6 => Self::Number6,
+            HidUsage::Number7 => Self::Number7,
+            HidUsage::Number8 => Self::Number8,
+            HidUsage::Number9 => Self::Number9,
+            HidUsage::Number0 => Self::Number0,
+            HidUsage::Numpad0 => Self::Numpad0,
+            HidUsage::Numpad1 => Self::Numpad1,
+            HidUsage::Numpad2 => Self::Numpad2,
+            HidUsage::Numpad3 => Self::Numpad3,
+            HidUsage::Numpad4 => Self::Numpad4,
+            HidUsage::Numpad5 => Self::Numpad5,
+            HidUsage::Numpad6 => Self::Numpad6,
+            HidUsage::Numpad7 => Self::Numpad7,
+            HidUsage::Numpad8 => Self::Numpad8,
+            HidUsage::Numpad9 => Self::Numpad9,
+            HidUsage::NumpadDecimal => Self::NumpadDecimal,
+            HidUsage::NumpadMultiply => Self::NumpadMultiply,
+            HidUsage::NumpadPlus => Self::NumpadPlus,
+            HidUsage::NumpadDivide => Self::NumpadDivide,
+            HidUsage::NumpadEnter => Self::NumpadEnter,
+            HidUsage::NumpadMinus => Self::NumpadMinus,
+            HidUsage::Minus => Self::Minus,
+            HidUsage::Equal => Self::Equal,
+            HidUsage::BracketLeft => Self::BracketLeft,
+            HidUsage::BracketRight => Self::BracketRight,
+            HidUsage::Backslash => Self::Backslash,
+            HidUsage::Semicolon => Self::Semicolon,
+            HidUsage::Quote => Self::Quote,
+            HidUsage::Comma => Self::Comma,
+            HidUsage::Period => Self::Period,
+            HidUsage::Slash => Self::Slash,
+            HidUsage::Grave => Self::Grave,
+            HidUsage::IsoExtra => Self::IsoExtra,
+            HidUsage::IsoHash => Self::IsoHash,
+            // NumpadClear, NumpadEqual, and all consumer page usages have
+            // no native variant.
+            _ => return None,
         })
     }
 
+    /// Convert the Windows-native variant to its `HidUsage`.
+    ///
+    /// Every `Key` variant maps to a HID usage — keyboard-page variants to
+    /// their Keyboard/Keypad usage and media variants to their Consumer
+    /// Page usage — so this never fails.
+    pub fn to_hid_usage(self) -> HidUsage {
+        match self {
+            Self::LeftControl => HidUsage::LeftControl,
+            Self::RightControl => HidUsage::RightControl,
+            Self::LeftShift => HidUsage::LeftShift,
+            Self::RightShift => HidUsage::RightShift,
+            Self::LeftAlt => HidUsage::LeftAlt,
+            Self::RightAlt => HidUsage::RightAlt,
+            Self::LeftCommand => HidUsage::LeftCommand,
+            Self::RightCommand => HidUsage::RightCommand,
+            Self::CapsLock => HidUsage::CapsLock,
+            Self::Tab => HidUsage::Tab,
+            Self::Space => HidUsage::Space,
+            Self::Return => HidUsage::Return,
+            Self::Backspace => HidUsage::Backspace,
+            Self::Delete => HidUsage::Delete,
+            Self::Escape => HidUsage::Escape,
+            Self::UpArrow => HidUsage::UpArrow,
+            Self::DownArrow => HidUsage::DownArrow,
+            Self::LeftArrow => HidUsage::LeftArrow,
+            Self::RightArrow => HidUsage::RightArrow,
+            Self::PageUp => HidUsage::PageUp,
+            Self::PageDown => HidUsage::PageDown,
+            Self::Home => HidUsage::Home,
+            Self::End => HidUsage::End,
+            Self::F1 => HidUsage::F1,
+            Self::F2 => HidUsage::F2,
+            Self::F3 => HidUsage::F3,
+            Self::F4 => HidUsage::F4,
+            Self::F5 => HidUsage::F5,
+            Self::F6 => HidUsage::F6,
+            Self::F7 => HidUsage::F7,
+            Self::F8 => HidUsage::F8,
+            Self::F9 => HidUsage::F9,
+            Self::F10 => HidUsage::F10,
+            Self::F11 => HidUsage::F11,
+            Self::F12 => HidUsage::F12,
+            Self::A => HidUsage::A,
+            Self::B => HidUsage::B,
+            Self::C => HidUsage::C,
+            Self::D => HidUsage::D,
+            Self::E => HidUsage::E,
+            Self::F => HidUsage::F,
+            Self::G => HidUsage::G,
+            Self::H => HidUsage::H,
+            Self::I => HidUsage::I,
+            Self::J => HidUsage::J,
+            Self::K => HidUsage::K,
+            Self::L => HidUsage::L,
+            Self::M => HidUsage::M,
+            Self::N => HidUsage::N,
+            Self::O => HidUsage::O,
+            Self::P => HidUsage::P,
+            Self::Q => HidUsage::Q,
+            Self::R => HidUsage::R,
+            Self::S => HidUsage::S,
+            Self::T => HidUsage::T,
+            Self::U => HidUsage::U,
+            Self::V => HidUsage::V,
+            Self::W => HidUsage::W,
+            Self::X => HidUsage::X,
+            Self::Y => HidUsage::Y,
+            Self::Z => HidUsage::Z,
+            Self::Number1 => HidUsage::Number1,
+            Self::Number2 => HidUsage::Number2,
+            Self::Number3 => HidUsage::Number3,
+            Self::Number4 => HidUsage::Number4,
+            Self::Number5 => HidUsage::Number5,
+            Self::Number6 => HidUsage::Number6,
+            Self::Number7 => HidUsage::Number7,
+            Self::Number8 => HidUsage::Number8,
+            Self::Number9 => HidUsage::Number9,
+            Self::Number0 => HidUsage::Number0,
+            Self::Numpad0 => HidUsage::Numpad0,
+            Self::Numpad1 => HidUsage::Numpad1,
+            Self::Numpad2 => HidUsage::Numpad2,
+            Self::Numpad3 => HidUsage::Numpad3,
+            Self::Numpad4 => HidUsage::Numpad4,
+            Self::Numpad5 => HidUsage::Numpad5,
+            Self::Numpad6 => HidUsage::Numpad6,
+            Self::Numpad7 => HidUsage::Numpad7,
+            Self::Numpad8 => HidUsage::Numpad8,
+            Self::Numpad9 => HidUsage::Numpad9,
+            Self::NumpadDecimal => HidUsage::NumpadDecimal,
+            Self::NumpadMultiply => HidUsage::NumpadMultiply,
+            Self::NumpadPlus => HidUsage::NumpadPlus,
+            Self::NumpadDivide => HidUsage::NumpadDivide,
+            Self::NumpadEnter => HidUsage::NumpadEnter,
+            Self::NumpadMinus => HidUsage::NumpadMinus,
+            Self::Minus => HidUsage::Minus,
+            Self::Equal => HidUsage::Equal,
+            Self::BracketLeft => HidUsage::BracketLeft,
+            Self::BracketRight => HidUsage::BracketRight,
+            Self::Backslash => HidUsage::Backslash,
+            Self::Semicolon => HidUsage::Semicolon,
+            Self::Quote => HidUsage::Quote,
+            Self::Comma => HidUsage::Comma,
+            Self::Period => HidUsage::Period,
+            Self::Slash => HidUsage::Slash,
+            Self::Grave => HidUsage::Grave,
+            Self::IsoExtra => HidUsage::IsoExtra,
+            Self::IsoHash => HidUsage::IsoHash,
+            Self::PlayPause => HidUsage::PlayPause,
+            Self::VolumeUp => HidUsage::VolumeUp,
+            Self::VolumeDown => HidUsage::VolumeDown,
+            Self::Mute => HidUsage::Mute,
+            Self::NextTrack => HidUsage::NextTrack,
+            Self::PreviousTrack => HidUsage::PreviousTrack,
+            Self::Stop => HidUsage::Stop,
+        }
+    }
+}
+
+/// Map a Consumer Page HID usage to the Windows virtual-key code used for
+/// emission via `SendInput`.
+///
+/// Keyboard page usages have no entry here; use [`Key::from_hid_usage`]
+/// for those.  Brightness keys have no standard virtual key, so they
+/// return `None`.
+pub fn hid_to_vk(usage: HidUsage) -> Option<u16> {
+    match (usage.page(), usage.id()) {
+        (PAGE_CONSUMER, 0xCD) => Some(0xB3), // VK_MEDIA_PLAY_PAUSE
+        (PAGE_CONSUMER, 0xE9) => Some(0xAF), // VK_VOLUME_UP
+        (PAGE_CONSUMER, 0xEA) => Some(0xAE), // VK_VOLUME_DOWN
+        (PAGE_CONSUMER, 0xE2) => Some(0xAD), // VK_VOLUME_MUTE
+        (PAGE_CONSUMER, 0xB5) => Some(0xB0), // VK_MEDIA_NEXT_TRACK
+        (PAGE_CONSUMER, 0xB6) => Some(0xB1), // VK_MEDIA_PREV_TRACK
+        (PAGE_CONSUMER, 0xB7) => Some(0xB2), // VK_MEDIA_STOP
+        _ => None,
+    }
+}
+
+impl Key {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::LeftControl => "LeftControl",
@@ -374,11 +529,18 @@ impl Key {
             Self::Grave => "Grave",
             Self::IsoExtra => "IsoExtra",
             Self::IsoHash => "IsoHash",
+            Self::PlayPause => "PlayPause",
+            Self::VolumeUp => "VolumeUp",
+            Self::VolumeDown => "VolumeDown",
+            Self::Mute => "Mute",
+            Self::NextTrack => "NextTrack",
+            Self::PreviousTrack => "PreviousTrack",
+            Self::Stop => "Stop",
         }
     }
 
     /// All defined key variants.
-    pub const ALL: [Self; 100] = [
+    pub const ALL: [Self; 107] = [
         // Modifiers
         Self::LeftControl,
         Self::RightControl,
@@ -487,6 +649,14 @@ impl Key {
         Self::Grave,
         Self::IsoExtra,
         Self::IsoHash,
+        // Consumer page (media keys)
+        Self::PlayPause,
+        Self::VolumeUp,
+        Self::VolumeDown,
+        Self::Mute,
+        Self::NextTrack,
+        Self::PreviousTrack,
+        Self::Stop,
     ];
 
     /// Convert a native virtual-key code back to a Key variant.
@@ -594,6 +764,13 @@ impl Key {
             0xC0 => Some(Self::Grave),
             0xE2 => Some(Self::IsoExtra),
             0xDF => Some(Self::IsoHash),
+            0xB3 => Some(Self::PlayPause),
+            0xAF => Some(Self::VolumeUp),
+            0xAE => Some(Self::VolumeDown),
+            0xAD => Some(Self::Mute),
+            0xB0 => Some(Self::NextTrack),
+            0xB1 => Some(Self::PreviousTrack),
+            0xB2 => Some(Self::Stop),
             _ => None,
         }
     }
@@ -708,6 +885,14 @@ impl Key {
             "Grave" => Some(Self::Grave),
             "IsoExtra" => Some(Self::IsoExtra),
             "IsoHash" => Some(Self::IsoHash),
+            // Consumer page (media keys)
+            "PlayPause" | "Play" => Some(Self::PlayPause),
+            "VolumeUp" | "VolUp" => Some(Self::VolumeUp),
+            "VolumeDown" | "VolDown" => Some(Self::VolumeDown),
+            "Mute" | "VolMute" => Some(Self::Mute),
+            "NextTrack" | "ScanNext" => Some(Self::NextTrack),
+            "PreviousTrack" | "ScanPrev" => Some(Self::PreviousTrack),
+            "Stop" | "MediaStop" => Some(Self::Stop),
             _ => None,
         }
     }
@@ -729,7 +914,92 @@ impl<'de> Deserialize<'de> for Key {
     {
         let s = String::deserialize(deserializer)?;
         Self::try_from_str(&s).ok_or_else(|| {
-            serde::de::Error::custom(crate::common::key::unknown_key_error(&s))
+            serde::de::Error::custom(
+                crate::common::hid_usage::unknown_key_error(&s),
+            )
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_hid_usage_round_trips_for_all_variants() {
+        // Every Key variant converts to a HidUsage whose reverse lookup
+        // yields the original variant, except consumer variants which
+        // resolve through hid_to_vk instead of from_hid_usage.
+        for key in Key::ALL {
+            let usage = key.to_hid_usage();
+            if usage.page() == PAGE_KEYBOARD {
+                assert_eq!(
+                    Key::from_hid_usage(usage),
+                    Some(key),
+                    "round-trip failed for {:?}",
+                    key
+                );
+            } else {
+                assert_eq!(Key::from_hid_usage(usage), None);
+                assert!(
+                    hid_to_vk(usage).is_some(),
+                    "no VK for consumer variant {:?}",
+                    key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn from_hid_usage_returns_none_for_consumer_page() {
+        assert_eq!(Key::from_hid_usage(HidUsage::PlayPause), None);
+        assert_eq!(Key::from_hid_usage(HidUsage::VolumeUp), None);
+        assert_eq!(Key::from_hid_usage(HidUsage::Mute), None);
+    }
+
+    #[test]
+    fn from_hid_usage_returns_none_for_unsupported_keyboard_keys() {
+        // NumpadClear and NumpadEqual have no VK_* equivalent.
+        assert_eq!(Key::from_hid_usage(HidUsage::NumpadClear), None);
+        assert_eq!(Key::from_hid_usage(HidUsage::NumpadEqual), None);
+    }
+
+    #[test]
+    fn hid_to_vk_maps_consumer_usages() {
+        assert_eq!(hid_to_vk(HidUsage::PlayPause), Some(0xB3));
+        assert_eq!(hid_to_vk(HidUsage::VolumeUp), Some(0xAF));
+        assert_eq!(hid_to_vk(HidUsage::VolumeDown), Some(0xAE));
+        assert_eq!(hid_to_vk(HidUsage::Mute), Some(0xAD));
+        assert_eq!(hid_to_vk(HidUsage::NextTrack), Some(0xB0));
+        assert_eq!(hid_to_vk(HidUsage::PreviousTrack), Some(0xB1));
+        assert_eq!(hid_to_vk(HidUsage::Stop), Some(0xB2));
+    }
+
+    #[test]
+    fn hid_to_vk_returns_none_for_keyboard_page() {
+        assert_eq!(hid_to_vk(HidUsage::A), None);
+        assert_eq!(hid_to_vk(HidUsage::CapsLock), None);
+    }
+
+    #[test]
+    fn hid_to_vk_returns_none_for_brightness_keys() {
+        // Brightness keys have no standard virtual key.
+        assert_eq!(hid_to_vk(HidUsage::BrightnessUp), None);
+        assert_eq!(hid_to_vk(HidUsage::BrightnessDown), None);
+    }
+
+    #[test]
+    fn from_native_recognises_media_keys() {
+        assert_eq!(Key::from_native(0xB3), Some(Key::PlayPause));
+        assert_eq!(Key::from_native(0xAF), Some(Key::VolumeUp));
+        assert_eq!(Key::from_native(0xAE), Some(Key::VolumeDown));
+        assert_eq!(Key::from_native(0xAD), Some(Key::Mute));
+        assert_eq!(Key::from_native(0xB0), Some(Key::NextTrack));
+        assert_eq!(Key::from_native(0xB1), Some(Key::PreviousTrack));
+        assert_eq!(Key::from_native(0xB2), Some(Key::Stop));
     }
 }

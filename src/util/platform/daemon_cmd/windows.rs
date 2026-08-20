@@ -60,16 +60,18 @@ pub fn spawn_daemon(
     // CREATE_NO_WINDOW suppresses the console window for console applications.
     let result = unsafe {
         CreateProcessW(
-            None,               // lpApplicationName — parse from the command line.
+            None,               /* lpApplicationName — parse from the
+                                 * command line. */
             Some(command_line), // lpCommandLine
             None,               // lpProcessAttributes
             None,               // lpThreadAttributes
-            true,               // bInheritHandles — let the daemon inherit our
+            true,               /* bInheritHandles — let the daemon inherit
+                                 * our */
             // handles.
             CREATE_NO_WINDOW, // dwCreationFlags
             None,             // lpEnvironment
             current_dir,      // lpCurrentDirectory
-            &mut si,          // lpStartupInfo
+            &si,              // lpStartupInfo
             &mut pi,          // lpProcessInformation
         )
     };

@@ -18,8 +18,6 @@ use std::{
     ptr::{self, NonNull},
 };
 
-use objc2_core_graphics::CGKeyCode;
-
 // ---------------------------------------------------------------------------
 // IOKit FFI declarations (linked via IOKit framework)
 // ---------------------------------------------------------------------------
@@ -178,6 +176,16 @@ impl HidFunctions {
             && cached.send_report.is_some()
             && cached.close.is_some()
     }
+
+    /// Return the resolved function pointers.
+    ///
+    /// Panics if resolution failed. Callers must ensure `resolve()` succeeded
+    /// before calling this.
+    fn get() -> &'static Self {
+        HID_FUNCS
+            .get()
+            .expect("HID functions not resolved. Call resolve() first.")
+    }
 }
 
 /// Default vendor/product IDs used by the DriverKit virtual keyboard.
@@ -201,8 +209,8 @@ pub enum HidSocketError {
     SocketOpenFailed(u32),
     /// Failed to send an HID report through the socket.
     SendFailed(u32),
-    /// The given `CGKeyCode` has no known USB HID usage code.
-    UnknownKeycode(CGKeyCode),
+    /// Consumer Page usage has no mapping to a consumer report.
+    UnknownConsumerUsage(u16),
 }
 
 impl std::fmt::Display for HidSocketError {
@@ -232,8 +240,12 @@ impl std::fmt::Display for HidSocketError {
                      {status:#x}"
                 )
             }
-            Self::UnknownKeycode(code) => {
-                write!(f, "no USB HID usage code for CGKeyCode {code}")
+            Self::UnknownConsumerUsage(usage) => {
+                write!(
+                    f,
+                    "no consumer report mapping for Consumer Page usage \
+                     {usage:#x}"
+                )
             }
         }
     }
@@ -396,155 +408,11 @@ impl HidSocket {
 
 impl Drop for HidSocket {
     fn drop(&mut self) {
-        let functions = HID_FUNCS.get().expect("HID functions not resolved");
         unsafe {
-            (functions.close.unwrap())(self.socket.as_ptr());
+            let close = HidFunctions::get().close
+                .expect("HID functions not resolved");
+            close(self.socket.as_ptr());
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// CGKeyCode → USB HID usage code mapping
-// ---------------------------------------------------------------------------
-
-/// Map a macOS `CGKeyCode` to its USB HID Keyboard/Keypad usage code.
-///
-/// Derived from the USB HID Usage Tables v1.21 (page 53–60) cross-referenced
-/// with Apple's `ev_keymap.h` virtual key constants.  Returns
-/// [`HidSocketError::UnknownKeycode`] for keys without a known HID usage.
-pub fn cg_keycode_to_usb_hid(code: CGKeyCode) -> Result<u8, HidSocketError> {
-    // Clippy discourages huge match expressions, but a lookup table here is
-    // the most efficient and correct approach.
-    // Values derived from: Key enum CGKeyCode → HID Usage Tables page 53–60.
-    #[allow(clippy::too_many_lines)]
-    match code {
-        // --- Letters (CGKeyCode from Key enum, HID from USB spec) ---
-        0 => Ok(0x04),  // A
-        1 => Ok(0x16),  // S
-        2 => Ok(0x07),  // D
-        3 => Ok(0x09),  // F
-        4 => Ok(0x0B),  // H
-        5 => Ok(0x0A),  // G
-        6 => Ok(0x1D),  // Z
-        7 => Ok(0x1B),  // X
-        8 => Ok(0x06),  // C
-        9 => Ok(0x19),  // V
-        10 => Ok(0x63), // IsoExtra (\ | on ISO keyboards)
-        11 => Ok(0x05), // B
-        12 => Ok(0x14), // Q
-        13 => Ok(0x1A), // W
-        14 => Ok(0x08), // E
-        15 => Ok(0x15), // R
-        16 => Ok(0x1C), // Y
-        17 => Ok(0x17), // T
-        31 => Ok(0x12), // O
-        32 => Ok(0x18), // U
-        34 => Ok(0x0C), // I
-        35 => Ok(0x13), // P
-        37 => Ok(0x0F), // L
-        38 => Ok(0x0D), // J
-        40 => Ok(0x0E), // K
-        41 => Ok(0x33), // Semicolon
-        45 => Ok(0x11), // N
-        46 => Ok(0x10), // M
-
-        // --- Numbers ---
-        18 => Ok(0x1E), // 1
-        19 => Ok(0x1F), // 2
-        20 => Ok(0x20), // 3
-        21 => Ok(0x21), // 4
-        23 => Ok(0x22), // 5
-        22 => Ok(0x23), // 6
-        26 => Ok(0x24), // 7
-        28 => Ok(0x25), // 8
-        25 => Ok(0x26), // 9
-        29 => Ok(0x27), // 0
-
-        // --- Edit / navigation ---
-        36 => Ok(0x28),  // Return
-        51 => Ok(0x2A),  // Backspace
-        53 => Ok(0x29),  // Escape
-        48 => Ok(0x2B),  // Tab
-        49 => Ok(0x2C),  // Space
-        117 => Ok(0x4C), // ForwardDelete (HID Clear)
-
-        // --- Modifier keys ---
-        59 => Ok(0xE0), // LeftControl
-        62 => Ok(0xE1), // RightControl
-        56 => Ok(0xE2), // LeftShift
-        60 => Ok(0xE3), // RightShift
-        58 => Ok(0xE4), // LeftAlt (Option)
-        61 => Ok(0xE5), // RightAlt (Right Option)
-        55 => Ok(0xE6), // LeftCommand
-        54 => Ok(0xE7), // RightCommand
-        57 => Ok(0x39), // CapsLock (Keyboard Locking Caps Lock)
-
-        // --- Function keys ---
-        122 => Ok(0x3A), // F1
-        120 => Ok(0x3B), // F2
-        99 => Ok(0x3C),  // F3
-        118 => Ok(0x3D), // F4
-        96 => Ok(0x3E),  // F5
-        97 => Ok(0x3F),  // F6
-        98 => Ok(0x40),  // F7
-        100 => Ok(0x41), // F8
-        101 => Ok(0x42), // F9
-        109 => Ok(0x43), // F10
-        103 => Ok(0x44), // F11
-        111 => Ok(0x45), // F12
-
-        // --- Navigation cluster ---
-        115 => Ok(0x4A), // Home
-        119 => Ok(0x4D), // End
-        116 => Ok(0x4E), // PageUp
-        121 => Ok(0x4F), // PageDown
-        126 => Ok(0x52), // UpArrow
-        125 => Ok(0x51), // DownArrow
-        123 => Ok(0x50), // LeftArrow
-        124 => Ok(0x4B), // RightArrow
-
-        // --- Punctuation / symbols ---
-        27 => Ok(0x2D), // Minus (-)
-        24 => Ok(0x2F), // Equal (=)
-        33 => Ok(0x31), // BracketLeft ([)
-        30 => Ok(0x32), // BracketRight (])
-        42 => Ok(0x31), // Backslash (\)
-        39 => Ok(0x34), // Quote (' )
-        50 => Ok(0x35), // Grave (` ~, HID Non-US # & ~)
-        43 => Ok(0x36), // Comma (,)
-        47 => Ok(0x38), // Period (.)
-        44 => Ok(0x37), // Slash (/)
-
-        // --- Numpad ---
-        82 => Ok(0x52), // Numpad0 (Keypad 0)
-        83 => Ok(0x53), // Numpad1 (Keypad 1)
-        84 => Ok(0x54), // Numpad2 (Keypad 2)
-        85 => Ok(0x55), // Numpad3 (Keypad 3)
-        86 => Ok(0x56), // Numpad4 (Keypad 4)
-        87 => Ok(0x57), // Numpad5 (Keypad 5)
-        88 => Ok(0x58), // Numpad6 (Keypad 6)
-        89 => Ok(0x59), // Numpad7 (Keypad 7)
-        91 => Ok(0x5A), // Numpad8 (Keypad 8)
-        92 => Ok(0x5B), // Numpad9 (Keypad 9)
-        65 => Ok(0x63), // NumpadDecimal (Keypad .)
-        75 => Ok(0x55), // NumpadMultiply (Keypad *)
-        69 => Ok(0x5E), // NumpadPlus (Keypad +)
-        71 => Ok(0x47), // NumpadClear (Keypad Clear)
-        73 => Ok(0x54), // NumpadDivide (Keypad /)
-        76 => Ok(0x58), // NumpadEnter (Keypad Enter)
-        78 => Ok(0x56), // NumpadMinus (Keypad -)
-        90 => Ok(0x59), // NumpadEqual (Keypad =)
-
-        // --- Extended function keys (F13–F20) ---
-        105 => Ok(0x68), // F13 (Execute)
-        107 => Ok(0x69), // F14 (Help)
-        113 => Ok(0x6A), // F15 (Menu / Select)
-        106 => Ok(0x6B), // F16 (Stop)
-        110 => Ok(0x6C), // F17 (Again / Undo)
-        104 => Ok(0x6D), // F18 (Find / Open)
-        102 => Ok(0x6E), // F19 (Cut)
-
-        _ => Err(HidSocketError::UnknownKeycode(code)),
     }
 }
 
@@ -587,21 +455,72 @@ pub fn modifier_to_hid(modifiers: u8) -> u8 {
 /// - Byte 2: Reserved (always 0)
 /// - Bytes 3–8: Key codes (6 slots; 0x00 = no key pressed)
 ///
-/// For a key-down event, the USB HID usage code is placed in slot 0
+/// For a key-down event, the raw USB HID usage byte is placed in slot 0
 /// (byte 3).  For a key-up event, all key slots are cleared to zero.
 pub fn build_keyboard_report(
     modifiers: u8,
-    code: Option<CGKeyCode>,
+    code: Option<u8>,
 ) -> Result<[u8; 9], HidSocketError> {
     let mut report = [0u8; 9];
     report[0] = 1; // Report ID
     report[1] = modifier_to_hid(modifiers);
 
-    if let Some(key_code) = code {
-        report[3] = cg_keycode_to_usb_hid(key_code)?;
+    if let Some(usage_byte) = code {
+        report[3] = usage_byte;
     }
 
     Ok(report)
+}
+
+/// Build a Consumer Page HID report for media/display control keys.
+///
+/// Constructs a raw HID report matching the Consumer Page collection
+/// declared in the DriverKit descriptor.  Report format:
+/// `[report_id=2, press_lo, press_hi, release_lo, release_hi]` for two
+/// 16-bit usage fields (press and release).
+///
+/// The usage is placed in the press field; the release field is left zero.
+/// To release the key, send an all-clear report (see
+/// [`build_consumer_release_report`]).
+///
+/// Returns [`HidSocketError::UnknownConsumerUsage`] for usages without
+/// a known mapping.
+pub fn build_consumer_report(
+    usage_id: u16,
+) -> Result<[u8; 5], HidSocketError> {
+    // Validate that the usage_id is a known Consumer Page usage.
+    // This check ensures we only send valid consumer controls to the
+    // DriverKit driver.
+    match usage_id {
+        // Media controls
+        0xCD | // Play/Pause
+        0xE9 | // Volume Up
+        0xEA | // Volume Down
+        0xE2 | // Mute
+        0xB5 | // Next Track
+        0xB6 | // Previous Track
+        0xB7 | // Stop
+        // Display controls
+        0x6F | // Brightness Up
+        0x70 => Ok(()), // Brightness Down
+        _ => Err(HidSocketError::UnknownConsumerUsage(usage_id)),
+    }?;
+
+    let mut report = [0u8; 5];
+    report[0] = 2; // Report ID for consumer page
+    report[1] = (usage_id & 0xFF) as u8; // Press field, low byte
+    report[2] = ((usage_id >> 8) & 0xFF) as u8; // Press field, high byte
+    // Release field (bytes 3--4) stays zero.
+
+    Ok(report)
+}
+
+/// Build an all-clear Consumer Page HID report to release a consumer key.
+///
+/// Report format: `[report_id=2, 0, 0, 0, 0]` — both the press and release
+/// 16-bit usage fields are zero, which releases any held consumer key.
+pub fn build_consumer_release_report() -> [u8; 5] {
+    [2, 0, 0, 0, 0]
 }
 
 // ---------------------------------------------------------------------------
@@ -640,162 +559,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // CGKeyCode -> USB HID mapping: spot checks per category
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_letter_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(0).unwrap(), 0x04); // A
-        assert_eq!(cg_keycode_to_usb_hid(6).unwrap(), 0x1D); // Z
-        assert_eq!(cg_keycode_to_usb_hid(12).unwrap(), 0x14); // Q
-        assert_eq!(cg_keycode_to_usb_hid(13).unwrap(), 0x1A); // W
-        assert_eq!(cg_keycode_to_usb_hid(46).unwrap(), 0x10); // M
-        assert_eq!(cg_keycode_to_usb_hid(31).unwrap(), 0x12); // O
-    }
-
-    #[test]
-    fn test_number_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(18).unwrap(), 0x1E); // Number1
-        assert_eq!(cg_keycode_to_usb_hid(29).unwrap(), 0x27); // Number0
-        assert_eq!(cg_keycode_to_usb_hid(20).unwrap(), 0x20); // Number3
-    }
-
-    #[test]
-    fn test_modifier_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(59).unwrap(), 0xE0); // LeftControl
-        assert_eq!(cg_keycode_to_usb_hid(62).unwrap(), 0xE1); // RightControl
-        assert_eq!(cg_keycode_to_usb_hid(56).unwrap(), 0xE2); // LeftShift
-        assert_eq!(cg_keycode_to_usb_hid(60).unwrap(), 0xE3); // RightShift
-        assert_eq!(cg_keycode_to_usb_hid(58).unwrap(), 0xE4); // LeftAlt
-        assert_eq!(cg_keycode_to_usb_hid(61).unwrap(), 0xE5); // RightAlt
-        assert_eq!(cg_keycode_to_usb_hid(55).unwrap(), 0xE6); // LeftCommand
-        assert_eq!(cg_keycode_to_usb_hid(54).unwrap(), 0xE7); // RightCommand
-        assert_eq!(cg_keycode_to_usb_hid(57).unwrap(), 0x39); // CapsLock
-    }
-
-    #[test]
-    fn test_arrow_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(126).unwrap(), 0x52); // UpArrow
-        assert_eq!(cg_keycode_to_usb_hid(125).unwrap(), 0x51); // DownArrow
-        assert_eq!(cg_keycode_to_usb_hid(123).unwrap(), 0x50); // LeftArrow
-        assert_eq!(cg_keycode_to_usb_hid(124).unwrap(), 0x4B); // RightArrow
-    }
-
-    #[test]
-    fn test_function_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(122).unwrap(), 0x3A); // F1
-        assert_eq!(cg_keycode_to_usb_hid(111).unwrap(), 0x45); // F12
-        assert_eq!(cg_keycode_to_usb_hid(96).unwrap(), 0x3E); // F5
-    }
-
-    #[test]
-    fn test_navigation_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(36).unwrap(), 0x28); // Return
-        assert_eq!(cg_keycode_to_usb_hid(51).unwrap(), 0x2A); // Backspace
-        assert_eq!(cg_keycode_to_usb_hid(53).unwrap(), 0x29); // Escape
-        assert_eq!(cg_keycode_to_usb_hid(48).unwrap(), 0x2B); // Tab
-        assert_eq!(cg_keycode_to_usb_hid(49).unwrap(), 0x2C); // Space
-        assert_eq!(cg_keycode_to_usb_hid(115).unwrap(), 0x4A); // Home
-        assert_eq!(cg_keycode_to_usb_hid(119).unwrap(), 0x4D); // End
-        assert_eq!(cg_keycode_to_usb_hid(116).unwrap(), 0x4E); // PageUp
-        assert_eq!(cg_keycode_to_usb_hid(121).unwrap(), 0x4F); // PageDown
-    }
-
-    #[test]
-    fn test_punctuation_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(27).unwrap(), 0x2D); // Minus
-        assert_eq!(cg_keycode_to_usb_hid(24).unwrap(), 0x2F); // Equal
-        assert_eq!(cg_keycode_to_usb_hid(33).unwrap(), 0x31); // [
-        assert_eq!(cg_keycode_to_usb_hid(30).unwrap(), 0x32); // ]
-        assert_eq!(cg_keycode_to_usb_hid(41).unwrap(), 0x33); // ;
-        assert_eq!(cg_keycode_to_usb_hid(43).unwrap(), 0x36); // ,
-        assert_eq!(cg_keycode_to_usb_hid(47).unwrap(), 0x38); // .
-        assert_eq!(cg_keycode_to_usb_hid(44).unwrap(), 0x37); // /
-    }
-
-    #[test]
-    fn test_numpad_keycodes() {
-        assert_eq!(cg_keycode_to_usb_hid(83).unwrap(), 0x53); // Numpad1
-        assert_eq!(cg_keycode_to_usb_hid(92).unwrap(), 0x5B); // Numpad9
-        assert_eq!(cg_keycode_to_usb_hid(69).unwrap(), 0x5E); // NumpadPlus
-        assert_eq!(cg_keycode_to_usb_hid(76).unwrap(), 0x58); // NumpadEnter
-    }
-
-    #[test]
-    fn test_unknown_keycode() {
-        assert!(cg_keycode_to_usb_hid(70).is_err());
-        assert!(cg_keycode_to_usb_hid(127).is_err());
-        assert!(cg_keycode_to_usb_hid(255).is_err());
-    }
-
-    // -----------------------------------------------------------------------
-    // Mapping completeness: every Key::ALL variant has a HID mapping
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_all_key_variants_have_hid_mapping() {
-        use crate::platform::macos::key::Key;
-        let mut missing = Vec::new();
-        for key in Key::ALL {
-            let native = key.as_native();
-            if cg_keycode_to_usb_hid(native).is_err() {
-                missing.push((key.as_str(), native));
-            }
-        }
-        assert!(
-            missing.is_empty(),
-            "Key variants without HID mapping: {:?}",
-            missing
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Mapping conflict detection: no two CGKeyCodes share a HID usage
-    // (excluding intentional shared usages from the USB spec)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_no_duplicate_hid_usages() {
-        use indexmap::IndexMap;
-
-        // Collect all CGKeyCode -> HID usage mappings.
-        let mut usage_map: IndexMap<u8, Vec<CGKeyCode>> = IndexMap::new();
-        for code in 0..=255 {
-            if let Ok(usage) = cg_keycode_to_usb_hid(code) {
-                usage_map.entry(usage).or_default().push(code);
-            }
-        }
-
-        // Known intentional collisions: multiple keys map to the same HID
-        // usage because they share layout-dependent functions (e.g. numpad
-        // keys overlap with navigation keys, BracketLeft and Backslash both
-        // use 0x31 on some layouts, Grave and IsoExtra share 0x35). These
-        // are expected per the USB HID spec and Apple's keymap conventions.
-        let allowed_collisions: std::collections::HashSet<u8> =
-            [0x31, 0x35, 0x52, 0x54, 0x55, 0x56, 0x58, 0x59, 0x63].into();
-
-        let conflicts: Vec<_> = usage_map
-            .iter()
-            .filter(|(usage, codes)| {
-                codes.len() > 1 && !allowed_collisions.contains(*usage)
-            })
-            .map(|(usage, codes)| (*usage, codes.clone()))
-            .collect();
-
-        assert!(
-            conflicts.is_empty(),
-            "Unexpected duplicate HID usages: {:?}",
-            conflicts
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // HID report construction
+    // Modifier conversion
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_build_report_key_down() {
-        let report = build_keyboard_report(0x40, Some(0)).unwrap();
+        let report = build_keyboard_report(0x40, Some(0x04)).unwrap();
         assert_eq!(report[0], 1); // Report ID
         assert_eq!(report[1], 0x40); // LeftCommand modifier (bit 6)
         assert_eq!(report[2], 0); // Reserved
@@ -812,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_build_report_no_modifiers() {
-        let report = build_keyboard_report(0x00, Some(49)).unwrap(); // Space
+        let report = build_keyboard_report(0x00, Some(0x2C)).unwrap(); // Space
         assert_eq!(report[0], 1);
         assert_eq!(report[1], 0x00); // No modifiers
         assert_eq!(report[2], 0);
@@ -821,15 +590,9 @@ mod tests {
 
     #[test]
     fn test_build_report_all_modifiers() {
-        let report = build_keyboard_report(0xFF, Some(0)).unwrap();
+        let report = build_keyboard_report(0xFF, Some(0x04)).unwrap();
         assert_eq!(report[1], 0xFF);
         assert_eq!(report[3], 0x04); // 'A'
-    }
-
-    #[test]
-    fn test_build_report_unknown_key_fails() {
-        let result = build_keyboard_report(0x00, Some(70));
-        assert!(matches!(result, Err(HidSocketError::UnknownKeycode(70))));
     }
 
     #[test]
@@ -840,6 +603,55 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Consumer report construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_consumer_report_play_pause() {
+        // Play/Pause is Consumer Page usage 0xCD.
+        let report = build_consumer_report(0xCD).unwrap();
+        assert_eq!(report[0], 2); // Report ID
+        assert_eq!(report[1], 0xCD); // Press field, low byte
+        assert_eq!(report[2], 0x00); // Press field, high byte
+        assert_eq!(&report[3..], &[0u8; 2]); // Release field zero
+    }
+
+    #[test]
+    fn test_build_consumer_report_high_usage() {
+        // Volume Up is Consumer Page usage 0xE9.
+        let report = build_consumer_report(0xE9).unwrap();
+        assert_eq!(report[1], 0xE9);
+        assert_eq!(report[2], 0x00);
+    }
+
+    #[test]
+    fn test_build_consumer_report_unknown_usage() {
+        // Usage 0x00 is not a known consumer control.
+        assert!(matches!(
+            build_consumer_report(0x00),
+            Err(HidSocketError::UnknownConsumerUsage(0x00))
+        ));
+    }
+
+    #[test]
+    fn test_build_consumer_release_report() {
+        // An all-clear report: report ID 2, both fields zero.
+        assert_eq!(build_consumer_release_report(), [2, 0, 0, 0, 0]);
+    }
+
+    /// Simulate the report sequence for a consumer key press and release.
+    #[test]
+    fn test_consumer_press_release_sequence() {
+        // Press Play/Pause (0xCD).
+        let press = build_consumer_report(0xCD).unwrap();
+        assert_eq!(press, [2, 0xCD, 0x00, 0x00, 0x00]);
+
+        // Release: all-clear report.
+        let release = build_consumer_release_report();
+        assert_eq!(release, [2, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    // -----------------------------------------------------------------------
     // Chord emission report sequence (mocked logic)
     // -----------------------------------------------------------------------
 
@@ -847,8 +659,8 @@ mod tests {
     /// like Cmd+A: the modifier is held while the key is pressed.
     #[test]
     fn test_chord_cmd_a_report_sequence() {
-        // Cmd (bit 6 = 0x40) + A (CGKeyCode 0 -> HID 0x04).
-        let report = build_keyboard_report(0x40, Some(0)).unwrap();
+        // Cmd (bit 6 = 0x40) + A (HID usage 0x04).
+        let report = build_keyboard_report(0x40, Some(0x04)).unwrap();
         assert_eq!(report[1], 0x40); // Cmd held
         assert_eq!(report[3], 0x04); // A pressed
 
@@ -867,7 +679,7 @@ mod tests {
     fn test_chord_ctrl_shift_a_report_sequence() {
         // Ctrl (bit 0 = 0x01) + Shift (bit 2 = 0x04) = 0x05.
         let modifiers = 0x05;
-        let report = build_keyboard_report(modifiers, Some(0)).unwrap();
+        let report = build_keyboard_report(modifiers, Some(0x04)).unwrap();
         assert_eq!(report[1], 0x05);
         assert_eq!(report[3], 0x04); // A
     }
