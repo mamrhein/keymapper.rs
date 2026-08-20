@@ -639,7 +639,55 @@ impl<'de> Deserialize<'de> for Key {
     {
         let s = String::deserialize(deserializer)?;
         Self::try_from_str(&s).ok_or_else(|| {
-            serde::de::Error::custom(crate::common::key::unknown_key_error(&s))
+            serde::de::Error::custom(
+                crate::common::hid_usage::unknown_key_error(&s),
+            )
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::hid_usage::PAGE_KEYBOARD;
+
+    #[test]
+    fn to_hid_usage_round_trips_for_all_variants() {
+        // Every Key variant converts to a Keyboard Page HidUsage whose
+        // reverse lookup yields the original variant.
+        for key in Key::ALL {
+            let usage = key.to_hid_usage();
+            assert_eq!(
+                usage.page(),
+                PAGE_KEYBOARD,
+                "{} is not a keyboard page usage",
+                key.as_str(),
+            );
+            assert_eq!(
+                Key::from_hid_usage(usage),
+                Some(key),
+                "round-trip failed for {:?}",
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn from_hid_usage_returns_none_for_consumer_page() {
+        // Consumer Page usages (media keys) have no native Key variant.
+        assert_eq!(Key::from_hid_usage(HidUsage::PlayPause), None);
+        assert_eq!(Key::from_hid_usage(HidUsage::VolumeUp), None);
+        assert_eq!(Key::from_hid_usage(HidUsage::Mute), None);
+    }
+
+    #[test]
+    fn from_hid_usage_returns_none_for_unsupported_keyboard_keys() {
+        // NumpadClear and NumpadEqual have no Linux Key variant.
+        assert_eq!(Key::from_hid_usage(HidUsage::NumpadClear), None);
+        assert_eq!(Key::from_hid_usage(HidUsage::NumpadEqual), None);
     }
 }

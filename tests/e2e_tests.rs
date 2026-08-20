@@ -790,6 +790,107 @@ fn e2e_comprehensive_config() {
     eprintln!("e2e_comprehensive_config PASSED");
 }
 
+/// Run an e2e test that remaps a Consumer Page key (`PlayPause`) to a
+/// standard Keyboard Page key (`A`).
+///
+/// This exercises the full Consumer Page input path: the injector emits a
+/// real evdev `KEY_PLAYPAUSE` event plus an `MSC_SCAN` carrying the HID
+/// usage `(0x0C << 16) | 0xCD`, the daemon resolves the usage from the scan
+/// code, matches the `PlayPause` trigger, and emits the mapped `A` output,
+/// which the monitor then captures.
+///
+/// Linux-only: the injector can only emit Consumer Page keys on Linux (via
+/// `MSC_SCAN` + `KEY_*`).  On macOS the CGEvent-based injector has no
+/// CGKeyCode for media keys, and on Windows the injection helper resolves
+/// through `Key::from_hid_usage`, which has no Consumer Page variants.
+///
+/// The reverse direction (mapping a physical key *to* `PlayPause`) cannot be
+/// verified end-to-end: the monitor is egui-based and egui has no media keys,
+/// so a Consumer Page output is never written to the event log.
+#[cfg(target_os = "linux")]
+#[test]
+fn e2e_consumer_key_remap() {
+    if !should_run_e2e() {
+        eprintln!(
+            "skipping e2e test: injector not available in this environment. \
+             Set CI=1 and ensure required permissions are granted."
+        );
+        return;
+    }
+
+    // a. Create temp directory.  The guard removes it on drop, even when
+    //    the test fails.  Declared first so it drops last: the daemon's
+    //    PID file (needed to stop it) lives in this directory.
+    let temp_dir = create_test_dir();
+    let mut dir_guard = TempDirGuard::new(temp_dir.clone());
+    eprintln!("test dir: {:?}", temp_dir);
+
+    // b. Write a config that remaps the Consumer Page `PlayPause` key to
+    //    the standard `A` key.
+    let config_out = temp_dir.join("config.yaml");
+    std::fs::write(
+        &config_out,
+        "- name: \"consumer remap\"\n  mappings:\n    PlayPause: A\n",
+    )
+    .expect("failed to write config");
+
+    // c. Create events log path.
+    let events_log = temp_dir.join("events.log");
+
+    // d. Start the monitor.
+    let mut monitor = start_monitor(&events_log);
+
+    // e. Create and setup the injector.
+    let mut injector = create_injector()
+        .expect("failed to create injector")
+        .expect("injector not available on this platform");
+    injector.setup().expect("failed to setup injector");
+
+    // f. Start the daemon.  The guard stops it on drop, even when the test
+    //    fails.
+    let mut daemon = start_daemon(&temp_dir);
+
+    // g. Inject the `PlayPause` key.  On Linux this emits `KEY_PLAYPAUSE`
+    //    plus an `MSC_SCAN` carrying the Consumer Page HID usage.
+    let step = single_key_injection_step(HidUsage::PlayPause);
+    eprintln!(
+        "injecting PlayPause: {:?} / {:?}",
+        step.keys_down, step.keys_up
+    );
+    inject_step(&*injector, &step);
+
+    // h. Stop the daemon.
+    daemon.stop();
+
+    // i. Stop the monitor.
+    monitor.kill();
+
+    // j. Teardown the injector.
+    injector.teardown();
+
+    // k. Parse the event log.
+    let actual = event_log::parse(&events_log).unwrap_or_else(|e| {
+        panic!("failed to parse event log {:?}: {e}", events_log)
+    });
+    eprintln!("captured {} events from log", actual.len());
+
+    // l. The daemon must have remapped `PlayPause` to `A`, so the monitor
+    //    captures a standard-key press+release.  If the remap failed, the
+    //    original `PlayPause` would be forwarded but never captured (egui
+    //    has no media keys), leaving the log empty.
+    let expected = vec![event_str("A", true), event_str("A", false)];
+    assert_events_match(
+        &actual,
+        &expected,
+        "event log does not match expected PlayPause -> A remap",
+    );
+
+    // m. Clean up.
+    dir_guard.remove();
+
+    eprintln!("e2e_consumer_key_remap PASSED");
+}
+
 /// Run the full e2e test with a hot-reload of the config.
 ///
 /// 1. Starts with `config_comprehensive.yaml` and injects keys.

@@ -646,18 +646,25 @@ impl<'de> Deserialize<'de> for HidUsage {
     }
 }
 
+/// Returns a user-friendly error message for an unrecognised key name.
+///
+/// Shared by the `HidUsage` parser and the platform `Key` enums, which all
+/// resolve the same set of config-facing key names.
+pub(crate) fn unknown_key_error(s: &str) -> String {
+    format!(
+        "Unknown key name '{}'. Use names like CapsLock, LeftCtrl, A, F1, 1, \
+         Minus, Equal, BracketLeft, etc.",
+        s
+    )
+}
+
 /// Error returned when a string cannot be parsed as a `HidUsage`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HidUsageParseError(pub String);
 
 impl fmt::Display for HidUsageParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Unknown key name '{}'. Use names like CapsLock, LeftCtrl, A, \
-             F1, 1, Minus, Equal, BracketLeft, etc.",
-            self.0
-        )
+        write!(f, "{}", unknown_key_error(&self.0))
     }
 }
 
@@ -974,6 +981,42 @@ mod tests {
     }
 
     #[test]
+    fn consumer_page_serialization_round_trip() {
+        // Every Consumer Page key serializes to its canonical name and
+        // deserializes back to the same usage.  This guards the media and
+        // display control keys that have no Keyboard Page equivalent.
+        let consumer_keys: Vec<HidUsage> = HidUsage::ALL
+            .iter()
+            .copied()
+            .filter(|u| u.page() == PAGE_CONSUMER)
+            .collect();
+        assert!(!consumer_keys.is_empty(), "expected consumer page keys");
+
+        for usage in consumer_keys {
+            let yaml = serde_yaml::to_string(&usage).unwrap_or_else(|e| {
+                panic!("serialize {} failed: {e}", usage.as_str())
+            });
+            // The serialized form is the canonical name as a plain scalar.
+            assert_eq!(
+                yaml.trim(),
+                usage.as_str(),
+                "unexpected serialized form for {}",
+                usage.as_str(),
+            );
+            let back: HidUsage =
+                serde_yaml::from_str(&yaml).unwrap_or_else(|e| {
+                    panic!("deserialize {yaml:?} failed: {e}")
+                });
+            assert_eq!(
+                back,
+                usage,
+                "round-trip failed for {}",
+                usage.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn all_count() {
         assert_eq!(HidUsage::all().len(), 111);
     }
@@ -1034,19 +1077,27 @@ mod tests {
     }
 
     #[test]
-    fn hid_usage_to_modifier_bit_valid() {
-        assert_eq!(
-            HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftControl),
-            Some(0), // LeftControl
-        );
-        assert_eq!(
-            HidUsage::hid_usage_to_modifier_bit(HidUsage::RightCommand),
-            Some(7), // RightCommand
-        );
-        assert_eq!(
-            HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftAlt),
-            Some(4), // LeftAlt
-        );
+    fn hid_usage_to_modifier_bit_all_eight_modifiers() {
+        // Every modifier usage maps to its `ModifierRole` bit position.
+        // The HID modifier ids (0xE0-0xE7) map directly to bits 0-7.
+        let modifiers: [(HidUsage, u8); 8] = [
+            (HidUsage::LeftControl, 0),
+            (HidUsage::RightControl, 1),
+            (HidUsage::LeftShift, 2),
+            (HidUsage::RightShift, 3),
+            (HidUsage::LeftAlt, 4),
+            (HidUsage::RightAlt, 5),
+            (HidUsage::LeftCommand, 6),
+            (HidUsage::RightCommand, 7),
+        ];
+        for (usage, expected_bit) in modifiers {
+            assert_eq!(
+                HidUsage::hid_usage_to_modifier_bit(usage),
+                Some(expected_bit),
+                "wrong modifier bit for {}",
+                usage.as_str(),
+            );
+        }
     }
 
     #[test]
