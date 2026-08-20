@@ -29,7 +29,7 @@ use std::{
 use evdev::{Device, EventType};
 
 use super::{OutputEvent, register_signal_handlers, writer::EventWriter};
-use crate::{HidUsage, platform::VIRTUAL_KEYBOARD_NAME};
+use crate::platform::{VIRTUAL_KEYBOARD_NAME, keycode_to_hid_usage};
 
 /// Interval between polls while waiting for the daemon's virtual device.
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -122,8 +122,7 @@ pub fn run(output_path: &Path) {
                         continue;
                     }
 
-                    let Some(key) = HidUsage::from_code(event.code() as u32)
-                    else {
+                    let Some(key) = keycode_to_hid_usage(event.code()) else {
                         continue;
                     };
 

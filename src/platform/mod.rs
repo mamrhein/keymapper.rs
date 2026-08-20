@@ -19,7 +19,10 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub use linux::hid_translate;
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{VIRTUAL_KEYBOARD_NAME, get_active_app_name};
+pub(crate) use linux::{
+    VIRTUAL_KEYBOARD_NAME, get_active_app_name,
+    hid_translate::keycode_to_hid_usage,
+};
 #[cfg(target_os = "linux")]
 pub use linux::{discover_and_open_keyboards, list_keyboards, start_mapping};
 #[cfg(target_os = "macos")]
