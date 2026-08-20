@@ -24,10 +24,7 @@ use std::{
 
 use eframe::egui;
 
-use super::{
-    ModifierState, OutputEvent, map_egui_key, register_signal_handlers,
-    writer::EventWriter,
-};
+use super::{ModifierState, OutputEvent, map_egui_key, writer::EventWriter};
 use crate::common::hid_usage::HidUsage;
 
 /// The egui application state.
