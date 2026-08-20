@@ -19,8 +19,12 @@
 //! - Hook events carry a \`crossbeam_channel::Sender<Decision>\` (capacity 1)
 //!   for the reply.  The hook proc polls this channel with short sleeps to
 //!   avoid blocking the Windows message pump.
+//! - The worker matches hook events against raw input events by their decoded
+//!   `HidUsage`, which is also the key space of the compiled rules.
 //! - Raw input key-down events are buffered with a short expiry (100 ms) to
 //!   compensate for non-deterministic arrival order.
+//! - Consumer Page key-downs from standalone Consumer Control devices have no
+//!   hook event; the worker processes and emits them directly.
 //! - A decision cache keyed by \`vk_code\` ensures that key-up events are
 //!   treated consistently with their key-down counterpart.
 //! - The worker resolves device paths via \`GetRawInputDeviceInfoW\` and
@@ -43,7 +47,12 @@ use windows::Win32::{
 };
 
 use crate::{
-    daemon::state::Lookup, platform::windows::raw_input::RawInputEvent,
+    common::hid_usage::{HidUsage, PAGE_CONSUMER},
+    daemon::state::Lookup,
+    platform::windows::{
+        mapping::{emit_key_event, extract_modifier_bits},
+        raw_input::RawInputEvent,
+    },
 };
 
 /// Result of a mapping lookup sent from the worker back to the hook thread.
@@ -67,6 +76,10 @@ pub enum Decision {
 pub struct HookEvent {
     /// Virtual-key code of the event.
     pub vk_code: VIRTUAL_KEY,
+
+    /// Decoded HID identity of the event — the key space of the compiled
+    /// rules.  `None` for virtual-key codes without a `HidUsage`.
+    pub usage: Option<HidUsage>,
 
     /// \`true\` for key-up, \`false\` for key-down.
     pub is_key_up: bool,
@@ -243,7 +256,24 @@ fn worker_loop(
                     Ok(event) => {
                         // Buffer only key-down events; key-ups are matched
                         // via the decision cache in the hook processor.
-                        if !event.is_key_up {
+                        if event.is_key_up {
+                            continue;
+                        }
+
+                        // Standalone Consumer Control events have no VK
+                            // code and no hook event to match against, so
+                            // process them directly.  Keyboard media keys
+                            // (e.g. VK_MEDIA_PLAY_PAUSE) do have a VK code
+                            // and a hook event; they must be buffered for
+                            // matching like any other keyboard event.
+                        if event.vk_code.is_none()
+                            && let Some(usage) = event.usage
+                            && usage.page() == PAGE_CONSUMER
+                        {
+                            process_consumer_event(
+                                &event, usage, &lookup, &device_cache,
+                            );
+                        } else {
                             raw_buffer.push(BufferedRawInput {
                                 event,
                                 received_at: Instant::now(),
@@ -289,28 +319,40 @@ fn process_hook_event(
         }
     } else {
         // Key-down — try to match against raw input for device identification.
-        let decision = match find_match_in_buffer(event.vk_code, raw_buffer) {
-            Some(handle_ptr) => {
-                // Found a raw input event — resolve device path and lookup.
-                let device_path = device_cache.get_or_resolve(handle_ptr);
-                decide(
-                    lookup,
-                    event.vk_code,
-                    event.modifiers,
-                    device_path.as_deref(),
-                )
+        let decision = match event.usage {
+            Some(usage) => {
+                match find_match_in_buffer(usage, raw_buffer) {
+                    Some(handle_ptr) => {
+                        // Found a raw input event — resolve device path and
+                        // lookup.
+                        let device_path =
+                            device_cache.get_or_resolve(handle_ptr);
+                        decide(
+                            lookup,
+                            usage,
+                            event.modifiers,
+                            device_path.as_deref(),
+                        )
+                    }
+                    None => {
+                        // No match yet.  Wait briefly for raw input to
+                        // arrive, then fall back to a lookup without device
+                        // identification.
+                        decide_with_delay(
+                            lookup,
+                            usage,
+                            event.modifiers,
+                            raw_buffer,
+                            device_cache,
+                            std::time::Duration::from_millis(10),
+                        )
+                    }
+                }
             }
             None => {
-                // No match yet.  Wait briefly for raw input to arrive, then
-                // fall back to a lookup without device identification.
-                decide_with_delay(
-                    lookup,
-                    event.vk_code,
-                    event.modifiers,
-                    raw_buffer,
-                    device_cache,
-                    std::time::Duration::from_millis(10),
-                )
+                // The virtual-key code has no HID identity — no compiled
+                // rule can match it, so pass through.
+                Decision::PassThrough
             }
         };
 
@@ -332,16 +374,19 @@ fn process_hook_event(
 
 /// Performs the mapping lookup and returns \`Swallow\` with the output events
 /// if a mapping is found.
+///
+/// Compiled rules store the trigger as a `HidUsage`, so the lookup is keyed
+/// by the full page-specific usage rather than the virtual-key code.
 fn decide(
     lookup: &Arc<RwLock<dyn Lookup>>,
-    vk_code: VIRTUAL_KEY,
+    usage: HidUsage,
     modifiers: u8,
     device_id: Option<&str>,
 ) -> Decision {
     let guard = lookup.read();
     let outputs = guard
-        .for_app(&guard.active_app(), vk_code.0, modifiers, device_id)
-        .or_else(|| guard.global(vk_code.0, modifiers, device_id))
+        .for_app(&guard.active_app(), usage, modifiers, device_id)
+        .or_else(|| guard.global(usage, modifiers, device_id))
         .map(|v| v.to_vec());
     drop(guard);
 
@@ -352,6 +397,42 @@ fn decide(
     }
 }
 
+/// Process a Consumer Page key-down event from a standalone Consumer
+/// Control device.
+///
+/// These events do not pass through the low-level keyboard hook, so there
+/// is no hook event to reply to: the worker performs the lookup itself and
+/// emits the mapped outputs directly.  Note that the original media action
+/// cannot be suppressed — Windows delivers Consumer Control input to the
+/// shell as `WM_APPCOMMAND`, which no keyboard-level hook can intercept.
+fn process_consumer_event(
+    event: &RawInputEvent,
+    usage: HidUsage,
+    lookup: &Arc<RwLock<dyn Lookup>>,
+    device_cache: &DeviceCache,
+) {
+    let modifiers = extract_modifier_bits();
+    let device_path = device_cache.get_or_resolve(event.device_handle_ptr);
+
+    let guard = lookup.read();
+    let outputs = guard
+        .for_app(
+            &guard.active_app(),
+            usage,
+            modifiers,
+            device_path.as_deref(),
+        )
+        .or_else(|| guard.global(usage, modifiers, device_path.as_deref()))
+        .map(|v| v.to_vec());
+    drop(guard);
+
+    if let Some(outputs) = outputs {
+        for native_key in &outputs {
+            emit_key_event(native_key);
+        }
+    }
+}
+
 /// Attempts to find a match with a short delay for raw input to arrive.
 ///
 /// Iterates over the delay period, checking the buffer after each step.
@@ -359,7 +440,7 @@ fn decide(
 /// found within the timeout.
 fn decide_with_delay(
     lookup: &Arc<RwLock<dyn Lookup>>,
-    vk_code: VIRTUAL_KEY,
+    usage: HidUsage,
     modifiers: u8,
     raw_buffer: &mut Vec<BufferedRawInput>,
     device_cache: &DeviceCache,
@@ -368,15 +449,15 @@ fn decide_with_delay(
     let deadline = Instant::now() + timeout;
 
     while Instant::now() < deadline {
-        if let Some(handle_ptr) = find_match_in_buffer(vk_code, raw_buffer) {
+        if let Some(handle_ptr) = find_match_in_buffer(usage, raw_buffer) {
             let device_path = device_cache.get_or_resolve(handle_ptr);
-            return decide(lookup, vk_code, modifiers, device_path.as_deref());
+            return decide(lookup, usage, modifiers, device_path.as_deref());
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 
     // Timeout — fall back without device identification.
-    decide(lookup, vk_code, modifiers, None)
+    decide(lookup, usage, modifiers, None)
 }
 
 // ---------------------------------------------------------------------------
@@ -391,12 +472,12 @@ fn evict_stale(
     buffer.retain(|entry| entry.received_at.elapsed() < max_age);
 }
 
-/// Finds a raw input event in the buffer that matches the given virtual-key
-/// code.  Returns the device handle pointer of the most recent match, or
-/// \`None\` if no match is found.  The matched entry is removed from the
-/// buffer so it is not reused for subsequent events.
+/// Finds a raw input event in the buffer that matches the given HID usage.
+/// Returns the device handle pointer of the most recent match, or \`None\`
+/// if no match is found.  The matched entry is removed from the buffer so
+/// it is not reused for subsequent events.
 fn find_match_in_buffer(
-    vk_code: VIRTUAL_KEY,
+    usage: HidUsage,
     buffer: &mut Vec<BufferedRawInput>,
 ) -> Option<usize> {
     // Find the most recent matching entry.  The buffer is not strictly
@@ -405,7 +486,7 @@ fn find_match_in_buffer(
     let mut best_time: Option<Instant> = None;
 
     for (idx, entry) in buffer.iter().enumerate() {
-        if entry.event.vk_code == vk_code
+        if entry.event.usage == Some(usage)
             && (best_time.is_none() || entry.received_at > best_time.unwrap())
         {
             best_idx = Some(idx);
@@ -508,8 +589,8 @@ mod tests {
     /// A [`Lookup`] implementation that returns configurable outputs.
     struct MockLookup {
         app_name: String,
-        /// Map of (key, modifiers, device_id_option) -> outputs.
-        global_map: HashMap<(u16, u8, Option<String>), Vec<NativeKey>>,
+        /// Map of (usage, modifiers, device_id_option) -> outputs.
+        global_map: HashMap<(HidUsage, u8, Option<String>), Vec<NativeKey>>,
     }
 
     impl MockLookup {
@@ -521,16 +602,16 @@ mod tests {
         }
 
         /// Configure the mock to return *outputs* for global lookups of
-        /// the given key with the given modifiers and device ID.
+        /// the given usage with the given modifiers and device ID.
         fn with_global(
             mut self,
-            key: u16,
+            usage: HidUsage,
             modifiers: u8,
             device_id: Option<&str>,
             outputs: Vec<NativeKey>,
         ) -> Self {
             self.global_map.insert(
-                (key, modifiers, device_id.map(String::from)),
+                (usage, modifiers, device_id.map(String::from)),
                 outputs,
             );
             self
@@ -547,7 +628,7 @@ mod tests {
         fn for_app(
             &self,
             _app: &str,
-            _key: u16,
+            _usage: HidUsage,
             _modifiers: u8,
             _device_id: Option<&str>,
         ) -> Option<&[NativeKey]> {
@@ -556,14 +637,14 @@ mod tests {
 
         fn global(
             &self,
-            key: u16,
+            usage: HidUsage,
             modifiers: u8,
             device_id: Option<&str>,
         ) -> Option<&[NativeKey]> {
             // We store outputs in a static vec so we can return a reference.
             // This is safe because MockLookup lives for the test duration.
             self.global_map
-                .get(&(key, modifiers, device_id.map(String::from)))
+                .get(&(usage, modifiers, device_id.map(String::from)))
                 .map(|v| v.as_slice())
         }
 
@@ -581,7 +662,7 @@ mod tests {
     fn nk(key: Key) -> NativeKey {
         NativeKey {
             modifiers: 0,
-            base: key.as_native(),
+            usage: key.to_hid_usage(),
         }
     }
 
@@ -683,7 +764,8 @@ mod tests {
         let mut buffer = vec![
             BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(0x41),
+                    usage: Some(HidUsage::A),
+                    vk_code: Some(VIRTUAL_KEY(0x41)),
                     is_key_up: false,
                     device_handle_ptr: 0x1000,
                 },
@@ -692,7 +774,8 @@ mod tests {
             },
             BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(0x57),
+                    usage: Some(HidUsage::W),
+                    vk_code: Some(VIRTUAL_KEY(0x57)),
                     is_key_up: false,
                     device_handle_ptr: 0x2000,
                 },
@@ -702,14 +785,15 @@ mod tests {
 
         evict_stale(&mut buffer, std::time::Duration::from_millis(100));
         assert_eq!(buffer.len(), 1);
-        assert_eq!(buffer[0].event.vk_code.0, 0x57);
+        assert_eq!(buffer[0].event.vk_code.unwrap().0, 0x57);
     }
 
     #[test]
     fn evict_stale_keeps_recent_entries() {
         let mut buffer = vec![BufferedRawInput {
             event: RawInputEvent {
-                vk_code: VIRTUAL_KEY(0x41),
+                usage: Some(HidUsage::A),
+                vk_code: Some(VIRTUAL_KEY(0x41)),
                 is_key_up: false,
                 device_handle_ptr: 0x1000,
             },
@@ -733,7 +817,8 @@ mod tests {
         let mut buffer = vec![
             BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(0x41),
+                    usage: Some(HidUsage::A),
+                    vk_code: Some(VIRTUAL_KEY(0x41)),
                     is_key_up: false,
                     device_handle_ptr: 0x1000,
                 },
@@ -741,7 +826,8 @@ mod tests {
             },
             BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(0x41),
+                    usage: Some(HidUsage::A),
+                    vk_code: Some(VIRTUAL_KEY(0x41)),
                     is_key_up: false,
                     device_handle_ptr: 0x2000,
                 },
@@ -749,7 +835,7 @@ mod tests {
             },
         ];
 
-        let handle = find_match_in_buffer(VIRTUAL_KEY(0x41), &mut buffer);
+        let handle = find_match_in_buffer(HidUsage::A, &mut buffer);
         assert_eq!(handle, Some(0x2000));
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer[0].event.device_handle_ptr, 0x1000);
@@ -762,14 +848,15 @@ mod tests {
     fn find_match_in_buffer_no_match() {
         let mut buffer = vec![BufferedRawInput {
             event: RawInputEvent {
-                vk_code: VIRTUAL_KEY(0x41),
+                usage: Some(HidUsage::A),
+                vk_code: Some(VIRTUAL_KEY(0x41)),
                 is_key_up: false,
                 device_handle_ptr: 0x1000,
             },
             received_at: Instant::now(),
         }];
 
-        let handle = find_match_in_buffer(VIRTUAL_KEY(0x57), &mut buffer);
+        let handle = find_match_in_buffer(HidUsage::W, &mut buffer);
         assert!(handle.is_none());
         assert_eq!(buffer.len(), 1);
 
@@ -779,9 +866,7 @@ mod tests {
     #[test]
     fn find_match_in_buffer_empty() {
         let mut buffer: Vec<BufferedRawInput> = Vec::new();
-        assert!(
-            find_match_in_buffer(VIRTUAL_KEY(0x41), &mut buffer).is_none()
-        );
+        assert!(find_match_in_buffer(HidUsage::A, &mut buffer).is_none());
     }
 
     #[test]
@@ -816,7 +901,7 @@ mod tests {
     fn decide_returns_pass_through_when_no_mapping() {
         let lookup = arc_lookup(MockLookup::new());
 
-        let decision = decide(&lookup, VIRTUAL_KEY(0x41), 0, None);
+        let decision = decide(&lookup, HidUsage::A, 0, None);
 
         assert!(matches!(decision, Decision::PassThrough));
     }
@@ -825,18 +910,17 @@ mod tests {
     fn decide_returns_swallow_when_mapping_found() {
         let outputs = vec![nk(Key::LeftControl)];
         let lookup = arc_lookup(MockLookup::new().with_global(
-            Key::CapsLock.as_native(),
+            HidUsage::CapsLock,
             0,
             None,
             outputs,
         ));
 
-        let decision =
-            decide(&lookup, VIRTUAL_KEY(Key::CapsLock.as_native()), 0, None);
+        let decision = decide(&lookup, HidUsage::CapsLock, 0, None);
 
         match &decision {
             Decision::Swallow(v) => {
-                assert_eq!(v[0].base, Key::LeftControl.as_native())
+                assert_eq!(v[0].usage, HidUsage::LeftControl)
             }
             _ => panic!("expected Swallow, got {decision:?}"),
         }
@@ -850,7 +934,7 @@ mod tests {
 
         let decision = decide(
             &lookup,
-            VIRTUAL_KEY(Key::CapsLock.as_native()),
+            HidUsage::CapsLock,
             0,
             Some(r"\\?\hid#vid_046d#..."),
         );
@@ -862,21 +946,17 @@ mod tests {
     fn decide_with_device_id_returns_mapping_when_configured() {
         let outputs = vec![nk(Key::A)];
         let lookup = arc_lookup(MockLookup::new().with_global(
-            Key::B.as_native(),
+            HidUsage::B,
             0,
             Some(r"\\?\hid#vid_046d#..."),
             outputs,
         ));
 
-        let decision = decide(
-            &lookup,
-            VIRTUAL_KEY(Key::B.as_native()),
-            0,
-            Some(r"\\?\hid#vid_046d#..."),
-        );
+        let decision =
+            decide(&lookup, HidUsage::B, 0, Some(r"\\?\hid#vid_046d#..."));
 
         match &decision {
-            Decision::Swallow(v) => assert_eq!(v[0].base, Key::A.as_native()),
+            Decision::Swallow(v) => assert_eq!(v[0].usage, HidUsage::A),
             _ => panic!("expected Swallow, got {decision:?}"),
         }
     }
@@ -886,18 +966,13 @@ mod tests {
         let outputs = vec![nk(Key::LeftControl)];
         // Modifier bit 0 = LeftControl held
         let lookup = arc_lookup(MockLookup::new().with_global(
-            Key::A.as_native(),
+            HidUsage::A,
             0b0000_0001,
             None,
             outputs,
         ));
 
-        let decision = decide(
-            &lookup,
-            VIRTUAL_KEY(Key::A.as_native()),
-            0b0000_0001,
-            None,
-        );
+        let decision = decide(&lookup, HidUsage::A, 0b0000_0001, None);
 
         assert!(matches!(&decision, Decision::Swallow(_)));
     }
@@ -912,7 +987,7 @@ mod tests {
         key_state_cache().remove(Key::CapsLock.as_native());
 
         let lookup = arc_lookup(MockLookup::new().with_global(
-            Key::CapsLock.as_native(),
+            HidUsage::CapsLock,
             0,
             Some(r"\\?\hid#vid_046d#..."),
             vec![nk(Key::LeftControl)],
@@ -920,7 +995,8 @@ mod tests {
 
         let mut raw_buffer = vec![BufferedRawInput {
             event: RawInputEvent {
-                vk_code: VIRTUAL_KEY(Key::CapsLock.as_native()),
+                usage: Some(HidUsage::CapsLock),
+                vk_code: Some(VIRTUAL_KEY(Key::CapsLock.as_native())),
                 is_key_up: false,
                 device_handle_ptr: 0x1234,
             },
@@ -937,6 +1013,7 @@ mod tests {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         let hook_event = HookEvent {
             vk_code: VIRTUAL_KEY(Key::CapsLock.as_native()),
+            usage: Some(HidUsage::CapsLock),
             is_key_up: false,
             modifiers: 0,
             reply_tx,
@@ -952,7 +1029,7 @@ mod tests {
         let decision = reply_rx.recv().unwrap();
         match &decision {
             Decision::Swallow(v) => {
-                assert_eq!(v[0].base, Key::LeftControl.as_native())
+                assert_eq!(v[0].usage, HidUsage::LeftControl)
             }
             _ => panic!("expected Swallow, got {decision:?}"),
         }
@@ -985,6 +1062,7 @@ mod tests {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         let hook_event = HookEvent {
             vk_code: VIRTUAL_KEY(Key::CapsLock.as_native()),
+            usage: Some(HidUsage::CapsLock),
             is_key_up: true,
             modifiers: 0,
             reply_tx,
@@ -1018,6 +1096,7 @@ mod tests {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         let hook_event = HookEvent {
             vk_code: VIRTUAL_KEY(Key::A.as_native()),
+            usage: Some(HidUsage::A),
             is_key_up: true,
             modifiers: 0,
             reply_tx,
@@ -1046,6 +1125,7 @@ mod tests {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         let hook_event = HookEvent {
             vk_code: VIRTUAL_KEY(Key::Z.as_native()),
+            usage: Some(HidUsage::Z),
             is_key_up: false,
             modifiers: 0,
             reply_tx,
@@ -1080,7 +1160,8 @@ mod tests {
         for i in 0..1000u16 {
             buffer.push(BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(i),
+                    usage: None,
+                    vk_code: Some(VIRTUAL_KEY(i)),
                     is_key_up: false,
                     device_handle_ptr: i as usize,
                 },
@@ -1100,7 +1181,7 @@ mod tests {
         // Only the "new" entries (odd indices) should remain.
         assert_eq!(buffer.len(), 500);
         for entry in &buffer {
-            assert!(entry.event.vk_code.0 % 2 != 0);
+            assert!(entry.event.vk_code.unwrap().0 % 2 != 0);
         }
     }
 
@@ -1109,11 +1190,12 @@ mod tests {
         let now = Instant::now();
         let mut buffer = Vec::new();
 
-        // Insert 100 entries with the same vk_code but increasing timestamps.
+        // Insert 100 entries with the same usage but increasing timestamps.
         for i in 0..100 {
             buffer.push(BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(0x41),
+                    usage: Some(HidUsage::A),
+                    vk_code: Some(VIRTUAL_KEY(0x41)),
                     is_key_up: false,
                     device_handle_ptr: i,
                 },
@@ -1122,7 +1204,7 @@ mod tests {
         }
 
         // Should return the most recent (highest handle_ptr).
-        let handle = find_match_in_buffer(VIRTUAL_KEY(0x41), &mut buffer);
+        let handle = find_match_in_buffer(HidUsage::A, &mut buffer);
         assert_eq!(handle, Some(99));
         assert_eq!(buffer.len(), 99);
 
@@ -1260,7 +1342,8 @@ mod tests {
         let mut raw_buffer = vec![
             BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(0x41),
+                    usage: Some(HidUsage::A),
+                    vk_code: Some(VIRTUAL_KEY(0x41)),
                     is_key_up: false,
                     device_handle_ptr: 0x1000,
                 },
@@ -1268,7 +1351,8 @@ mod tests {
             },
             BufferedRawInput {
                 event: RawInputEvent {
-                    vk_code: VIRTUAL_KEY(0x42),
+                    usage: Some(HidUsage::B),
+                    vk_code: Some(VIRTUAL_KEY(0x42)),
                     is_key_up: false,
                     device_handle_ptr: 0x2000,
                 },
@@ -1281,6 +1365,7 @@ mod tests {
         let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
         let hook_event = HookEvent {
             vk_code: VIRTUAL_KEY(0x41),
+            usage: Some(HidUsage::A),
             is_key_up: false,
             modifiers: 0,
             reply_tx,
@@ -1297,7 +1382,7 @@ mod tests {
         // should have been consumed.
         let _ = reply_rx.recv().unwrap();
         assert_eq!(raw_buffer.len(), 1);
-        assert_eq!(raw_buffer[0].event.vk_code.0, 0x42);
+        assert_eq!(raw_buffer[0].event.vk_code.unwrap().0, 0x42);
 
         // Cleanup.
         key_state_cache().remove(0x41);
@@ -1325,7 +1410,8 @@ groups:
 
         assert!(!rules.is_empty());
         let rule = &rules[0];
-        assert_eq!(rule.base, Key::CapsLock.as_native());
+        // Compiled rules store the trigger as a `HidUsage`.
+        assert_eq!(rule.usage, HidUsage::CapsLock);
         assert!(rule.keyboards.is_some());
     }
 

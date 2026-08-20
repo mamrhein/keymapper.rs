@@ -23,6 +23,8 @@ use std::{ffi::c_void, ptr};
 
 use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
 
+use crate::common::hid_usage::HidUsage;
+
 // ---------------------------------------------------------------------------
 // Opaque IOKit HID types
 // ---------------------------------------------------------------------------
@@ -120,6 +122,9 @@ const kIOHIDMapKeyRegistryEntryID: &str = "Registry Entry ID";
 /// USB HID usage page for Keyboard/Keypad.
 const HID_USAGE_PAGE_KEYBOARD: u32 = 0x07;
 
+/// USB HID usage page for Consumer.
+const HID_USAGE_PAGE_CONSUMER: u32 = 0x0C;
+
 // ---------------------------------------------------------------------------
 // IOReturn constants
 // ---------------------------------------------------------------------------
@@ -195,104 +200,6 @@ fn check_io_return(result: u32, context: &str) -> Result<(), IoKitError> {
     } else {
         Err(IoKitError::IoReturn(result, context.to_string()))
     }
-}
-
-// ---------------------------------------------------------------------------
-// HID usage → CGKeyCode translation (reused from ioh_device.rs)
-// ---------------------------------------------------------------------------
-
-/// Translate a USB HID Keyboard/Keypad usage code to a macOS CGKeyCode.
-///
-/// Returns `None` for usages that have no known CGKeyCode equivalent.
-pub fn cg_keycode_from_hid_usage(usage: u16) -> Option<u16> {
-    Some(match usage {
-        // --- Letters (HID usage → CGKeyCode) ---
-        0x04 => 0,  // A
-        0x05 => 11, // B
-        0x06 => 8,  // C
-        0x07 => 2,  // D
-        0x08 => 14, // E
-        0x09 => 3,  // F
-        0x0A => 5,  // G
-        0x0B => 4,  // H
-        0x0C => 34, // I
-        0x0D => 38, // J
-        0x0E => 40, // K
-        0x0F => 37, // L
-        0x10 => 46, // M
-        0x11 => 45, // N
-        0x12 => 31, // O
-        0x13 => 35, // P
-        0x14 => 12, // Q
-        0x15 => 15, // R
-        0x16 => 1,  // S
-        0x17 => 17, // T
-        0x18 => 32, // U
-        0x19 => 9,  // V
-        0x1A => 13, // W
-        0x1B => 7,  // X
-        0x1C => 16, // Y
-        0x1D => 6,  // Z
-
-        // --- Numbers ---
-        0x1E => 18, // 1
-        0x1F => 19, // 2
-        0x20 => 20, // 3
-        0x21 => 21, // 4
-        0x22 => 23, // 5
-        0x23 => 22, // 6
-        0x24 => 26, // 7
-        0x25 => 28, // 8
-        0x26 => 25, // 9
-        0x27 => 29, // 0
-
-        // --- Edit keys ---
-        0x28 => 36,  // Return
-        0x29 => 53,  // Escape
-        0x2A => 51,  // Delete (Backspace)
-        0x2B => 48,  // Tab
-        0x2C => 49,  // Spacebar
-        0x30 => 119, // Non-US Backslash
-
-        // --- Modifiers ---
-        0xE0 => 59, // LeftControl
-        0xE1 => 62, // RightControl
-        0xE2 => 56, // LeftShift
-        0xE3 => 60, // RightShift
-        0xE4 => 58, // LeftAlt (LeftOption)
-        0xE5 => 61, // RightAlt (RightOption)
-        0xE6 => 55, // LeftCommand (LeftGui)
-        0xE7 => 54, // RightCommand (RightGui)
-
-        // --- Navigation ---
-        0x4A => 124, // RightArrow (page up on mac)
-        0x4B => 124, // RightArrow
-        0x4C => 123, // LeftArrow
-        0x4D => 125, // DownArrow
-        0x4E => 126, // UpArrow
-
-        // --- Function keys ---
-        0x3A => 122, // F1
-        0x3B => 120, // F2
-        0x3C => 99,  // F3
-        0x3D => 118, // F4
-        0x3E => 96,  // F5
-        0x3F => 97,  // F6
-        0x40 => 98,  // F7
-        0x41 => 100, // F8
-        0x42 => 101, // F9
-        0x43 => 109, // F10
-        0x44 => 103, // F11
-        0x45 => 111, // F12
-
-        // --- Keypad ---
-        0x52 => 124, // Keypad RightArrow
-        0x51 => 125, // Keypad DownArrow
-        0x50 => 123, // Keypad LeftArrow
-        0x53 => 126, // Keypad UpArrow
-
-        _ => return None,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1024,8 +931,10 @@ unsafe extern "C" fn hid_queue_value_callback(
         let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
         let usage = unsafe { IOHIDElementGetUsage(element) } as u16;
 
-        // Skip non-keyboard events.
-        if usage_page != HID_USAGE_PAGE_KEYBOARD {
+        // Skip non-keyboard/consumer events.
+        if usage_page != HID_USAGE_PAGE_KEYBOARD
+            && usage_page != HID_USAGE_PAGE_CONSUMER
+        {
             continue;
         }
 
@@ -1033,15 +942,21 @@ unsafe extern "C" fn hid_queue_value_callback(
         let raw_value = unsafe { IOHIDValueGetInteger(value_ref) };
         let is_down = raw_value != 0;
 
-        // Translate HID usage to CGKeyCode.
-        let Some(cg_keycode) = cg_keycode_from_hid_usage(usage) else {
+        // Construct HidUsage from raw HID page/id.  Use this for all
+        // modifier tracking, deduplication, and key identification.
+        let Some(hid_usage) =
+            HidUsage::from_code(usage_page << 16 | (usage as u32))
+        else {
+            // Unknown usage — let it pass through.
             continue;
         };
 
-        // Track pressed keys for deduplication.
-        let actually_down = context.pressed_keys.insert(cg_keycode);
+        // Track pressed keys for deduplication.  Use the raw HID usage id
+        // (page-specific, unambiguous).
+        let key_id = hid_usage.id();
+        let actually_down = context.pressed_keys.insert(key_id);
         if !is_down {
-            context.pressed_keys.remove(&cg_keycode);
+            context.pressed_keys.remove(&key_id);
         }
 
         // Only process key-down events for remapping.
@@ -1052,22 +967,24 @@ unsafe extern "C" fn hid_queue_value_callback(
         // Get the device ID for keyboard filtering.
         let device_id = Some(context.device_id.as_str());
 
-        // Track modifier state.
+        // Track modifier state using HidUsage directly.
         let lookup_modifiers = context.modifier_state;
-        if let Some(bit) = keycode_to_modifier_bit(cg_keycode) {
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
             context.modifier_state |= 1 << bit;
         }
 
-        // Perform the lookup.
+        // Perform the lookup.  Compiled rules store the trigger as a
+        // `HidUsage`, so the lookup is keyed by the full page-specific
+        // usage.
         let guard = context.lookup.read();
         let active_outputs = guard
             .for_app(
                 &guard.active_app(),
-                cg_keycode,
+                hid_usage,
                 lookup_modifiers,
                 device_id,
             )
-            .or_else(|| guard.global(cg_keycode, lookup_modifiers, device_id))
+            .or_else(|| guard.global(hid_usage, lookup_modifiers, device_id))
             .map(|v| v.to_vec());
         drop(guard);
 
@@ -1080,25 +997,45 @@ unsafe extern "C" fn hid_queue_value_callback(
     }
 }
 
-/// Emit a single `NativeKey` as USB HID keyboard reports.
+/// Emit a single `NativeKey` as USB HID reports.
 ///
 /// Sends a report with the modifier and base key pressed, followed by
-/// an empty report to release.
+/// an empty report to release.  Dispatches on the output usage's page:
+/// - Keyboard page (0x07): standard USB keyboard report.
+/// - Consumer page (0x0C): consumer control report.
 fn emit_hid_report(
     socket: &std::sync::Arc<super::hid_socket::HidSocket>,
     native_key: &crate::daemon::mapping_cache::NativeKey,
 ) {
-    use super::hid_socket::build_keyboard_report;
+    use super::hid_socket::{
+        build_consumer_release_report, build_consumer_report,
+        build_keyboard_report,
+    };
+    use crate::common::hid_usage::PAGE_KEYBOARD;
 
-    if let Ok(report) =
-        build_keyboard_report(native_key.modifiers, Some(native_key.base))
-    {
-        let _ = socket.send_report(&report);
-    }
+    if native_key.usage.page() == PAGE_KEYBOARD {
+        // Keyboard page: write the usage id directly into the report.
+        let usage_byte = native_key.usage.id() as u8;
 
-    // Release the key by sending an empty report.
-    if let Ok(empty_report) = build_keyboard_report(0, None) {
-        let _ = socket.send_report(&empty_report);
+        if let Ok(report) =
+            build_keyboard_report(native_key.modifiers, Some(usage_byte))
+        {
+            let _ = socket.send_report(&report);
+        }
+
+        // Release the key by sending an empty report.
+        if let Ok(empty_report) = build_keyboard_report(0, None) {
+            let _ = socket.send_report(&empty_report);
+        }
+    } else {
+        // Consumer page: build a consumer control report.
+        if let Ok(report) = build_consumer_report(native_key.usage.id()) {
+            let _ = socket.send_report(&report);
+
+            // Release the consumer key by sending an all-clear report.
+            let release_report = build_consumer_release_report();
+            let _ = socket.send_report(&release_report);
+        }
     }
 }
 
@@ -1307,29 +1244,6 @@ fn create_cf_string(s: &str) -> CFStringRef {
 }
 
 // ---------------------------------------------------------------------------
-// Modifier handling (mirrors mapping.rs for IOHID context)
-// ---------------------------------------------------------------------------
-
-/// Map a CGKeyCode to its modifier bit position.  Returns `None` for
-/// non-modifier keys.
-fn keycode_to_modifier_bit(code: u16) -> Option<u8> {
-    use crate::common::modifier::ModifierRole;
-
-    let role = match code {
-        59 => ModifierRole::LeftControl,
-        62 => ModifierRole::RightControl,
-        56 => ModifierRole::LeftShift,
-        60 => ModifierRole::RightShift,
-        58 => ModifierRole::LeftAlt,
-        61 => ModifierRole::RightAlt,
-        55 => ModifierRole::LeftCommand,
-        54 => ModifierRole::RightCommand,
-        _ => return None,
-    };
-    Some(role.bit())
-}
-
-// ---------------------------------------------------------------------------
 // Public: start IOHID device-seizure based mapping
 // ---------------------------------------------------------------------------
 
@@ -1439,60 +1353,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hid_usage_to_cg_keycode_letters() {
-        assert_eq!(cg_keycode_from_hid_usage(0x04), Some(0)); // A
-        assert_eq!(cg_keycode_from_hid_usage(0x1D), Some(6)); // Z
+    fn modifier_bit_from_hid_usage_left_control() {
+        let usage = HidUsage::LeftControl;
+        assert_eq!(HidUsage::hid_usage_to_modifier_bit(usage), Some(0));
     }
 
     #[test]
-    fn hid_usage_to_cg_keycode_numbers() {
-        assert_eq!(cg_keycode_from_hid_usage(0x1E), Some(18)); // 1
-        assert_eq!(cg_keycode_from_hid_usage(0x27), Some(29)); // 0
+    fn modifier_bit_from_hid_usage_non_modifier() {
+        let usage = HidUsage::A;
+        assert_eq!(HidUsage::hid_usage_to_modifier_bit(usage), None);
     }
 
     #[test]
-    fn hid_usage_to_cg_keycode_modifiers() {
-        assert_eq!(cg_keycode_from_hid_usage(0xE0), Some(59)); // LeftControl
-        assert_eq!(cg_keycode_from_hid_usage(0xE2), Some(56)); // LeftShift
-        assert_eq!(cg_keycode_from_hid_usage(0xE6), Some(55)); // LeftCommand
-    }
-
-    #[test]
-    fn hid_usage_to_cg_keycode_function_keys() {
-        assert_eq!(cg_keycode_from_hid_usage(0x3A), Some(122)); // F1
-        assert_eq!(cg_keycode_from_hid_usage(0x45), Some(111)); // F12
-    }
-
-    #[test]
-    fn hid_usage_to_cg_keycode_navigation() {
-        assert_eq!(cg_keycode_from_hid_usage(0x52), Some(124)); // UpArrow
-        assert_eq!(cg_keycode_from_hid_usage(0x51), Some(125)); // DownArrow
-        assert_eq!(cg_keycode_from_hid_usage(0x50), Some(123)); // LeftArrow
-        assert_eq!(cg_keycode_from_hid_usage(0x4B), Some(124)); // RightArrow
-    }
-
-    #[test]
-    fn hid_usage_to_cg_keycode_edit_keys() {
-        assert_eq!(cg_keycode_from_hid_usage(0x28), Some(36)); // Return
-        assert_eq!(cg_keycode_from_hid_usage(0x2A), Some(51)); // Backspace
-        assert_eq!(cg_keycode_from_hid_usage(0x29), Some(53)); // Escape
-        assert_eq!(cg_keycode_from_hid_usage(0x2B), Some(48)); // Tab
-        assert_eq!(cg_keycode_from_hid_usage(0x2C), Some(49)); // Space
-    }
-
-    #[test]
-    fn hid_usage_to_cg_keycode_unknown() {
-        assert_eq!(cg_keycode_from_hid_usage(0xFF), None);
-    }
-
-    #[test]
-    fn keycode_to_modifier_bit_left_control() {
-        assert_eq!(keycode_to_modifier_bit(59), Some(0));
-    }
-
-    #[test]
-    fn keycode_to_modifier_bit_non_modifier() {
-        assert_eq!(keycode_to_modifier_bit(0), None); // A is not a modifier
+    fn modifier_bit_from_hid_usage_consumer_page() {
+        let usage = HidUsage::PlayPause;
+        assert_eq!(HidUsage::hid_usage_to_modifier_bit(usage), None);
     }
 
     #[test]

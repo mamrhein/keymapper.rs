@@ -24,10 +24,11 @@ use std::{
 
 use eframe::egui;
 
-#[cfg(not(target_os = "linux"))]
-use super::register_signal_handlers;
-use super::{ModifierState, OutputEvent, map_egui_key, writer::EventWriter};
-use crate::common::Key;
+use super::{
+    ModifierState, OutputEvent, map_egui_key, register_signal_handlers,
+    writer::EventWriter,
+};
+use crate::common::hid_usage::HidUsage;
 
 /// The egui application state.
 pub struct MonitorApp {
@@ -36,7 +37,7 @@ pub struct MonitorApp {
     /// Signal flag set by the signal handler on SIGTERM/SIGINT.
     shutdown: Arc<AtomicBool>,
     /// Non-modifier keys that were pressed in the previous frame.
-    prev_keys_down: std::collections::HashSet<Key>,
+    prev_keys_down: std::collections::HashSet<HidUsage>,
     /// Modifier state from the previous frame.
     prev_modifiers: ModifierState,
 }
@@ -69,19 +70,20 @@ impl eframe::App for MonitorApp {
         // events may be coalesced or filtered by the backend.
 
         // --- Non-modifier keys ---
-        let current_keys: std::collections::HashSet<Key> = ctx.input(|i| {
-            i.keys_down
-                .iter()
-                .filter_map(|egui_key| map_egui_key(*egui_key))
-                .collect()
-        });
+        let current_keys: std::collections::HashSet<HidUsage> =
+            ctx.input(|i| {
+                i.keys_down
+                    .iter()
+                    .filter_map(|egui_key| map_egui_key(*egui_key))
+                    .collect()
+            });
 
         // Emit events for keys that changed state.
-        let added: Vec<Key> = current_keys
+        let added: Vec<HidUsage> = current_keys
             .difference(&self.prev_keys_down)
             .cloned()
             .collect();
-        let removed: Vec<Key> = self
+        let removed: Vec<HidUsage> = self
             .prev_keys_down
             .difference(&current_keys)
             .cloned()
@@ -115,25 +117,25 @@ impl eframe::App for MonitorApp {
         if current_mods.left_control != self.prev_modifiers.left_control {
             let _ = self.writer.write(OutputEvent {
                 down: current_mods.left_control,
-                key: Key::LeftControl,
+                key: HidUsage::LeftControl,
             });
         }
         if current_mods.left_shift != self.prev_modifiers.left_shift {
             let _ = self.writer.write(OutputEvent {
                 down: current_mods.left_shift,
-                key: Key::LeftShift,
+                key: HidUsage::LeftShift,
             });
         }
         if current_mods.left_alt != self.prev_modifiers.left_alt {
             let _ = self.writer.write(OutputEvent {
                 down: current_mods.left_alt,
-                key: Key::LeftAlt,
+                key: HidUsage::LeftAlt,
             });
         }
         if current_mods.left_super != self.prev_modifiers.left_super {
             let _ = self.writer.write(OutputEvent {
                 down: current_mods.left_super,
-                key: Key::LeftCommand,
+                key: HidUsage::LeftCommand,
             });
         }
 

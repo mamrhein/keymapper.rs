@@ -14,9 +14,14 @@
 //! source device.  Raw Input solves this by exposing the `hDevice` handle
 //! for each keyboard event.
 //!
+//! Raw Input is also the source of the HID key identity: keyboard events
+//! (`RIM_TYPEKEYBOARD`) are converted to `HidUsage` via the `Key` table, and
+//! Consumer Page events (`RIM_TYPEHID`, e.g. media keys from standalone
+//! Consumer Control devices) are decoded from the raw report via `hid.dll`.
+//!
 //! Architecture:
 //! - A message-only window receives `WM_INPUT` via `RegisterRawInputDevices`
-//!   with `RIDEV_INPUTSINK`.
+//!   with `RIDEV_INPUTSINK` for both keyboard and Consumer Control devices.
 //! - A dedicated thread runs the `GetMessageW` pump for this window.
 //! - Extracted `RawInputEvent`s are sent through a `crossbeam-channel`.
 
@@ -25,12 +30,17 @@ use std::ptr;
 use crossbeam_channel::Sender;
 use windows::{
     Win32::{
-        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+        Devices::HumanInterfaceDevice::{
+            HidD_FreePreparsedData, HidP_GetData, HidP_Input,
+            PHIDP_PREPARSED_DATA,
+        },
+        Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         UI::{
             Input::{
-                GetRawInputData, HRAWINPUT, KeyboardAndMouse::VIRTUAL_KEY,
-                RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
-                RIDEV_INPUTSINK, RegisterRawInputDevices,
+                GetRawInputData, GetRawInputDeviceInfoW, HRAWINPUT,
+                KeyboardAndMouse::VIRTUAL_KEY, RAWHID, RAWINPUT,
+                RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK,
+                RIDI_PREPARSEDDATA, RegisterRawInputDevices,
             },
             WindowsAndMessaging::{
                 CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
@@ -45,19 +55,42 @@ use windows::{
     core::PCWSTR,
 };
 
+use super::key::Key;
+use crate::common::hid_usage::{HidUsage, PAGE_CONSUMER};
+
 /// HID usage page for Generic Desktop.
 const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
 
 /// HID usage for Keyboard within the Generic Desktop page.
 const HID_USAGE_KEYBOARD: u16 = 0x06;
 
+/// HID usage page for Consumer.
+const HID_USAGE_PAGE_CONSUMER: u16 = 0x0C;
+
+/// HID usage for Consumer Control within the Consumer page.
+const HID_USAGE_CONSUMER_CONTROL: u16 = 0x01;
+
 /// Message type value for keyboard events in Raw Input.
 const RIM_TYPEKEYBOARD: u32 = 0x01;
+
+/// Message type value for generic HID events in Raw Input.
+///
+/// The Windows SDK defines this as 4.  The `windows` crate's `RIM_TYPEHID`
+/// constant is incorrect (2), so the SDK value is defined locally, matching
+/// the pattern used for `RIM_TYPEKEYBOARD` above.
+const RIM_TYPEHID: u32 = 0x04;
 
 /// Extra message ID used to signal the message-only window to terminate.
 const WM_STOP: u32 = WM_USER + 1;
 
 /// A keyboard event extracted from a Raw Input `WM_INPUT` message.
+///
+/// The `usage` field carries the decoded HID identity of the key — the
+/// preferred identity for mapping lookups.  Keyboard events
+/// (`RIM_TYPEKEYBOARD`) expose the key as a virtual-key code, which is
+/// converted to a `HidUsage` via the static `Key` table.  Raw HID events
+/// (`RIM_TYPEHID`, e.g. Consumer Page media keys) expose the raw report,
+/// which is decoded to a `HidUsage` via the device's report descriptor.
 ///
 /// The `device_handle_ptr` can be used to correlate the event with a specific
 /// physical keyboard.  Convert it to a string (e.g. via
@@ -65,8 +98,12 @@ const WM_STOP: u32 = WM_USER + 1;
 /// populated at startup.
 #[derive(Debug)]
 pub struct RawInputEvent {
-    /// Virtual-key code of the event.
-    pub vk_code: VIRTUAL_KEY,
+    /// Decoded HID identity of the event, if it could be resolved.
+    pub usage: Option<HidUsage>,
+
+    /// Virtual-key code of the event (keyboard events only; `None` for raw
+    /// HID events).
+    pub vk_code: Option<VIRTUAL_KEY>,
 
     /// `true` for key-up, `false` for key-down.
     pub is_key_up: bool,
@@ -172,35 +209,193 @@ unsafe fn handle_wm_input(_hwnd: HWND, l_param: LPARAM) {
         return;
     }
 
-    // Interpret the buffer as a RAWINPUT struct and extract keyboard data.
-    let (dw_type, vk, message, _device_ptr) = unsafe {
+    // Interpret the buffer as a RAWINPUT struct and dispatch on the data
+    // type: keyboard events carry a virtual-key code, while generic HID
+    // events (e.g. Consumer Page media keys) carry the raw report.
+    unsafe {
         let raw_input = &*(buffer.as_ptr() as *const RAWINPUT);
-        let keyboard = &raw_input.data.keyboard;
-        (
-            raw_input.header.dwType,
-            keyboard.VKey,
-            keyboard.Message,
-            raw_input.header.hDevice.0 as usize,
+        match raw_input.header.dwType {
+            RIM_TYPEKEYBOARD => {
+                let keyboard = &raw_input.data.keyboard;
+                let vk = keyboard.VKey;
+                let message = keyboard.Message;
+
+                // Determine key-up vs. key-down from the Message field.
+                let is_key_up = message == WM_KEYUP || message == WM_SYSKEYUP;
+
+                // The raw keyboard data only exposes the virtual-key code;
+                // the HID identity is derived via the static `Key` table.
+                let usage = Key::from_native(vk).map(Key::to_hid_usage);
+
+                let event = RawInputEvent {
+                    usage,
+                    vk_code: Some(VIRTUAL_KEY(vk)),
+                    is_key_up,
+                    device_handle_ptr: raw_input.header.hDevice.0 as usize,
+                };
+
+                if let Some(tx) = get_raw_input_tx() {
+                    let _ = tx.send(event);
+                }
+            }
+            RIM_TYPEHID => {
+                let hid = &raw_input.data.hid;
+                let data_len = hid.dwSizeHid as usize;
+
+                // `bRawData` is a flexible array member; bound it to the
+                // size reported by the driver and verify it fits the buffer.
+                let offset =
+                    hid as *const RAWHID as usize - buffer.as_ptr() as usize;
+                if data_len == 0 || data_len > buffer.len() - offset {
+                    return;
+                }
+
+                let report = std::slice::from_raw_parts(
+                    hid.bRawData.as_ptr(),
+                    data_len,
+                );
+                let Some(usage) =
+                    decode_hid_usage(raw_input.header.hDevice, report)
+                else {
+                    // Undecodable report (e.g. a key-up with no usages) —
+                    // nothing to dispatch.
+                    return;
+                };
+
+                // Raw HID events carry no key state; a decodable report
+                // identifies a key press.
+                let event = RawInputEvent {
+                    usage: Some(usage),
+                    vk_code: None,
+                    is_key_up: false,
+                    device_handle_ptr: raw_input.header.hDevice.0 as usize,
+                };
+
+                if let Some(tx) = get_raw_input_tx() {
+                    let _ = tx.send(event);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Raw HID report decoding
+// ---------------------------------------------------------------------------
+
+/// Number of usage fields to decode from a raw HID report.
+const MAX_HID_DATA_ENTRIES: usize = 64;
+
+/// Local mirror of the `HIDP_DATA` structure from `hidpi.h`.
+///
+/// The `windows` crate's `HIDP_DATA` is truncated (it is missing the
+/// `Value` union and the trailing reserved fields), so this mirror defines
+/// the full 64-bit layout (identical offsets on x86-64 and aarch64) and is
+/// used to pass storage to `HidP_GetData`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct HidpData {
+    data_in: u16,
+    reserved: u16,
+    usage_page: u16,
+    link_collection: u16,
+    usage: u16,
+    padding: u32,
+    /// `Value` union: `NumericValue` and `StringValue` share the first four
+    /// bytes.  Eight bytes mirror the pointer width on x86-64 so the struct
+    /// size and field offsets match the C layout exactly.
+    value: [u8; 8],
+    reserved1: u16,
+    reserved2: u16,
+}
+
+impl HidpData {
+    /// Return the numeric value of the usage field.
+    fn numeric_value(self) -> i32 {
+        i32::from_le_bytes(self.value[..4].try_into().unwrap())
+    }
+}
+
+/// Decode a raw HID report into the first pressed Consumer Page usage.
+///
+/// Obtains the device's preparsed data (report descriptor) via
+/// `GetRawInputDeviceInfoW` and asks `hid.dll` to decode the report.  The
+/// first entry on the Consumer page with a non-zero value identifies the
+/// pressed key (e.g. Play/Pause).  Reports without a pressed key (key-ups)
+/// yield `None`.
+fn decode_hid_usage(device: HANDLE, report: &[u8]) -> Option<HidUsage> {
+    // Query the required buffer size for the preparsed data handle.
+    let mut size: u32 = 0;
+    if unsafe {
+        GetRawInputDeviceInfoW(
+            Some(device),
+            RIDI_PREPARSEDDATA,
+            None,
+            &mut size,
         )
-    };
-
-    // We only process keyboard input.
-    if dw_type != RIM_TYPEKEYBOARD {
-        return;
+    } == u32::MAX
+    {
+        return None;
     }
 
-    // Determine key-up vs. key-down from the Message field.
-    let is_key_up = message == WM_KEYUP || message == WM_SYSKEYUP;
-
-    let event = RawInputEvent {
-        vk_code: VIRTUAL_KEY(vk),
-        is_key_up,
-        device_handle_ptr: _device_ptr,
-    };
-
-    if let Some(tx) = get_raw_input_tx() {
-        let _ = tx.send(event);
+    let mut preparsed = PHIDP_PREPARSED_DATA::default();
+    if unsafe {
+        GetRawInputDeviceInfoW(
+            Some(device),
+            RIDI_PREPARSEDDATA,
+            Some(
+                &mut preparsed as *mut PHIDP_PREPARSED_DATA
+                    as *mut std::ffi::c_void,
+            ),
+            &mut size,
+        )
+    } == u32::MAX
+    {
+        return None;
     }
+
+    if preparsed.0 == 0 {
+        return None;
+    }
+
+    let usage = (|| {
+        // `HidP_GetData` decodes the report into one entry per usage field.
+        let mut entries: Vec<HidpData> =
+            vec![HidpData::default(); MAX_HID_DATA_ENTRIES];
+        let mut count: u32 = entries.len() as u32;
+        // The safe wrapper demands a mutable slice, so pass an owned copy.
+        let mut owned_report = report.to_vec();
+        let status = unsafe {
+            HidP_GetData(
+                HidP_Input,
+                entries.as_mut_ptr().cast(),
+                &mut count,
+                preparsed,
+                &mut owned_report,
+            )
+        };
+        if status.0 != 0 {
+            return None;
+        }
+
+        entries[..count as usize].iter().find_map(|entry| {
+            if entry.usage_page == PAGE_CONSUMER && entry.numeric_value() != 0
+            {
+                HidUsage::from_code(
+                    ((PAGE_CONSUMER as u32) << 16) | entry.usage as u32,
+                )
+            } else {
+                None
+            }
+        })
+    })();
+
+    unsafe {
+        let _ = HidD_FreePreparsedData(preparsed);
+    }
+
+    usage
 }
 
 // ---------------------------------------------------------------------------
@@ -264,21 +459,32 @@ fn create_message_only_window() -> Result<HWND, Box<dyn std::error::Error>> {
 // Raw Input device registration
 // ---------------------------------------------------------------------------
 
-/// Registers all keyboard devices for Raw Input, targeting the given window.
+/// Registers keyboard and Consumer Control devices for Raw Input, targeting
+/// the given window.
 ///
+/// Keyboard events (`RIM_TYPEKEYBOARD`) carry virtual-key codes; Consumer
+/// Control events (`RIM_TYPEHID`) carry raw HID reports for media keys.
 /// Uses `RIDEV_INPUTSINK` so that events are delivered even when the
 /// application is not in the foreground.
 fn register_keyboards(hwnd: HWND) -> Result<(), Box<dyn std::error::Error>> {
-    let rid = RAWINPUTDEVICE {
-        usUsagePage: HID_USAGE_PAGE_GENERIC,
-        usUsage: HID_USAGE_KEYBOARD,
-        dwFlags: RIDEV_INPUTSINK,
-        hwndTarget: hwnd,
-    };
+    let rids = [
+        RAWINPUTDEVICE {
+            usUsagePage: HID_USAGE_PAGE_GENERIC,
+            usUsage: HID_USAGE_KEYBOARD,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+        RAWINPUTDEVICE {
+            usUsagePage: HID_USAGE_PAGE_CONSUMER,
+            usUsage: HID_USAGE_CONSUMER_CONTROL,
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
+        },
+    ];
 
     unsafe {
         RegisterRawInputDevices(
-            &[rid],
+            &rids,
             std::mem::size_of::<RAWINPUTDEVICE>() as u32,
         )?;
     }
@@ -375,12 +581,14 @@ mod tests {
     #[test]
     fn raw_input_event_fields_are_accessible() {
         let event = RawInputEvent {
-            vk_code: VIRTUAL_KEY(0x41), // 'A'
+            usage: Some(HidUsage::A),
+            vk_code: Some(VIRTUAL_KEY(0x41)), // 'A'
             is_key_up: false,
             device_handle_ptr: 0,
         };
 
-        assert_eq!(event.vk_code.0, 0x41);
+        assert_eq!(event.usage, Some(HidUsage::A));
+        assert_eq!(event.vk_code.unwrap().0, 0x41);
         assert!(!event.is_key_up);
         assert_eq!(event.device_handle_ptr, 0);
     }
@@ -388,7 +596,8 @@ mod tests {
     #[test]
     fn raw_input_event_key_up() {
         let event = RawInputEvent {
-            vk_code: VIRTUAL_KEY(0x10), // LShift
+            usage: Some(HidUsage::LeftShift),
+            vk_code: Some(VIRTUAL_KEY(0x10)), // LShift
             is_key_up: true,
             device_handle_ptr: 0,
         };
@@ -401,6 +610,24 @@ mod tests {
         // Verify the HID usage page and usage constants match expected values.
         assert_eq!(HID_USAGE_PAGE_GENERIC, 0x01);
         assert_eq!(HID_USAGE_KEYBOARD, 0x06);
+        assert_eq!(HID_USAGE_PAGE_CONSUMER, 0x0C);
+        assert_eq!(HID_USAGE_CONSUMER_CONTROL, 0x01);
+    }
+
+    #[test]
+    fn rim_type_hid_constant_matches_sdk() {
+        // The Windows SDK defines RIM_TYPEHID as 4.
+        assert_eq!(RIM_TYPEHID, 0x04);
+    }
+
+    #[test]
+    fn hidp_data_layout_matches_sdk() {
+        // The 64-bit layout must match hidpi.h: UsagePage at offset 4,
+        // Usage at offset 8, NumericValue at offset 16, size 28.
+        assert_eq!(std::mem::offset_of!(HidpData, usage_page), 4);
+        assert_eq!(std::mem::offset_of!(HidpData, usage), 8);
+        assert_eq!(std::mem::offset_of!(HidpData, value), 16);
+        assert_eq!(std::mem::size_of::<HidpData>(), 28);
     }
 
     #[test]
@@ -408,7 +635,8 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<RawInputEvent>();
 
         let event = RawInputEvent {
-            vk_code: VIRTUAL_KEY(0x57), // 'W'
+            usage: Some(HidUsage::W),
+            vk_code: Some(VIRTUAL_KEY(0x57)), // 'W'
             is_key_up: false,
             device_handle_ptr: 0,
         };
@@ -416,7 +644,8 @@ mod tests {
         tx.send(event).unwrap();
 
         let received = rx.recv().unwrap();
-        assert_eq!(received.vk_code.0, 0x57);
+        assert_eq!(received.usage, Some(HidUsage::W));
+        assert_eq!(received.vk_code.unwrap().0, 0x57);
         assert!(!received.is_key_up);
     }
 
@@ -427,7 +656,8 @@ mod tests {
         // Send a burst of events without blocking.
         for i in 0..1000 {
             tx.send(RawInputEvent {
-                vk_code: VIRTUAL_KEY(i as u16),
+                usage: None,
+                vk_code: Some(VIRTUAL_KEY(i as u16)),
                 is_key_up: i % 2 == 0,
                 device_handle_ptr: 0,
             })
@@ -446,13 +676,15 @@ mod tests {
     fn multi_device_event_distinction() {
         // Verify that events from different devices can be distinguished.
         let event1 = RawInputEvent {
-            vk_code: VIRTUAL_KEY(0x41),
+            usage: Some(HidUsage::A),
+            vk_code: Some(VIRTUAL_KEY(0x41)),
             is_key_up: false,
             device_handle_ptr: 0x1000, // Device 1
         };
 
         let event2 = RawInputEvent {
-            vk_code: VIRTUAL_KEY(0x41),
+            usage: Some(HidUsage::A),
+            vk_code: Some(VIRTUAL_KEY(0x41)),
             is_key_up: false,
             device_handle_ptr: 0x2000, // Device 2
         };
@@ -477,7 +709,8 @@ mod tests {
                 thread::spawn(move || {
                     for i in 0..events_per_sender {
                         tx.send(RawInputEvent {
-                            vk_code: VIRTUAL_KEY(i as u16),
+                            usage: None,
+                            vk_code: Some(VIRTUAL_KEY(i as u16)),
                             is_key_up: i % 2 == 0,
                             device_handle_ptr: sender_id as usize,
                         })
@@ -508,7 +741,8 @@ mod tests {
         // Send events in a specific order.
         for i in 0..100 {
             tx.send(RawInputEvent {
-                vk_code: VIRTUAL_KEY(i),
+                usage: None,
+                vk_code: Some(VIRTUAL_KEY(i)),
                 is_key_up: false,
                 device_handle_ptr: 0,
             })
@@ -519,7 +753,8 @@ mod tests {
         for expected in 0..100 {
             let event = rx.recv().unwrap();
             assert_eq!(
-                event.vk_code.0, expected,
+                event.vk_code.unwrap().0,
+                expected,
                 "event ordering violated at index {expected}"
             );
         }
@@ -557,14 +792,15 @@ mod tests {
     #[test]
     fn raw_input_event_debug_format() {
         let event = RawInputEvent {
-            vk_code: VIRTUAL_KEY(0x41),
+            usage: Some(HidUsage::A),
+            vk_code: Some(VIRTUAL_KEY(0x41)),
             is_key_up: true,
             device_handle_ptr: 0x1234,
         };
 
         let debug_str = format!("{event:?}");
         assert!(debug_str.contains("RawInputEvent"));
-        assert!(debug_str.contains("0x41") || debug_str.contains("65"));
+        assert!(debug_str.contains("device_handle_ptr"));
     }
 
     #[test]

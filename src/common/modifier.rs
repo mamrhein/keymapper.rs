@@ -40,6 +40,10 @@ pub(crate) enum ModifierRole {
 
 impl ModifierRole {
     /// Returns the bit position for this modifier.
+    ///
+    /// Used by the Linux and Windows key modules to map a modifier role to
+    /// its position in the 8-bit mask; macOS derives the mask directly.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) const fn bit(self) -> u8 {
         self as u8
     }
@@ -54,6 +58,10 @@ impl ModifierRole {
     /// Returns both bit positions for the modifier family (left and right).
     ///
     /// For `LeftControl` or `RightControl` this returns `(0, 1)`, etc.
+    ///
+    /// Used by the Linux and Windows key modules to report both keys of a
+    /// modifier family; macOS does not need this.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) const fn family_positions(self) -> (u8, u8) {
         match self {
             Self::LeftControl | Self::RightControl => (0, 1),

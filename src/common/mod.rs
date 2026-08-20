@@ -8,16 +8,16 @@
 // $Revision$
 
 //! Shared configuration parsing, path resolution, modifier definitions, and
-//! platform-agnostic key identities.
+//! the HID-centric key identity ([`HidUsage`]) used as the canonical key type
+//! across all platforms.
 
 pub mod config;
 pub mod config_path;
-pub mod key;
+pub mod hid_usage;
 pub mod keyboard;
 pub(crate) mod modifier;
 
-pub use key::Key;
-pub(crate) use key::unknown_key_error;
+pub use hid_usage::HidUsage;
 pub use keyboard::{
     KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
 };

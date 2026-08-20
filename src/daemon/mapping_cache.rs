@@ -11,9 +11,8 @@ use std::{fs, path::Path};
 
 use indexmap::IndexMap;
 
-use crate::{
-    common::{config::AppConfig, keyboard::KeyboardSpecifier},
-    platform::Key,
+use crate::common::{
+    config::AppConfig, hid_usage::HidUsage, keyboard::KeyboardSpecifier,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,16 +34,16 @@ use crate::{
 pub struct NativeKey {
     /// Bitmask of specific modifier keys currently held.
     pub modifiers: u8,
-    /// Native key code of the base key (any key, including modifier keys).
-    pub base: u16,
+    /// HID usage of the base key (any key, including modifier keys).
+    pub usage: HidUsage,
 }
 
 /// A single compiled rule: trigger key paired with output events.
 /// Multiple entries may share the same base key but differ in modifiers.
 #[derive(Debug, Clone)]
 pub struct CompiledRule {
-    /// Native key code of the trigger's base key.
-    pub base: u16,
+    /// HID usage of the trigger's base key.
+    pub usage: HidUsage,
     /// Exact modifier bitmask for matching.
     pub modifiers: u8,
     /// Output events to emit when this rule matches.
@@ -57,10 +56,11 @@ pub struct CompiledRule {
 
 /// Compiled key-mapping cache optimised for fast runtime lookups.
 ///
-/// All rules use a unified `IndexMap` keyed by the base key code.  Modifier
-/// discrimination happens at lookup time by scanning entries with matching
-/// modifier bits.  The first match wins, preserving definition order within
-/// each app scope.
+/// All rules store the trigger as a `HidUsage`, so lookups are keyed by the
+/// full page-specific usage and ids that repeat across pages never collide.
+/// Modifier discrimination happens at lookup time by scanning entries with
+/// matching modifier bits.  The first match wins, preserving definition
+/// order within each app scope.
 #[derive(Debug)]
 pub struct RuntimeLookupCache {
     /// Per-app rules: app name -> list of compiled rules.
@@ -143,13 +143,9 @@ impl RuntimeLookupCache {
                 // Expand modifier variants for "either side" semantics.
                 let variants = expand_modifier_bits(&trigger.modifiers);
 
-                let trigger_base = Key::from_common(trigger.base)
-                    .expect("key not supported on this platform")
-                    .as_native();
-
                 for mod_bits in variants {
                     let rule = CompiledRule {
-                        base: trigger_base,
+                        usage: trigger.base,
                         modifiers: mod_bits,
                         outputs: native_outputs.clone(),
                         keyboards: group_keyboards.clone(),
@@ -184,9 +180,7 @@ fn compile_outputs(
         .iter()
         .map(|event| NativeKey {
             modifiers: compile_modifier_bits(&event.modifiers),
-            base: Key::from_common(event.base)
-                .expect("key not supported on this platform")
-                .as_native(),
+            usage: event.base,
         })
         .collect()
 }
@@ -195,12 +189,10 @@ fn compile_outputs(
 ///
 /// Each modifier contributes its own specific bit (left vs right is
 /// preserved).
-fn compile_modifier_bits(keys: &[crate::common::Key]) -> u8 {
+fn compile_modifier_bits(modifiers: &[HidUsage]) -> u8 {
     let mut bits: u8 = 0;
-    for key in keys {
-        if let Some(platform_key) = Key::from_common(*key)
-            && let Some(bit) = platform_key.as_modifier_bit()
-        {
+    for usage in modifiers {
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(*usage) {
             bits |= 1 << bit;
         }
     }
@@ -209,29 +201,29 @@ fn compile_modifier_bits(keys: &[crate::common::Key]) -> u8 {
 
 /// Expand modifier keys into all "either side" variant bitmasks.
 ///
-/// For group aliases (e.g. "ctrl" -> LeftControl), both left and right bits
-/// are valid matches.  For specific keys (e.g. "rightctrl" -> RightControl),
-/// only the corresponding bit matches.
+/// For generic aliases (e.g. "Ctrl" -> LeftControl), both left and right
+/// bits are valid matches.  For specific keys (e.g. "RightControl"), only
+/// the corresponding bit matches.
 ///
 /// Returns a list of bitmasks, one per variant.  A bare key (no modifiers)
 /// produces a single entry: `vec![0]`.
-fn expand_modifier_bits(modifiers: &[crate::common::Key]) -> Vec<u8> {
+fn expand_modifier_bits(modifiers: &[HidUsage]) -> Vec<u8> {
     if modifiers.is_empty() {
         return vec![0];
     }
 
-    // Collect the possible bit positions for each modifier.
+    // Collect the possible bit positions for each modifier.  Left-side
+    // modifier usages come from generic aliases ("Ctrl" -> LeftControl) and
+    // match both left and right bits.  Right-side usages match only their
+    // specific bit.  The modifier-bit layout pairs consecutive bits as
+    // (left, right), so left-side positions are even.
     let choices: Vec<Vec<u8>> = modifiers
         .iter()
-        .map(|key| {
-            if let Some(platform_key) = Key::from_common(*key)
-                && let Some(positions) = platform_key.as_modifier_positions()
-            {
-                return positions;
-            }
-            // Non-modifier in modifier position -- should not happen,
-            // but treat as no contribution.
-            vec![0]
+        .map(|usage| match HidUsage::hid_usage_to_modifier_bit(*usage) {
+            Some(bit) if bit % 2 == 0 => vec![bit, bit + 1],
+            Some(bit) => vec![bit],
+            // Non-modifier in modifier position.
+            None => vec![0],
         })
         .collect();
 
@@ -257,7 +249,6 @@ fn expand_modifier_bits(modifiers: &[crate::common::Key]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::Key as CommonKey;
 
     // Bit positions per the header comment:
     // bit 0: left control,   bit 1: right control
@@ -278,24 +269,23 @@ mod tests {
     #[test]
     fn expand_single_generic_modifier() {
         // LeftControl maps to modifier group [0, 1], so "either side" matches.
-        let result = expand_modifier_bits(&[CommonKey::LeftControl]);
+        let result = expand_modifier_bits(&[HidUsage::LeftControl]);
         assert_eq!(result, vec![1 << 0, 1 << 1]);
     }
 
     #[test]
     fn expand_single_specific_modifier() {
-        // RightControl also maps to group [0, 1] — the enum variant does not
-        // narrow matching; narrowing only affects output emission.
-        let result = expand_modifier_bits(&[CommonKey::RightControl]);
-        assert_eq!(result, vec![1 << 0, 1 << 1]);
+        // RightControl matches only its own bit (bit 1).
+        let result = expand_modifier_bits(&[HidUsage::RightControl]);
+        assert_eq!(result, vec![1 << 1]);
     }
 
     #[test]
     fn expand_two_modifiers() {
         // Ctrl + Shift → cartesian product of {0,1} × {2,3}.
         let result = expand_modifier_bits(&[
-            CommonKey::LeftControl,
-            CommonKey::LeftShift,
+            HidUsage::LeftControl,
+            HidUsage::LeftShift,
         ]);
         assert_eq!(
             result,
@@ -312,19 +302,19 @@ mod tests {
     fn expand_three_modifiers() {
         // Ctrl + Shift + Alt → 2×2×2 = 8 variants.
         let result = expand_modifier_bits(&[
-            CommonKey::LeftControl,
-            CommonKey::LeftShift,
-            CommonKey::LeftAlt,
+            HidUsage::LeftControl,
+            HidUsage::LeftShift,
+            HidUsage::LeftAlt,
         ]);
         assert_eq!(result.len(), 8);
     }
 
     #[test]
     fn expand_non_modifier_in_modifiers_list() {
-        // Non-modifier keys return None from as_modifier_positions, falling
-        // back to vec![0].  In the cartesian product this means bit 0 is
-        // set — a quirk of the fallback path.
-        let result = expand_modifier_bits(&[CommonKey::A]);
+        // Non-modifier usages have no modifier bit and fall back to vec![0].
+        // In the cartesian product this means bit 0 is set — a quirk of the
+        // fallback path.
+        let result = expand_modifier_bits(&[HidUsage::A]);
         assert_eq!(result, vec![1 << 0]);
     }
 
@@ -339,22 +329,22 @@ mod tests {
 
     #[test]
     fn compile_modifier_bits_single() {
-        assert_eq!(compile_modifier_bits(&[CommonKey::LeftControl]), 1 << 0);
-        assert_eq!(compile_modifier_bits(&[CommonKey::RightControl]), 1 << 1);
-        assert_eq!(compile_modifier_bits(&[CommonKey::LeftShift]), 1 << 2);
-        assert_eq!(compile_modifier_bits(&[CommonKey::RightShift]), 1 << 3);
-        assert_eq!(compile_modifier_bits(&[CommonKey::LeftAlt]), 1 << 4);
-        assert_eq!(compile_modifier_bits(&[CommonKey::RightAlt]), 1 << 5);
-        assert_eq!(compile_modifier_bits(&[CommonKey::LeftCommand]), 1 << 6);
-        assert_eq!(compile_modifier_bits(&[CommonKey::RightCommand]), 1 << 7);
+        assert_eq!(compile_modifier_bits(&[HidUsage::LeftControl]), 1 << 0);
+        assert_eq!(compile_modifier_bits(&[HidUsage::RightControl]), 1 << 1);
+        assert_eq!(compile_modifier_bits(&[HidUsage::LeftShift]), 1 << 2);
+        assert_eq!(compile_modifier_bits(&[HidUsage::RightShift]), 1 << 3);
+        assert_eq!(compile_modifier_bits(&[HidUsage::LeftAlt]), 1 << 4);
+        assert_eq!(compile_modifier_bits(&[HidUsage::RightAlt]), 1 << 5);
+        assert_eq!(compile_modifier_bits(&[HidUsage::LeftCommand]), 1 << 6);
+        assert_eq!(compile_modifier_bits(&[HidUsage::RightCommand]), 1 << 7);
     }
 
     #[test]
     fn compile_modifier_bits_multiple() {
         assert_eq!(
             compile_modifier_bits(&[
-                CommonKey::LeftControl,
-                CommonKey::LeftShift
+                HidUsage::LeftControl,
+                HidUsage::LeftShift
             ]),
             (1 << 0) | (1 << 2)
         );
@@ -363,7 +353,7 @@ mod tests {
     #[test]
     fn compile_modifier_bits_non_modifier_ignored() {
         // Non-modifiers don't contribute a bit.
-        assert_eq!(compile_modifier_bits(&[CommonKey::A]), 0);
+        assert_eq!(compile_modifier_bits(&[HidUsage::A]), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -393,10 +383,10 @@ mod tests {
         assert!(cache.process_rules("any").is_none());
 
         let rule = &cache.global_rules()[0];
-        assert_eq!(rule.base, Key::CapsLock.as_native());
+        assert_eq!(rule.usage, HidUsage::CapsLock);
         assert_eq!(rule.modifiers, 0);
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, Key::LeftControl.as_native());
+        assert_eq!(rule.outputs[0].usage, HidUsage::LeftControl);
     }
 
     #[test]
@@ -429,12 +419,12 @@ mod tests {
         let cache = build_cache(yaml);
         assert_eq!(cache.global_rules().len(), 2);
 
-        let bases: Vec<u16> =
-            cache.global_rules().iter().map(|r| r.base).collect();
+        let usages: Vec<HidUsage> =
+            cache.global_rules().iter().map(|r| r.usage).collect();
         let mods: Vec<u8> =
             cache.global_rules().iter().map(|r| r.modifiers).collect();
 
-        assert!(bases.contains(&Key::H.as_native()));
+        assert!(usages.contains(&HidUsage::H));
         assert_eq!(mods.len(), 2);
         assert!(mods.contains(&(1 << 0))); // left control
         assert!(mods.contains(&(1 << 1))); // right control
@@ -450,7 +440,7 @@ mod tests {
         let rule = &cache.global_rules()[0];
 
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, Key::LeftArrow.as_native());
+        assert_eq!(rule.outputs[0].usage, HidUsage::LeftArrow);
         // Cmd resolves to LeftCommand → bit 6.
         assert_eq!(rule.outputs[0].modifiers, 1 << 6);
     }
@@ -465,9 +455,9 @@ mod tests {
         let rule = &cache.global_rules()[0];
 
         assert_eq!(rule.outputs.len(), 2);
-        assert_eq!(rule.outputs[0].base, Key::T.as_native());
+        assert_eq!(rule.outputs[0].usage, HidUsage::T);
         assert_eq!(rule.outputs[0].modifiers, 1 << 6); // Cmd
-        assert_eq!(rule.outputs[1].base, Key::F1.as_native());
+        assert_eq!(rule.outputs[1].usage, HidUsage::F1);
         assert_eq!(rule.outputs[1].modifiers, 0);
     }
 
@@ -517,7 +507,7 @@ mod tests {
         assert_eq!(rules.len(), 7);
 
         // The first entry should be the Ctrl+Shift+A rule.
-        assert_eq!(rules[0].base, Key::A.as_native());
+        assert_eq!(rules[0].usage, HidUsage::A);
     }
 
     #[test]
@@ -547,10 +537,10 @@ mod tests {
         let cache = build_cache(yaml);
         let rule = &cache.global_rules()[0];
 
-        assert_eq!(rule.base, Key::CapsLock.as_native());
+        assert_eq!(rule.usage, HidUsage::CapsLock);
         assert_eq!(rule.modifiers, 0); // bare key, no modifiers
         assert_eq!(rule.outputs.len(), 1);
-        assert_eq!(rule.outputs[0].base, Key::L.as_native());
+        assert_eq!(rule.outputs[0].usage, HidUsage::L);
         assert_eq!(rule.outputs[0].modifiers, 1 << 4); // LeftAlt → bit 4
     }
 
@@ -567,8 +557,8 @@ mod tests {
 
         // All rules should have base = A and output = F12.
         for rule in cache.global_rules() {
-            assert_eq!(rule.base, Key::A.as_native());
-            assert_eq!(rule.outputs[0].base, Key::F12.as_native());
+            assert_eq!(rule.usage, HidUsage::A);
+            assert_eq!(rule.outputs[0].usage, HidUsage::F12);
         }
     }
 
@@ -590,12 +580,13 @@ mod tests {
 
         // The first rule should output LeftControl, the second RightControl.
         assert_eq!(
-            cache.global_rules()[0].outputs[0].base,
-            Key::LeftControl.as_native()
+            cache.global_rules()[0].outputs[0].usage,
+            HidUsage::LeftControl
         );
+
         assert_eq!(
-            cache.global_rules()[1].outputs[0].base,
-            Key::RightControl.as_native()
+            cache.global_rules()[1].outputs[0].usage,
+            HidUsage::RightControl
         );
     }
 

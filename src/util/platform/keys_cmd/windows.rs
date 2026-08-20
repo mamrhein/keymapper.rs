@@ -13,9 +13,7 @@ use windows::Win32::{
     Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Input::KeyboardAndMouse::{
-            GetKeyState, MapVirtualKeyW, VIRTUAL_KEY, VK_CONTROL,
-        },
+        Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL},
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK,
             KBDLLHOOKSTRUCT, MSG, PostQuitMessage, SetWindowsHookExW,
@@ -88,13 +86,13 @@ extern "system" fn probe_keyboard_proc(
     }
 
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
-    let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
+    let vk_code = kbd_struct.vkCode as u16;
 
     let is_key_down =
         w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
 
     // Check for Ctrl+Escape exit condition.
-    if is_key_down && vk_code.0 == 0x1B {
+    if is_key_down && vk_code == 0x1B {
         // VK_ESCAPE
         let ctrl_state = unsafe { GetKeyState(VK_CONTROL.0 as i32) };
         if ctrl_state < 0 {
@@ -105,21 +103,17 @@ extern "system" fn probe_keyboard_proc(
         }
     }
 
-    // Print on key down.
+    // Print on key down.  The canonical name and the HID usage id are
+    // resolved via the shared `HidUsage` type, matching the other
+    // platforms' probe output.
     if is_key_down {
-        let (name, code_str) = if let Some(key) = Key::from_native(vk_code.0) {
-            (key.as_str().to_string(), format!("{}", key.as_native()))
-        } else {
-            // Try to get a character representation.
-            let char_code = unsafe {
-                MapVirtualKeyW(vk_code.0 as u32, windows::Win32::UI::Input::KeyboardAndMouse::MAP_VIRTUAL_KEY_TYPE(2))
-            };
-            let name = if char_code != 0 && (char_code as u8) as char != '\0' {
-                format!("Unknown({}, {})", vk_code.0, char_code as u8 as char)
-            } else {
-                format!("Unknown({})", vk_code.0)
-            };
-            (name, format!("{}", vk_code.0))
+        let (name, code_str) = match Key::from_native(vk_code)
+            .map(Key::to_hid_usage)
+        {
+            Some(usage) => {
+                (usage.as_str().to_string(), format!("0x{:02X}", usage.id()))
+            }
+            None => (format!("Unknown({vk_code})"), format!("{vk_code}")),
         };
 
         println!("{name}: {code_str}");
