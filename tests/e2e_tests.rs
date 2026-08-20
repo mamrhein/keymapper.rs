@@ -527,6 +527,42 @@ fn single_key_injection_step(key: HidUsage) -> InjectionStep {
     }
 }
 
+/// Build the expected log events for a group of output KeyEvents.
+///
+/// When *is_down* is true, emits down events for each output key in order.
+/// When false, emits up events in reverse order (matching the daemon's
+/// chord output semantics).
+fn build_expected_output_events(
+    outputs: &[keymapper::common::config::KeyEvent],
+    is_down: bool,
+) -> Vec<LogEvent> {
+    let mut events = Vec::new();
+
+    let ordered_outputs = if is_down {
+        outputs.to_vec()
+    } else {
+        outputs.iter().rev().cloned().collect()
+    };
+
+    for output in &ordered_outputs {
+        // For a chord output, emit modifier downs first, then base.
+        if is_down {
+            for mod_key in &output.modifiers {
+                events.push(event_str(mod_key.as_str(), true));
+            }
+            events.push(event_str(output.base.as_str(), true));
+        } else {
+            // Release base first, then modifiers in reverse.
+            events.push(event_str(output.base.as_str(), false));
+            for mod_key in output.modifiers.iter().rev() {
+                events.push(event_str(mod_key.as_str(), false));
+            }
+        }
+    }
+
+    events
+}
+
 /// Convert a platform-agnostic `[HidUsage]` to the platform-specific
 /// native key code for injection.
 ///
