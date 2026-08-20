@@ -476,17 +476,22 @@ pub fn build_keyboard_report(
 ///
 /// Constructs a raw HID report matching the Consumer Page collection
 /// declared in the DriverKit descriptor.  Report format:
-/// `[report_id=2, usage_lo, usage_hi]` for a 16-bit usage field.
+/// `[report_id=2, press_lo, press_hi, release_lo, release_hi]` for two
+/// 16-bit usage fields (press and release).
+///
+/// The usage is placed in the press field; the release field is left zero.
+/// To release the key, send an all-clear report (see
+/// [`build_consumer_release_report`]).
 ///
 /// Returns [`HidSocketError::UnknownConsumerUsage`] for usages without
 /// a known mapping.
 pub fn build_consumer_report(
     usage_id: u16,
-) -> Result<[u8; 3], HidSocketError> {
+) -> Result<[u8; 5], HidSocketError> {
     // Validate that the usage_id is a known Consumer Page usage.
     // This check ensures we only send valid consumer controls to the
     // DriverKit driver.
-    let _ = match usage_id {
+    match usage_id {
         // Media controls
         0xCD | // Play/Pause
         0xE9 | // Volume Up
@@ -501,12 +506,21 @@ pub fn build_consumer_report(
         _ => Err(HidSocketError::UnknownConsumerUsage(usage_id)),
     }?;
 
-    let mut report = [0u8; 3];
+    let mut report = [0u8; 5];
     report[0] = 2; // Report ID for consumer page
-    report[1] = (usage_id & 0xFF) as u8; // Usage low byte
-    report[2] = ((usage_id >> 8) & 0xFF) as u8; // Usage high byte
+    report[1] = (usage_id & 0xFF) as u8; // Press field, low byte
+    report[2] = ((usage_id >> 8) & 0xFF) as u8; // Press field, high byte
+    // Release field (bytes 3--4) stays zero.
 
     Ok(report)
+}
+
+/// Build an all-clear Consumer Page HID report to release a consumer key.
+///
+/// Report format: `[report_id=2, 0, 0, 0, 0]` — both the press and release
+/// 16-bit usage fields are zero, which releases any held consumer key.
+pub fn build_consumer_release_report() -> [u8; 5] {
+    [2, 0, 0, 0, 0]
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +600,55 @@ mod tests {
         // A fully empty report (key up, no modifiers).
         let report = build_keyboard_report(0x00, None).unwrap();
         assert_eq!(report, [1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Consumer report construction
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_consumer_report_play_pause() {
+        // Play/Pause is Consumer Page usage 0xCD.
+        let report = build_consumer_report(0xCD).unwrap();
+        assert_eq!(report[0], 2); // Report ID
+        assert_eq!(report[1], 0xCD); // Press field, low byte
+        assert_eq!(report[2], 0x00); // Press field, high byte
+        assert_eq!(&report[3..], &[0u8; 2]); // Release field zero
+    }
+
+    #[test]
+    fn test_build_consumer_report_high_usage() {
+        // Volume Up is Consumer Page usage 0xE9.
+        let report = build_consumer_report(0xE9).unwrap();
+        assert_eq!(report[1], 0xE9);
+        assert_eq!(report[2], 0x00);
+    }
+
+    #[test]
+    fn test_build_consumer_report_unknown_usage() {
+        // Usage 0x00 is not a known consumer control.
+        assert!(matches!(
+            build_consumer_report(0x00),
+            Err(HidSocketError::UnknownConsumerUsage(0x00))
+        ));
+    }
+
+    #[test]
+    fn test_build_consumer_release_report() {
+        // An all-clear report: report ID 2, both fields zero.
+        assert_eq!(build_consumer_release_report(), [2, 0, 0, 0, 0]);
+    }
+
+    /// Simulate the report sequence for a consumer key press and release.
+    #[test]
+    fn test_consumer_press_release_sequence() {
+        // Press Play/Pause (0xCD).
+        let press = build_consumer_report(0xCD).unwrap();
+        assert_eq!(press, [2, 0xCD, 0x00, 0x00, 0x00]);
+
+        // Release: all-clear report.
+        let release = build_consumer_release_report();
+        assert_eq!(release, [2, 0x00, 0x00, 0x00, 0x00]);
     }
 
     // -----------------------------------------------------------------------

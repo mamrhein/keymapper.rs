@@ -945,7 +945,7 @@ unsafe extern "C" fn hid_queue_value_callback(
         // Construct HidUsage from raw HID page/id.  Use this for all
         // modifier tracking, deduplication, and key identification.
         let Some(hid_usage) =
-            HidUsage::from_code((usage_page as u32) << 16 | (usage as u32))
+            HidUsage::from_code(usage_page << 16 | (usage as u32))
         else {
             // Unknown usage — let it pass through.
             continue;
@@ -1007,7 +1007,10 @@ fn emit_hid_report(
     socket: &std::sync::Arc<super::hid_socket::HidSocket>,
     native_key: &crate::daemon::mapping_cache::NativeKey,
 ) {
-    use super::hid_socket::{build_consumer_report, build_keyboard_report};
+    use super::hid_socket::{
+        build_consumer_release_report, build_consumer_report,
+        build_keyboard_report,
+    };
     use crate::common::hid_usage::PAGE_KEYBOARD;
 
     if native_key.usage.page() == PAGE_KEYBOARD {
@@ -1029,9 +1032,9 @@ fn emit_hid_report(
         if let Ok(report) = build_consumer_report(native_key.usage.id()) {
             let _ = socket.send_report(&report);
 
-            // Release the consumer key by sending an empty report.
-            let empty_report = [0u8; 3];
-            let _ = socket.send_report(&empty_report);
+            // Release the consumer key by sending an all-clear report.
+            let release_report = build_consumer_release_report();
+            let _ = socket.send_report(&release_report);
         }
     }
 }
