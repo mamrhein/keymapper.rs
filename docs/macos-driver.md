@@ -19,9 +19,9 @@ Because device seizure requires privileged access, `keymapperd` runs as a **Laun
 
 ### Output emission (DriverKit virtual HID driver)
 
-The `KeyMapperVirtualHID` DriverKit extension exposes a virtual USB HID keyboard device. When a remapped key is produced, `keymapperd` sends the resulting USB HID keyboard report to the driver over a Unix domain socket. The macOS I/O HID stack treats this as input from a physical keyboard, so it works in all applications — including those that use raw input APIs or have accessibility restrictions.
+The `KeyMapperVirtualHID` DriverKit extension exposes a virtual USB HID keyboard device. When a remapped key is produced, `keymapperd` opens the driver with `IOServiceOpen()` and sends the resulting USB HID keyboard report to it through `IOConnectCallMethod()`. The macOS I/O HID stack treats this as input from a physical keyboard, so it works in all applications — including those that use raw input APIs or have accessibility restrictions.
 
-Communication between `keymapperd` and the driver is handled through a Unix domain socket at `/tmp/keymapper-vhid.sock`.
+Communication between `keymapperd` and the driver is handled through IOKit Mach messages on the opened service connection.
 
 ### Why this approach?
 

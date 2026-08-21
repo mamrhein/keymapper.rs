@@ -18,8 +18,8 @@
     <string>@LOG_DIR@/keymapperd-err.log</string>
     <!--
         The daemon runs as root to perform IOKit device seizure. Input events
-        are captured via IOHIDManager and forwarded to the user-space client
-        over a Unix domain socket.
+        are captured via IOHIDManager, and remapped output is emitted through
+        the DriverKit virtual HID driver.
     -->
 </dict>
 </plist>

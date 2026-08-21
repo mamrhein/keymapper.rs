@@ -16,7 +16,7 @@
 /// selector, and the report payload is passed as the call's structure input.
 ///
 /// This header is the single source of truth for the selector values. The
-/// Rust client mirrors these constants (see `src/platform/macos/hid_socket.rs`),
+/// Rust client mirrors these constants (see `src/platform/macos/hid_virt_kbd_conn.rs`),
 /// so any change here must be reflected there.
 
 #pragma once

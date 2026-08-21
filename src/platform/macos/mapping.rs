@@ -24,7 +24,7 @@ use signal_hook::{
     flag::register,
 };
 
-use super::hid_socket::HidSocket;
+use super::hid_virt_kbd_conn::HidVirtKbdConn;
 
 /// Start keyboard input capture via IOKit device seizure.
 ///
@@ -43,24 +43,22 @@ pub fn start_mapping(
         .expect("failed to register SIGTERM handler");
 
     // Open the virtual HID keyboard.  Fail fast if the driver is not loaded.
-    let socket = HidSocket::discover_and_open().map_err(|e| {
+    let conn = HidVirtKbdConn::discover_and_open().map_err(|e| {
         format!(
             "DriverKit HID driver not available ({e}). Load the \
              KeyMapperDriver extension."
         )
     })?;
 
-    // HidSocket holds only an IOService connection handle (a Mach port
+    // HidVirtKbdConn holds only an IOService connection handle (a Mach port
     // right), so it is Send + Sync.  In practice it is used only on the
     // main thread (CFRunLoop), where the queue callbacks emit reports.
-    let handle = super::iokit_hid::start_iohid_seizure_mapping(
-        lookup,
-        Arc::new(socket),
-    )
-    .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
+    let handle =
+        super::iokit_hid::start_iohid_seizure_mapping(lookup, Arc::new(conn))
+            .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
 
-    // The socket is open and the seizure mapping is live, so the daemon can
-    // now process events.  Signal readiness for the e2e harness.
+    // The connection is open and the seizure mapping is live, so the daemon
+    // can now process events.  Signal readiness for the e2e harness.
     crate::daemon::signal_ready();
 
     run_event_loop(handle, shutdown)

@@ -10,7 +10,7 @@
 //! macOS implementation of the `keymapper driver` commands.
 //!
 //! Handles building and installing the DriverKit extension from source,
-//! checking its IOKit registry state, and probing socket connectivity.
+//! checking its IOKit registry state, and probing connection availability.
 
 use std::path::PathBuf;
 
@@ -171,7 +171,8 @@ fn find_project_dir() -> Result<PathBuf, String> {
 fn is_driver_loaded_in_iokit() -> bool {
     // Use `ioreg` to query the IOKit registry for our driver class.  This
     // avoids linking against IOKit directly in the CLI binary (which already
-    // links dynamically for the hid_socket module but keeps things cleaner).
+    // links dynamically for the hid_virt_kbd_conn module but keeps things
+    // cleaner).
     let output = std::process::Command::new("ioreg")
         .args(["-c", DRIVER_CLASS, "-r", "-l1"])
         .output()
@@ -189,13 +190,13 @@ fn is_driver_loaded_in_iokit() -> bool {
     false
 }
 
-/// Attempt to connect a socket to the virtual HID driver.
+/// Attempt to open a connection to the virtual HID driver.
 ///
-/// Uses the `HidSocket::discover_and_open` API from the platform module.
-/// Returns `true` if a socket connection succeeds.
-fn is_socket_connected() -> bool {
-    use crate::platform::HidSocket;
-    HidSocket::discover_and_open().is_ok()
+/// Uses the `HidVirtKbdConn::discover_and_open` API from the platform
+/// module.  Returns `true` if the connection succeeds.
+fn is_conn_established() -> bool {
+    use crate::platform::HidVirtKbdConn;
+    HidVirtKbdConn::discover_and_open().is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -256,8 +257,8 @@ pub fn install() -> Result<(), String> {
 pub fn status() -> DriverStatus {
     let installed_path = find_installed_kext();
     let loaded_in_iokit = is_driver_loaded_in_iokit();
-    let socket_connected = if loaded_in_iokit {
-        is_socket_connected()
+    let conn_established = if loaded_in_iokit {
+        is_conn_established()
     } else {
         false
     };
@@ -266,7 +267,7 @@ pub fn status() -> DriverStatus {
         installed: installed_path.is_some(),
         installed_path,
         loaded_in_iokit,
-        socket_connected,
+        conn_established,
         signing: "ad-hoc".to_string(),
     }
 }

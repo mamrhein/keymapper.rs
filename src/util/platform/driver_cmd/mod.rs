@@ -27,8 +27,8 @@ pub struct DriverStatus {
     pub installed_path: Option<std::path::PathBuf>,
     /// Whether the driver is loaded and visible in the IOKit registry.
     pub loaded_in_iokit: bool,
-    /// Whether a socket connection to the driver can be established.
-    pub socket_connected: bool,
+    /// Whether a connection to the driver can be established.
+    pub conn_established: bool,
     /// Always `"ad-hoc"` for this project.
     pub signing: String,
 }
@@ -56,7 +56,7 @@ pub fn install() -> Result<(), String> {
 /// [`DriverStatus`] summary.
 ///
 /// Checks both known install locations for the `.kext` bundle, queries IOKit
-/// for a matching service, and attempts to open an `IOHIDServiceSocket`.
+/// for a matching service, and attempts to open a connection to the driver.
 ///
 /// On non-macOS platforms returns a default status with all fields `false`
 /// and no path.

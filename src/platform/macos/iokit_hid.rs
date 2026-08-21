@@ -208,7 +208,7 @@ fn check_io_return(result: u32, context: &str) -> Result<(), IoKitError> {
 
 // On modern macOS with SIP, the IOKit framework is a "stub" — the actual
 // IOHIDLib symbols are only accessible at runtime via dlopen/dlsym, not at
-// link time.  This follows the same pattern as hid_socket.rs.
+// link time.  This follows the same pattern as hid_virt_kbd_conn.rs.
 
 /// Function pointer types for IOHIDLib symbols.
 type FnIOHIDManagerCreate =
@@ -748,7 +748,7 @@ pub struct HidQueueContext {
     pub lookup:
         std::sync::Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
     // Shared connection to the DriverKit virtual HID keyboard.
-    pub socket: std::sync::Arc<super::hid_socket::HidSocket>,
+    pub conn: std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
     // Bitmask tracking which modifier keys are physically pressed.
     pub modifier_state: u8,
     // Set of currently pressed keycodes for deduplication.
@@ -991,7 +991,7 @@ unsafe extern "C" fn hid_queue_value_callback(
         // Emit mapped outputs via the virtual HID keyboard.
         if let Some(outputs) = active_outputs {
             for native_key in &outputs {
-                emit_hid_report(&context.socket, native_key);
+                emit_hid_report(&context.conn, native_key);
             }
         }
     }
@@ -1004,10 +1004,10 @@ unsafe extern "C" fn hid_queue_value_callback(
 /// - Keyboard page (0x07): standard USB keyboard report.
 /// - Consumer page (0x0C): consumer control report.
 fn emit_hid_report(
-    socket: &std::sync::Arc<super::hid_socket::HidSocket>,
+    conn: &std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
     native_key: &crate::daemon::mapping_cache::NativeKey,
 ) {
-    use super::hid_socket::{
+    use super::hid_virt_kbd_conn::{
         build_consumer_release_report, build_consumer_report,
         build_keyboard_report,
     };
@@ -1020,21 +1020,21 @@ fn emit_hid_report(
         if let Ok(report) =
             build_keyboard_report(native_key.modifiers, Some(usage_byte))
         {
-            let _ = socket.send_report(&report);
+            let _ = conn.send_report(&report);
         }
 
         // Release the key by sending an empty report.
         if let Ok(empty_report) = build_keyboard_report(0, None) {
-            let _ = socket.send_report(&empty_report);
+            let _ = conn.send_report(&empty_report);
         }
     } else {
         // Consumer page: build a consumer control report.
         if let Ok(report) = build_consumer_report(native_key.usage.id()) {
-            let _ = socket.send_report(&report);
+            let _ = conn.send_report(&report);
 
             // Release the consumer key by sending an all-clear report.
             let release_report = build_consumer_release_report();
-            let _ = socket.send_report(&release_report);
+            let _ = conn.send_report(&release_report);
         }
     }
 }
@@ -1271,13 +1271,13 @@ pub struct SeizureHandle {
 ///
 /// Discovers keyboards via `HidDeviceManager`, opens each with
 /// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
-/// delivery.  Mapped output is emitted through the shared `HidSocket`
+/// delivery.  Mapped output is emitted through the shared `HidVirtKbdConn`
 /// (DriverKit virtual keyboard).
 pub fn start_iohid_seizure_mapping(
     lookup: std::sync::Arc<
         parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
     >,
-    socket: std::sync::Arc<super::hid_socket::HidSocket>,
+    conn: std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
 ) -> Result<SeizureHandle, IoKitError> {
     // Discover physical keyboards.
     let manager = HidDeviceManager::new_keyboard_matcher()?;
@@ -1314,7 +1314,7 @@ pub fn start_iohid_seizure_mapping(
         // Build the context for this device's callback.
         let ctx = HidQueueContext {
             lookup: lookup.clone(),
-            socket: socket.clone(),
+            conn: conn.clone(),
             modifier_state: 0,
             pressed_keys: std::collections::HashSet::new(),
             device_id,

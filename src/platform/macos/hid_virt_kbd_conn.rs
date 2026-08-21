@@ -100,7 +100,7 @@ unsafe extern "C" {
 
 /// Errors that can occur while communicating with the virtual HID driver.
 #[derive(Debug)]
-pub enum HidSocketError {
+pub enum HidVirtKbdConnError {
     /// The virtual HID driver is not loaded or discoverable via IOKit.
     DriverNotFound,
     /// A matching driver service was found, but `IOServiceOpen()` failed.
@@ -111,7 +111,7 @@ pub enum HidSocketError {
     UnknownConsumerUsage(u16),
 }
 
-impl std::fmt::Display for HidSocketError {
+impl std::fmt::Display for HidVirtKbdConnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DriverNotFound => {
@@ -142,17 +142,17 @@ impl std::fmt::Display for HidSocketError {
     }
 }
 
-impl std::error::Error for HidSocketError {}
+impl std::error::Error for HidVirtKbdConnError {}
 
 // ---------------------------------------------------------------------------
-// HidSocket — safe wrapper around an IOService connection
+// HidVirtKbdConn — safe wrapper around an IOService connection
 // ---------------------------------------------------------------------------
 
 /// A connection to the DriverKit virtual HID keyboard driver.
 ///
-/// Created via [`HidSocket::discover_and_open`].  Sending reports is done
-/// through [`HidSocket::send_report`].
-pub struct HidSocket {
+/// Created via [`HidVirtKbdConn::discover_and_open`].  Sending reports is done
+/// through [`HidVirtKbdConn::send_report`].
+pub struct HidVirtKbdConn {
     connect: io_connect_t,
 }
 
@@ -168,14 +168,14 @@ const DRIVER_WAIT_TIMEOUT_SECS: u64 = 15;
 /// Interval between driver-availability retries.
 const DRIVER_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
-impl HidSocket {
+impl HidVirtKbdConn {
     /// Discover the virtual HID driver in IOKit and open a connection to it.
     ///
     /// Enumerates services matching the expected driver class name and
     /// retries until one accepts an `IOServiceOpen()` connection or the wait
     /// timeout elapses.  If no matching service is found within the timeout,
-    /// returns [`HidSocketError::DriverNotFound`].
-    pub fn discover_and_open() -> Result<Self, HidSocketError> {
+    /// returns [`HidVirtKbdConnError::DriverNotFound`].
+    pub fn discover_and_open() -> Result<Self, HidVirtKbdConnError> {
         // Determine the wait timeout.  Default to DRIVER_WAIT_TIMEOUT_SECS,
         // but allow override via environment variable (0 = fail fast).
         let timeout_secs = std::env::var("KEYMAPPER_HID_DRIVER_TIMEOUT")
@@ -187,7 +187,7 @@ impl HidSocket {
 
         loop {
             match Self::try_discover_and_open() {
-                Ok(socket) => return Ok(socket),
+                Ok(conn) => return Ok(conn),
                 Err(e) => {
                     if Instant::now() >= deadline {
                         return Err(e);
@@ -204,7 +204,7 @@ impl HidSocket {
 
     /// Attempt to discover the driver and open a connection, without
     /// retrying.
-    fn try_discover_and_open() -> Result<Self, HidSocketError> {
+    fn try_discover_and_open() -> Result<Self, HidVirtKbdConnError> {
         let mut iterator: io_object_t = MACH_PORT_NULL;
 
         // Build a matching dictionary for our driver class name.  This is a
@@ -214,7 +214,7 @@ impl HidSocket {
             IOServiceMatching(c"KeyMapperDriver".as_ptr() as *const u8)
         };
         if matching.is_null() {
-            return Err(HidSocketError::DriverNotFound);
+            return Err(HidVirtKbdConnError::DriverNotFound);
         }
 
         // kIOMasterPortDefault is 0.
@@ -230,10 +230,10 @@ impl HidSocket {
             if iterator != MACH_PORT_NULL {
                 unsafe { IOObjectRelease(iterator) };
             }
-            return Err(HidSocketError::DriverNotFound);
+            return Err(HidVirtKbdConnError::DriverNotFound);
         }
 
-        let mut result = Err(HidSocketError::DriverNotFound);
+        let mut result = Err(HidVirtKbdConnError::DriverNotFound);
         // The last non-zero status from IOServiceOpen(), if any service was
         // found but none could be opened.
         let mut open_status: Option<i32> = None;
@@ -280,7 +280,7 @@ impl HidSocket {
         if result.is_err()
             && let Some(status) = open_status
         {
-            return Err(HidSocketError::ConnectOpenFailed(status as u32));
+            return Err(HidVirtKbdConnError::ConnectOpenFailed(status as u32));
         }
 
         result
@@ -294,7 +294,10 @@ impl HidSocket {
     /// the driver's report descriptor.  For the standard keyboard boot
     /// protocol this is a 9-byte report: report ID (1), modifier byte,
     /// reserved byte, and 6 key-code slots.
-    pub fn send_report(&self, report: &[u8]) -> Result<(), HidSocketError> {
+    pub fn send_report(
+        &self,
+        report: &[u8],
+    ) -> Result<(), HidVirtKbdConnError> {
         // The report bytes are passed as the structure input.  The scalar
         // input/output arrays and the structure output are unused, so they
         // are passed as null (the IOKit library accepts null for all of
@@ -317,12 +320,12 @@ impl HidSocket {
         if status == 0 {
             Ok(())
         } else {
-            Err(HidSocketError::SendFailed(status as u32))
+            Err(HidVirtKbdConnError::SendFailed(status as u32))
         }
     }
 }
 
-impl Drop for HidSocket {
+impl Drop for HidVirtKbdConn {
     fn drop(&mut self) {
         unsafe { IOServiceClose(self.connect) };
     }
@@ -372,7 +375,7 @@ pub fn modifier_to_hid(modifiers: u8) -> u8 {
 pub fn build_keyboard_report(
     modifiers: u8,
     code: Option<u8>,
-) -> Result<[u8; 9], HidSocketError> {
+) -> Result<[u8; 9], HidVirtKbdConnError> {
     let mut report = [0u8; 9];
     report[0] = 1; // Report ID
     report[1] = modifier_to_hid(modifiers);
@@ -395,11 +398,11 @@ pub fn build_keyboard_report(
 /// To release the key, send an all-clear report (see
 /// [`build_consumer_release_report`]).
 ///
-/// Returns [`HidSocketError::UnknownConsumerUsage`] for usages without
+/// Returns [`HidVirtKbdConnError::UnknownConsumerUsage`] for usages without
 /// a known mapping.
 pub fn build_consumer_report(
     usage_id: u16,
-) -> Result<[u8; 5], HidSocketError> {
+) -> Result<[u8; 5], HidVirtKbdConnError> {
     // Validate that the usage_id is a known Consumer Page usage.
     // This check ensures we only send valid consumer controls to the
     // DriverKit driver.
@@ -415,7 +418,7 @@ pub fn build_consumer_report(
         // Display controls
         0x6F | // Brightness Up
         0x70 => Ok(()), // Brightness Down
-        _ => Err(HidSocketError::UnknownConsumerUsage(usage_id)),
+        _ => Err(HidVirtKbdConnError::UnknownConsumerUsage(usage_id)),
     }?;
 
     let mut report = [0u8; 5];
@@ -541,7 +544,7 @@ mod tests {
         // Usage 0x00 is not a known consumer control.
         assert!(matches!(
             build_consumer_report(0x00),
-            Err(HidSocketError::UnknownConsumerUsage(0x00))
+            Err(HidVirtKbdConnError::UnknownConsumerUsage(0x00))
         ));
     }
 

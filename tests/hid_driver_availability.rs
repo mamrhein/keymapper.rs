@@ -9,14 +9,14 @@
 
 //! Integration tests for virtual HID driver availability.
 //!
-//! Verifies that `HidSocket::discover_and_open()` behaves correctly in both
-//! scenarios: driver not loaded (returns error) and driver loaded (returns
-//! Ok).  The "loaded" scenario only passes when the DriverKit extension is
-//! actually running.
+//! Verifies that `HidVirtKbdConn::discover_and_open()` behaves correctly in
+//! both scenarios: driver not loaded (returns error) and driver loaded
+//! (returns Ok).  The "loaded" scenario only passes when the DriverKit
+//! extension is actually running.
 
 #[cfg(target_os = "macos")]
 mod hid_tests {
-    use keymapper::platform::HidSocket;
+    use keymapper::platform::HidVirtKbdConn;
 
     /// Verify that `discover_and_open()` returns a meaningful error when the
     /// DriverKit extension is not loaded.  This test expects the driver to be
@@ -28,7 +28,7 @@ mod hid_tests {
     /// will pass in that scenario.
     #[test]
     fn driver_not_loaded_returns_error() {
-        match HidSocket::discover_and_open() {
+        match HidVirtKbdConn::discover_and_open() {
             Err(e) => {
                 // The error message should be descriptive.
                 let msg = e.to_string();
@@ -57,17 +57,18 @@ mod hid_tests {
     /// If the driver is not loaded, this test is skipped gracefully.
     #[test]
     fn driver_loaded_returns_ok() {
-        let result = HidSocket::discover_and_open();
+        let result = HidVirtKbdConn::discover_and_open();
 
-        if let Ok(socket) = result {
-            // The socket is connected.  We can't easily send a real HID report
-            // without a driver, but the fact that `discover_and_open()`
-            // returned Ok means the IOKit service was found and the socket
-            // was created successfully.  Drop it to clean up.
-            drop(socket);
+        if let Ok(conn) = result {
+            // The connection is established.  We can't easily send a real HID
+            // report without a driver, but the fact that `discover_and_open()`
+            // returned Ok means the IOKit service was found and the
+            // connection was created successfully.  Drop it to clean up.
+            drop(conn);
             eprintln!("Driver is connected and ready for HID reports.");
         } else {
-            // HidSocket doesn't implement Debug, so match the error manually.
+            // HidVirtKbdConn doesn't implement Debug, so match the error
+            // manually.
             let err = match result {
                 Ok(_) => unreachable!(),
                 Err(e) => e,
@@ -82,7 +83,7 @@ mod hid_tests {
     /// Verify that the error type implements Display meaningfully.
     #[test]
     fn driver_error_has_meaningful_display() {
-        let result = HidSocket::discover_and_open();
+        let result = HidVirtKbdConn::discover_and_open();
         if let Err(e) = result {
             let msg = e.to_string();
             // The error message should contain useful context.

@@ -131,7 +131,7 @@ enum DriverCommands {
     /// Report the current status of the virtual HID driver.
     ///
     /// Shows whether the driver is installed, loaded in IOKit, and
-    /// accepting socket connections.
+    /// accepting connections.
     Status,
 }
 
@@ -706,9 +706,9 @@ fn cmd_driver_status() {
         println!("no");
     }
 
-    // Socket connected?
-    print!("Socket connected:     ");
-    if status.socket_connected {
+    // Connection established?
+    print!("Connection:           ");
+    if status.conn_established {
         println!("yes");
     } else {
         println!("no");
@@ -729,9 +729,10 @@ fn cmd_driver_status() {
             "First launch may prompt in System Settings → Privacy & Security."
         );
         println!("Start keymapperd to trigger the driver load.");
-    } else if !status.socket_connected {
+    } else if !status.conn_established {
         println!();
-        println!("Virtual HID driver is loaded but socket connection failed.");
+        println!("Virtual HID driver is loaded but the connection could not \
+                 be established.");
         println!(
             "The driver may be blocked. Check System Settings → Privacy & \
              Security."

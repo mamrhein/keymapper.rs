@@ -28,7 +28,7 @@ pub use linux::{discover_and_open_keyboards, list_keyboards, start_mapping};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::get_active_app_name;
 #[cfg(target_os = "macos")]
-pub use macos::{HidSocket, list_keyboards, start_mapping};
+pub use macos::{HidVirtKbdConn, list_keyboards, start_mapping};
 #[cfg(target_os = "windows")]
 pub(crate) use windows::get_active_app_name;
 #[cfg(target_os = "windows")]
