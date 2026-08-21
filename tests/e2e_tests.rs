@@ -977,6 +977,15 @@ fn daemon_alive(_config_dir: &Path) -> bool {
     true
 }
 
+/// Read the daemon's log file, if present.  The daemon's stdout/stderr are
+/// redirected here (see `daemon_cmd`), so this surfaces startup failures such
+/// as a missing DriverKit driver.  Read before the temp dir is cleaned up.
+fn read_daemon_log(config_dir: &Path) -> String {
+    let log_path = config_dir.join("keymapperd.log");
+    std::fs::read_to_string(&log_path)
+        .unwrap_or_else(|_| "<no daemon log found>".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
@@ -1040,7 +1049,9 @@ fn e2e_comprehensive_config() {
     let mut daemon = start_daemon(&temp_dir);
 
     // f2. Verify the daemon survived initialisation.
+
     if !daemon_alive(&temp_dir) {
+        eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
         panic!("daemon exited after startup");
     }
 
@@ -1256,7 +1267,9 @@ fn e2e_config_hot_reload() {
     let mut daemon = start_daemon(&temp_dir);
 
     // f2. Verify the daemon survived initialisation.
+
     if !daemon_alive(&temp_dir) {
+        eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
         panic!("daemon exited after startup");
     }
 
