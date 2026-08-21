@@ -45,9 +45,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
 fi
 
 # Run the tests.  On macOS, running as root bypasses TCC Accessibility
-# permission checks required for CGEventTap creation.
+# permission checks required for CGEventTap creation.  CI=1 is set
+# explicitly so the e2e tests run even when the caller's environment was
+# sanitized by an outer `sudo` (which strips CI by default).
 if [ "$(uname -s)" = "Darwin" ]; then
-    sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests "$@"
+    sudo -E PATH="$PATH" env CI=1 $(which cargo) nextest run --no-capture --test e2e_tests "$@"
 else
-    cargo nextest run --no-capture --test e2e_tests "$@"
+    CI=1 cargo nextest run --no-capture --test e2e_tests "$@"
 fi
