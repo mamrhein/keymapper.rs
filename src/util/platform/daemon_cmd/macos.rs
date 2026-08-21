@@ -33,6 +33,10 @@ fn resolve_daemon_binary() -> Option<std::ffi::CString> {
 /// Spawn `keymapperd` as a background child process with the given current
 /// directory.  Returns the child PID and an optional error captured from the
 /// daemon's stderr (if available before it detaches).
+///
+/// The daemon's stdout and stderr are redirected to
+/// `<config_dir>/keymapperd.log` so that startup failures (e.g. a missing
+/// DriverKit driver) are captured for debugging instead of being discarded.
 pub fn spawn_daemon(
     config_dir: &Path,
 ) -> Result<(u32, Option<String>), String> {
@@ -49,15 +53,35 @@ pub fn spawn_daemon(
             unsafe {
                 libc::setsid();
 
-                // Redirect standard file descriptors to /dev/null so the
-                // daemon doesn't hold terminal resources.
-                let dev_null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+                // Redirect stdin to /dev/null so the daemon doesn't hold
+                // terminal input resources.
+                let dev_null =
+                    libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY);
                 if dev_null >= 0 {
                     libc::dup2(dev_null, libc::STDIN_FILENO);
-                    libc::dup2(dev_null, libc::STDOUT_FILENO);
-                    libc::dup2(dev_null, libc::STDERR_FILENO);
                     if dev_null > 2 {
                         libc::close(dev_null);
+                    }
+                }
+
+                // Redirect stdout/stderr to a log file in the config directory
+                // so startup failures are captured for debugging.  Opened with
+                // an absolute path before the chdir below.
+                let log_path = config_dir.join("keymapperd.log");
+                let log_cstr = std::ffi::CString::new(
+                    log_path.to_string_lossy().into_owned(),
+                )
+                .unwrap_or_default();
+                let log_fd = libc::open(
+                    log_cstr.as_ptr(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o644,
+                );
+                if log_fd >= 0 {
+                    libc::dup2(log_fd, libc::STDOUT_FILENO);
+                    libc::dup2(log_fd, libc::STDERR_FILENO);
+                    if log_fd > 2 {
+                        libc::close(log_fd);
                     }
                 }
 
