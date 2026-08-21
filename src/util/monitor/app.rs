@@ -170,6 +170,8 @@ pub fn run(output_path: PathBuf) {
 
     #[cfg(not(target_os = "linux"))]
     {
+        use crate::util::monitor::register_signal_handlers;
+
         let shutdown = register_signal_handlers();
 
         let native_options = build_native_options();
