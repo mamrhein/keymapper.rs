@@ -69,23 +69,23 @@ jobs:
   # -----------------------------------------------------------------------
   # macOS — e2e sandbox tests (root bypasses TCC Accessibility)
   # -----------------------------------------------------------------------
-  # macos-e2e:
-  #   runs-on: macos-latest
+  macos-e2e:
+    runs-on: macos-latest
 
-  #   steps:
-  #     - uses: actions/checkout@v5
+    steps:
+      - uses: actions/checkout@v5
 
-  #     - name: Install Rust stable
-  #       uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-  #     - name: Install cargo-nextest
-  #       uses: taiki-e/install-action@nextest
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
-  #     - name: Run e2e tests
-  #       # Build, ad-hoc sign the test binary, and run as root to bypass TCC
-  #       # Accessibility permission.  Ad-hoc signing (codesign --sign -) is
-  #       # sufficient; no certificate is needed.
-  #       run: bash scripts/sign-and-test-e2e.sh
+      - name: Run e2e tests
+        # Build, ad-hoc sign the test binary, and run as root to bypass TCC
+        # Accessibility permission.  Ad-hoc signing (codesign --sign -) is
+        # sufficient; no certificate is needed.
+        run: bash scripts/sign-and-test-e2e.sh
 
   # -----------------------------------------------------------------------
   # Windows — e2e sandbox tests (no elevation required)
