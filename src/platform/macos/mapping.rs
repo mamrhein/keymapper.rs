@@ -50,9 +50,9 @@ pub fn start_mapping(
         )
     })?;
 
-    // SAFETY: HidSocket is used only on the main thread (CFRunLoop),
-    // so the lack of Send/Sync is not a concern.
-    #[allow(clippy::arc_with_non_send_sync)]
+    // HidSocket holds only an IOService connection handle (a Mach port
+    // right), so it is Send + Sync.  In practice it is used only on the
+    // main thread (CFRunLoop), where the queue callbacks emit reports.
     let handle = super::iokit_hid::start_iohid_seizure_mapping(
         lookup,
         Arc::new(socket),

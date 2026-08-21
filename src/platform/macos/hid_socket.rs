@@ -9,14 +9,15 @@
 
 //! User-space bridge to the DriverKit virtual HID keyboard driver.
 //!
-//! Communicates with the `KeyMapperDriver` via `IOHIDServiceSocket`.  HID
-//! reports are sent to emulate a real hardware keyboard, bypassing the
-//! synthetic-event restrictions of `CGEvent`.
+//! Communicates with the `KeyMapperDriver` over IOKit's Mach-message
+//! abstraction: the driver service is opened with `IOServiceOpen()` and HID
+//! reports are sent through `IOConnectCallMethod()`.  The driver feeds each
+//! report into the HID event system, emulating a real hardware keyboard and
+//! bypassing the synthetic-event restrictions of `CGEvent`.
 
 use std::{
     ffi::c_void,
-    ptr::{self, NonNull},
-    thread,
+    ptr, thread,
     time::{Duration, Instant},
 };
 
@@ -26,190 +27,85 @@ use std::{
 
 /// Opaque IOKit object handle.
 #[allow(non_camel_case_types)]
-pub type io_object_t = u32;
+type io_object_t = u32;
+
+/// Opaque IOKit connection handle.
+#[allow(non_camel_case_types)]
+type io_connect_t = u32;
+
+/// Opaque CoreFoundation object handle (a 64-bit pointer).
+///
+/// `IOServiceMatching()` returns a CFDictionary, not an IOKit registry
+/// object, so it must be handled as a full-width pointer.  Truncating it to
+/// 32 bits yields an invalid address that crashes inside IOKit.
+#[allow(non_camel_case_types)]
+type cf_object_t = *mut c_void;
 
 /// Sentinel for a null `io_object_t`.
 const MACH_PORT_NULL: io_object_t = 0;
 
+/// `MACH_TASK_SELF` — the well-known port name of the calling task, passed
+/// to `IOServiceOpen()`.  The kernel resolves port name 3 in the caller's
+/// Mach port space to the calling task's own task port.
+const MACH_TASK_SELF: u32 = 0x00000003;
+
+/// Selector for sending an HID input report to the driver.
+///
+/// Mirrors `kKeyMapperSendReportSelector` in
+/// `driver/KeyMapperVirtualHID/KeyMapperProtocol.h`.  Any change there must
+/// be reflected here.
+const K_KEYMAPPER_SEND_REPORT_SELECTOR: u32 = 0;
+
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
-    fn IOServiceMatching(name: *const u8) -> io_object_t;
+    /// Returns a retained CFDictionary (a 64-bit pointer), or null on
+    /// allocation failure.
+    fn IOServiceMatching(name: *const u8) -> cf_object_t;
+    /// Consumes one reference to `matching` (it is CFReleased internally),
+    /// so the caller must not release it again.
     fn IOServiceGetMatchingServices(
         _main_port: io_object_t,
-        matching: io_object_t,
+        matching: cf_object_t,
         existing: *mut io_object_t,
-    ) -> io_object_t;
+    ) -> i32;
     fn IOObjectRelease(obj: io_object_t);
     fn IOIteratorNext(iterator: io_object_t) -> io_object_t;
-    fn IORegistryEntryCreateCFProperty(
-        entry: io_object_t,
-        key: *const u8,
-        allocator: io_object_t,
-        options: u32,
-    ) -> io_object_t;
+    fn IOServiceOpen(
+        service: io_object_t,
+        task: u32,
+        type_: u32,
+        connect: *mut io_connect_t,
+    ) -> i32;
+    fn IOServiceClose(connect: io_connect_t) -> i32;
+    /// Extended 10-argument form of `IOConnectCallMethod()`.  The struct
+    /// counts are byte counts, not word counts.  Null `output`/`output_cnt`
+    /// and null `output_struct`/`output_struct_cnt` are accepted.
+    fn IOConnectCallMethod(
+        connect: io_connect_t,
+        selector: u32,
+        input: *const u64,
+        input_cnt: u32,
+        input_struct: *const c_void,
+        input_struct_cnt: usize,
+        output: *mut u64,
+        output_cnt: *mut u32,
+        output_struct: *mut c_void,
+        output_struct_cnt: *mut usize,
+    ) -> i32;
 }
-
-/// `kCFNumberSInt32Type` — CFNumber type for 32-bit signed integers.
-#[allow(non_upper_case_globals)]
-const kCFNumberSInt32Type: u32 = 3;
-
-// Resolve `CFNumberGetValue` from CoreFoundation at runtime.
-// CFNumberGetValue is part of CoreFoundation, already linked by
-// objc2-core-foundation.
-#[allow(improper_ctypes_definitions)]
-unsafe extern "C" {
-    fn CFNumberGetValue(
-        num: io_object_t,
-        the_type: u32,
-        value_ptr: *mut c_void,
-    ) -> bool;
-}
-
-// ---------------------------------------------------------------------------
-// IOHIDServiceSocket — resolved dynamically via dlsym
-// ---------------------------------------------------------------------------
-
-/// Opaque `IOHIDServiceSocketRef` from IOKit/hid/IOHIDServiceSocket.h.
-#[repr(C)]
-pub struct IOHIDServiceSocket {
-    _private: [u8; 0],
-}
-
-/// Function pointer for `IOHIDServiceSocketCreate`.
-type FnIOHIDServiceSocketCreate = unsafe extern "C" fn(
-    service: io_object_t,
-    product_id: u32,
-    vendor_id: u32,
-    socket: *mut *mut IOHIDServiceSocket,
-) -> io_object_t;
-
-/// Function pointer for `IOHIDServiceSocketSendReport`.
-type FnIOHIDServiceSocketSendReport = unsafe extern "C" fn(
-    socket: *mut IOHIDServiceSocket,
-    report: *const u8,
-    length: usize,
-) -> io_object_t;
-
-/// Function pointer for `IOHIDServiceSocketClose`.
-type FnIOHIDServiceSocketClose =
-    unsafe extern "C" fn(socket: *mut IOHIDServiceSocket);
-
-/// Resolved function pointers for the `IOHIDServiceSocket` API.  Cached in a
-/// static so they can be shared across multiple `HidSocket` instances.
-static HID_FUNCS: std::sync::OnceLock<HidFunctions> =
-    std::sync::OnceLock::new();
-
-struct HidFunctions {
-    create: Option<FnIOHIDServiceSocketCreate>,
-    send_report: Option<FnIOHIDServiceSocketSendReport>,
-    close: Option<FnIOHIDServiceSocketClose>,
-}
-
-impl HidFunctions {
-    /// Try to resolve all `IOHIDServiceSocket*` symbols from the IOKit
-    /// framework at runtime.  Resolves once and caches the result globally.
-    fn resolve() -> bool {
-        if HID_FUNCS.get().is_some() {
-            return true;
-        }
-
-        // Load the IOKit framework dynamically.
-        let path = b"/System/Library/Frameworks/IOKit.framework/IOKit\0";
-        let handle = unsafe { libc::dlopen(path.as_ptr() as *const _, 2) };
-        if handle.is_null() {
-            return false;
-        }
-
-        // SAFETY: `Option<FnType>` uses niche optimization where null pointer
-        // bits represent `None`. Transmuting `*mut c_void` (from dlsym) to
-        // `Option<FnType>` is valid because both have identical size and
-        // alignment, and the null/non-null bit patterns match.
-        let create = unsafe {
-            std::mem::transmute::<
-                *mut c_void,
-                Option<FnIOHIDServiceSocketCreate>,
-            >(libc::dlsym(
-                handle,
-                c"IOHIDServiceSocketCreate".as_ptr(),
-            ))
-        };
-        let send_report = unsafe {
-            std::mem::transmute::<
-                *mut c_void,
-                Option<FnIOHIDServiceSocketSendReport>,
-            >(libc::dlsym(
-                handle,
-                c"IOHIDServiceSocketSendReport".as_ptr(),
-            ))
-        };
-        let close = unsafe {
-            std::mem::transmute::<*mut c_void, Option<FnIOHIDServiceSocketClose>>(
-                libc::dlsym(
-                    handle,
-                    c"IOHIDServiceSocketClose".as_ptr(),
-                ),
-            )
-        };
-
-        // We never call dlclose(), so the IOKit framework handle stays valid
-        // for the process lifetime. The raw `*mut c_void` is Copy so no drop
-        // guard needs suppression.
-        let _ = handle;
-
-        if create.is_none() || send_report.is_none() || close.is_none() {
-            return false;
-        }
-
-        let success = HID_FUNCS
-            .set(HidFunctions {
-                create,
-                send_report,
-                close,
-            })
-            .is_ok();
-
-        if success {
-            return true;
-        }
-
-        // Another thread raced us. Verify the cached values are valid.
-        let cached = HID_FUNCS.get().expect("race in HidFunctions::resolve");
-        cached.create.is_some()
-            && cached.send_report.is_some()
-            && cached.close.is_some()
-    }
-
-    /// Return the resolved function pointers.
-    ///
-    /// Panics if resolution failed. Callers must ensure `resolve()` succeeded
-    /// before calling this.
-    fn get() -> &'static Self {
-        HID_FUNCS
-            .get()
-            .expect("HID functions not resolved. Call resolve() first.")
-    }
-}
-
-/// Default vendor/product IDs used by the DriverKit virtual keyboard.
-const DEFAULT_VENDOR_ID: u32 = 0xFFF0;
-const DEFAULT_PRODUCT_ID: u32 = 0x1001;
 
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
 
-/// Errors that can occur during HID socket operations.
+/// Errors that can occur while communicating with the virtual HID driver.
 #[derive(Debug)]
 pub enum HidSocketError {
     /// The virtual HID driver is not loaded or discoverable via IOKit.
     DriverNotFound,
-    /// The `IOHIDServiceSocket*` symbols are not available in the IOKit
-    /// framework on this system.
-    SocketApiUnavailable,
-    /// Failed to open the `IOHIDServiceSocket`.
-    #[allow(dead_code)]
-    SocketOpenFailed(u32),
-    /// Failed to send an HID report through the socket.
+    /// A matching driver service was found, but `IOServiceOpen()` failed.
+    ConnectOpenFailed(u32),
+    /// Failed to send an HID report through the connection.
     SendFailed(u32),
     /// Consumer Page usage has no mapping to a consumer report.
     UnknownConsumerUsage(u16),
@@ -221,25 +117,18 @@ impl std::fmt::Display for HidSocketError {
             Self::DriverNotFound => {
                 write!(f, "virtual HID driver not found in IOKit registry")
             }
-            Self::SocketApiUnavailable => {
+            Self::ConnectOpenFailed(status) => {
                 write!(
                     f,
-                    "IOHIDServiceSocket API not available (symbols \
-                     IOHIDServiceSocketCreate, IOHIDServiceSocketSendReport, \
-                     IOHIDServiceSocketClose not found in IOKit framework)"
-                )
-            }
-            Self::SocketOpenFailed(status) => {
-                write!(
-                    f,
-                    "IOHIDServiceSocketCreate failed with status {status:#x}"
+                    "IOServiceOpen failed for the virtual HID driver (status \
+                     {status:#x})"
                 )
             }
             Self::SendFailed(status) => {
                 write!(
                     f,
-                    "IOHIDServiceSocketSendReport failed with status \
-                     {status:#x}"
+                    "IOConnectCallMethod failed for the virtual HID driver \
+                     (status {status:#x})"
                 )
             }
             Self::UnknownConsumerUsage(usage) => {
@@ -256,7 +145,7 @@ impl std::fmt::Display for HidSocketError {
 impl std::error::Error for HidSocketError {}
 
 // ---------------------------------------------------------------------------
-// HidSocket — safe wrapper around IOHIDServiceSocket
+// HidSocket — safe wrapper around an IOService connection
 // ---------------------------------------------------------------------------
 
 /// A connection to the DriverKit virtual HID keyboard driver.
@@ -264,7 +153,7 @@ impl std::error::Error for HidSocketError {}
 /// Created via [`HidSocket::discover_and_open`].  Sending reports is done
 /// through [`HidSocket::send_report`].
 pub struct HidSocket {
-    socket: NonNull<IOHIDServiceSocket>,
+    connect: io_connect_t,
 }
 
 /// Maximum time to wait for the DriverKit driver to become available.
@@ -280,19 +169,13 @@ const DRIVER_WAIT_TIMEOUT_SECS: u64 = 15;
 const DRIVER_WAIT_INTERVAL: Duration = Duration::from_millis(500);
 
 impl HidSocket {
-    /// Discover the virtual HID driver in IOKit and open a socket to it.
+    /// Discover the virtual HID driver in IOKit and open a connection to it.
     ///
     /// Enumerates services matching the expected driver class name and
-    /// retries until one accepts a socket connection or the wait timeout
-    /// elapses.  If no matching service is found within the timeout, returns
-    /// [`HidSocketError::DriverNotFound`].
+    /// retries until one accepts an `IOServiceOpen()` connection or the wait
+    /// timeout elapses.  If no matching service is found within the timeout,
+    /// returns [`HidSocketError::DriverNotFound`].
     pub fn discover_and_open() -> Result<Self, HidSocketError> {
-        // Resolve the IOHIDServiceSocket* symbols at runtime.
-        if !HidFunctions::resolve() {
-            return Err(HidSocketError::SocketApiUnavailable);
-        }
-        let functions = HID_FUNCS.get().expect("HID functions not resolved");
-
         // Determine the wait timeout.  Default to DRIVER_WAIT_TIMEOUT_SECS,
         // but allow override via environment variable (0 = fail fast).
         let timeout_secs = std::env::var("KEYMAPPER_HID_DRIVER_TIMEOUT")
@@ -303,7 +186,7 @@ impl HidSocket {
         let deadline = Instant::now() + Duration::from_secs(timeout_secs);
 
         loop {
-            match Self::try_discover_and_open(functions) {
+            match Self::try_discover_and_open() {
                 Ok(socket) => return Ok(socket),
                 Err(e) => {
                     if Instant::now() >= deadline {
@@ -319,34 +202,41 @@ impl HidSocket {
         }
     }
 
-    /// Attempt to discover the driver and open a socket, without retrying.
-    fn try_discover_and_open(
-        functions: &HidFunctions,
-    ) -> Result<Self, HidSocketError> {
+    /// Attempt to discover the driver and open a connection, without
+    /// retrying.
+    fn try_discover_and_open() -> Result<Self, HidSocketError> {
         let mut iterator: io_object_t = MACH_PORT_NULL;
 
-        // Build a matching dictionary for our driver class name.
-        let matching =
-            unsafe { IOServiceMatching(c"KeyMapperDriver".as_ptr() as *const u8) };
-        if matching == MACH_PORT_NULL {
+        // Build a matching dictionary for our driver class name.  This is a
+        // retained CFDictionary (64-bit pointer), not an IOKit registry
+        // object.
+        let matching = unsafe {
+            IOServiceMatching(c"KeyMapperDriver".as_ptr() as *const u8)
+        };
+        if matching.is_null() {
             return Err(HidSocketError::DriverNotFound);
         }
 
         // kIOMasterPortDefault is 0.
         let master_port: io_object_t = MACH_PORT_NULL;
+        // IOServiceGetMatchingServices() consumes the reference to
+        // `matching`, so it must not be released again here.
         let kern_return = unsafe {
             IOServiceGetMatchingServices(master_port, matching, &mut iterator)
         };
 
         if kern_return != 0 {
-            unsafe {
-                IOObjectRelease(iterator);
-                IOObjectRelease(matching);
-            };
+            // The iterator is only valid on success; guard the release.
+            if iterator != MACH_PORT_NULL {
+                unsafe { IOObjectRelease(iterator) };
+            }
             return Err(HidSocketError::DriverNotFound);
         }
 
         let mut result = Err(HidSocketError::DriverNotFound);
+        // The last non-zero status from IOServiceOpen(), if any service was
+        // found but none could be opened.
+        let mut open_status: Option<i32> = None;
 
         // Iterate over all matching services.
         loop {
@@ -355,40 +245,24 @@ impl HidSocket {
                 break;
             }
 
-            // Try to read vendor/product IDs from the service's registry
-            // properties; fall back to defaults if not present.
-            let vendor_id =
-                Self::get_property_u32(service, b"kUSBHIDVendorId\0")
-                    .unwrap_or(DEFAULT_VENDOR_ID);
-            let product_id =
-                Self::get_property_u32(service, b"kUSBHIDProductId\0")
-                    .unwrap_or(DEFAULT_PRODUCT_ID);
-
-            // Attempt to create the socket.
-            let mut socket: *mut IOHIDServiceSocket = ptr::null_mut();
+            // Open a connection to the driver.  The driver creates a
+            // KeyMapperUserClient for this connection (see
+            // KeyMapperDriver::NewUserClient), which receives reports via
+            // IOConnectCallMethod().  The driver ignores the connection
+            // type, so 0 is passed.
+            let mut connect: io_connect_t = 0;
             let status = unsafe {
-                (functions.create.unwrap())(
-                    service,
-                    product_id,
-                    vendor_id,
-                    &mut socket as *mut _,
-                )
+                IOServiceOpen(service, MACH_TASK_SELF, 0, &mut connect)
             };
 
-            if status == 0 && !socket.is_null() {
-                eprintln!(
-                    "HID driver connected: vendor={vendor_id:#x}, \
-                     product={product_id:#x}"
-                );
-                result = Ok(Self {
-                    socket: unsafe { NonNull::new_unchecked(socket) },
-                });
+            if status == 0 {
+                eprintln!("HID driver connected");
+                result = Ok(Self { connect });
             } else {
                 eprintln!(
-                    "IOHIDServiceSocketCreate failed for service \
-                     (vendor={vendor_id:#x}, product={product_id:#x}): \
-                     status={status:#x}"
+                    "IOServiceOpen failed for service: status={status:#x}"
                 );
+                open_status = Some(status);
             }
 
             unsafe { IOObjectRelease(service) };
@@ -399,73 +273,58 @@ impl HidSocket {
             }
         }
 
-        unsafe {
-            IOObjectRelease(iterator);
-            IOObjectRelease(matching);
-        };
+        unsafe { IOObjectRelease(iterator) };
+
+        // If a service was found but no connection could be opened, report
+        // the open failure instead of a misleading "driver not found".
+        if result.is_err()
+            && let Some(status) = open_status
+        {
+            return Err(HidSocketError::ConnectOpenFailed(status as u32));
+        }
 
         result
     }
 
-    /// Read a 32-bit unsigned integer property from an IOKit registry entry.
-    fn get_property_u32(entry: io_object_t, key: &[u8]) -> Option<u32> {
-        let num = unsafe {
-            IORegistryEntryCreateCFProperty(
-                entry,
-                key.as_ptr(),
-                MACH_PORT_NULL,
-                0,
-            )
-        };
-        if num == MACH_PORT_NULL {
-            return None;
-        }
-
-        let mut value: u32 = 0;
-        let success = unsafe {
-            CFNumberGetValue(
-                num,
-                kCFNumberSInt32Type,
-                &mut value as *mut _ as *mut c_void,
-            )
-        };
-
-        unsafe { IOObjectRelease(num) };
-
-        if success { Some(value) } else { None }
-    }
-
-    /// Send a raw HID report through the socket.
+    /// Send a raw HID report to the driver.
     ///
-    /// The caller is responsible for constructing a valid report that matches
+    /// The report bytes are passed as the structure input of an
+    /// `IOConnectCallMethod()` call with the send-report selector.  The
+    /// caller is responsible for constructing a valid report that matches
     /// the driver's report descriptor.  For the standard keyboard boot
     /// protocol this is a 9-byte report: report ID (1), modifier byte,
     /// reserved byte, and 6 key-code slots.
     pub fn send_report(&self, report: &[u8]) -> Result<(), HidSocketError> {
-        let functions = HID_FUNCS.get().expect("HID functions not resolved");
+        // The report bytes are passed as the structure input.  The scalar
+        // input/output arrays and the structure output are unused, so they
+        // are passed as null (the IOKit library accepts null for all of
+        // them).  `input_struct_cnt` is a byte count.
         let status = unsafe {
-            (functions.send_report.unwrap())(
-                self.socket.as_ptr(),
-                report.as_ptr(),
+            IOConnectCallMethod(
+                self.connect,
+                K_KEYMAPPER_SEND_REPORT_SELECTOR,
+                ptr::null(),
+                0,
+                report.as_ptr() as *const c_void,
                 report.len(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
             )
         };
 
         if status == 0 {
             Ok(())
         } else {
-            Err(HidSocketError::SendFailed(status))
+            Err(HidSocketError::SendFailed(status as u32))
         }
     }
 }
 
 impl Drop for HidSocket {
     fn drop(&mut self) {
-        unsafe {
-            let close = HidFunctions::get().close
-                .expect("HID functions not resolved");
-            close(self.socket.as_ptr());
-        }
+        unsafe { IOServiceClose(self.connect) };
     }
 }
 
