@@ -25,6 +25,14 @@
 
 #include <DriverKit/OSMetaClass.h>
 
+/// Declares the global meta-class symbol for a concrete DriverKit class.
+/// `OSDynamicCast()` resolves the target class through this symbol, so it
+/// must be declared in every translation unit that casts to the class.
+/// Place this in the class header, outside of the class definition.
+#define OSDeclareMetaClass(className)                                \
+                                                                     \
+extern OSMetaClass * g##className##MetaClass;
+
 /// Declares structors for a concrete (non-abstract) DriverKit class.
 #define OSDeclareDefaultStructors(className)                         \
 private:                                                             \
@@ -48,6 +56,8 @@ protected:                                                           \
 /* ── Class global data ──────────────────────────────────────────── */\
                                                                      \
 className :: MetaClass className :: gMetaClass;                      \
+OSMetaClass * g##className##MetaClass =                              \
+    & className :: gMetaClass;                                       \
 const OSMetaClass * const className :: superClass =                  \
     g ## superclassName ## MetaClass;                                \
 const OSMetaClass * const className :: metaClass =                   \

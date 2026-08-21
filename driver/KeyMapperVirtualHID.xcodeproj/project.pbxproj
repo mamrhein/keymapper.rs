@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AABB0001 /* KeyMapperDriver.cpp */ = {isa = PBXBuildFile; fileRef = AABB0003 /* KeyMapperDriver.cpp */; };
+		AABB0002 /* KeyMapperUserClient.cpp */ = {isa = PBXBuildFile; fileRef = AABB0008 /* KeyMapperUserClient.cpp */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -16,7 +17,10 @@
 		AABB0005 /* KeyMapperDriver.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = KeyMapperDriver.h; sourceTree = "<group>"; };
 		AABB0006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AABB0007 /* KeyMapperVirtualHID.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = KeyMapperVirtualHID.entitlements; sourceTree = "<group>"; };
+		AABB0008 /* KeyMapperUserClient.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = KeyMapperUserClient.cpp; sourceTree = "<group>"; };
+		AABB0009 /* KeyMapperUserClient.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = KeyMapperUserClient.h; sourceTree = "<group>"; };
 		AABB0010 /* KeyMapperVirtualHID.kext */ = {isa = PBXFileReference; explicitFileType = wrapper.kernel-extension; includeInIndex = 0; path = KeyMapperVirtualHID.kext; sourceTree = BUILT_PRODUCTS_DIR; };
+		AABB0011 /* KeyMapperProtocol.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = KeyMapperProtocol.h; sourceTree = "<group>"; };
 		AABB0036 /* OSStructors.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OSStructors.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -44,7 +48,10 @@
 			children = (
 				AABB0005 /* KeyMapperDriver.h */,
 				AABB0036 /* OSStructors.h */,
+				AABB0011 /* KeyMapperProtocol.h */,
+				AABB0009 /* KeyMapperUserClient.h */,
 				AABB0003 /* KeyMapperDriver.cpp */,
+				AABB0008 /* KeyMapperUserClient.cpp */,
 				AABB0004 /* HIDReportDescriptor.h */,
 				AABB0006 /* Info.plist */,
 				AABB0007 /* KeyMapperVirtualHID.entitlements */,
@@ -112,6 +119,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AABB0001 /* KeyMapperDriver.cpp */,
+				AABB0002 /* KeyMapperUserClient.cpp */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

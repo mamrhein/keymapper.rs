@@ -17,9 +17,14 @@
 #include <DriverKit/OSDictionary.h>
 #include <DriverKit/OSNumber.h>
 #include <DriverKit/OSString.h>
+#include <DriverKit/IOUserClient.h>
 #include <HIDDriverKit/IOHIDDeviceKeys.h>
 
 #include "HIDReportDescriptor.h"
+
+/// Name of the registry property describing the user client. Consumed by
+/// `NewUserClient()` to create a `KeyMapperUserClient` for each connection.
+static const char * const kKeyMapperUserClientProperty = "KeyMapperUserClient";
 
 OSDefineMetaClassAndStructors(KeyMapperDriver, IOUserHIDDevice)
 
@@ -30,12 +35,64 @@ bool KeyMapperDriver::handleStart(IOService * provider)
     bool result = IOUserHIDDevice::handleStart(provider);
 
     if (result) {
+        // Register the property describing the user client. NewUserClient()
+        // consumes it via IOService::Create() to instantiate a
+        // KeyMapperUserClient for each user-space connection.
+        auto * userClientDict = OSDictionary::withCapacity(2);
+        if (userClientDict) {
+            auto * ioClass = OSString::withCString("IOUserClient");
+            auto * ioUserClass = OSString::withCString("KeyMapperUserClient");
+            if (ioClass && ioUserClass) {
+                userClientDict->setObject("IOClass", ioClass);
+                userClientDict->setObject("IOUserClass", ioUserClass);
+
+                // IOHIDDevice::setProperty() takes OSObject keys, so wrap the
+                // property name in an OSString.
+                auto * userClientKey = OSString::withCString(kKeyMapperUserClientProperty);
+                if (userClientKey) {
+                    setProperty(userClientKey, userClientDict);
+                    userClientKey->release();
+                }
+            }
+            if (ioClass) {
+                ioClass->release();
+            }
+            if (ioUserClass) {
+                ioUserClass->release();
+            }
+            userClientDict->release();
+        }
+
         IOLog("KeyMapperDriver: virtual keyboard started\n");
     } else {
         IOLog("KeyMapperDriver: failed to start\n");
     }
 
     return result;
+}
+
+kern_return_t KeyMapperDriver::NewUserClient(
+    uint32_t type,
+    IOUserClient ** userClient)
+{
+    // Instantiate the user client from the registry property set in
+    // handleStart(). The created object is registered as a child of this
+    // driver, so it can reach the driver through getProvider().
+    IOService * service = nullptr;
+    kern_return_t kr = Create(this, kKeyMapperUserClientProperty, &service);
+    if (kr != kIOReturnSuccess || !service) {
+        return (kr != kIOReturnSuccess) ? kr : kIOReturnError;
+    }
+
+    *userClient = OSDynamicCast(IOUserClient, service);
+    if (!*userClient) {
+        service->release();
+        return kIOReturnError;
+    }
+
+    // The IOKit framework takes ownership of the user client and releases it
+    // when the connection is closed.
+    return kIOReturnSuccess;
 }
 
 OSDictionary * KeyMapperDriver::newDeviceDescription()

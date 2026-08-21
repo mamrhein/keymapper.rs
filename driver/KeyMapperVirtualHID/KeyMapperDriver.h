@@ -11,8 +11,9 @@
 /// Virtual HID keyboard driver using DriverKit's IOUserHIDDevice.
 ///
 /// Exposes a standard USB keyboard interface through DriverKit's user-space
-/// HID driver framework. User-space clients connect via the built-in
-/// IOHIDDeviceUserClient and send input reports to inject key events.
+/// HID driver framework. User-space clients open the driver with
+/// `IOServiceOpen()` and send input reports through a `KeyMapperUserClient`
+/// to inject key events.
 
 #pragma once
 
@@ -20,6 +21,8 @@
 #include <HIDDriverKit/IOUserHIDDevice.h>
 
 #include "OSStructors.h"
+
+class IOUserClient;
 
 class KeyMapperDriver : public IOUserHIDDevice
 {
@@ -34,6 +37,16 @@ public:
     /// @return          `true` on success.
     virtual bool handleStart(IOService * provider) override;
 
+    /// Creates a user client for a user-space connection opened with
+    /// `IOServiceOpen()`.
+    ///
+    /// @param type        The type passed to `IOServiceOpen()`.
+    /// @param userClient  The created `KeyMapperUserClient` on success.
+    /// @return            `kIOReturnSuccess` on success.
+    virtual kern_return_t NewUserClient(
+        uint32_t type,
+        IOUserClient ** userClient);
+
     /// Returns the device identity dictionary consumed by IOKit to publish
     /// the device in the registry.
     ///
@@ -47,3 +60,6 @@ public:
     ///          report descriptor.
     virtual OSData * newReportDescriptor() override;
 };
+
+// Global meta-class symbol consumed by OSDynamicCast(KeyMapperDriver, ...).
+OSDeclareMetaClass(KeyMapperDriver);
