@@ -43,7 +43,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use event_log::{LogEvent, assert_events_match, event_str};
@@ -813,10 +813,19 @@ fn start_daemon(config_dir: &Path) -> DaemonGuard {
     // app-scoped rule evaluation is deterministic: the monitor is
     // windowless on Linux and can never be the compositor's active
     // window, yet the test expects the monitor-scoped rules to fire.
+    //
+    // Also tell the daemon where to write its readiness file so we can wait
+    // for it to finish initialisation (e.g. the DriverKit virtual HID driver
+    // loading on macOS) before injecting keys.  The daemon inherits this
+    // environment variable when it is spawned.
+    let ready_file = config_dir.join("keymapperd.ready");
+    let _ = std::fs::remove_file(&ready_file);
+
     let status = Command::new(cli_bin_path())
         .args(["daemon", "start", "--config-dir"])
         .arg(config_dir)
         .env("KEYMAPPER_ACTIVE_APP", MONITOR_APP_NAME)
+        .env("KEYMAPPER_READY_FILE", &ready_file)
         .status()
         .expect("failed to run keymapper daemon start");
 
@@ -824,12 +833,44 @@ fn start_daemon(config_dir: &Path) -> DaemonGuard {
         panic!("keymapper daemon start failed with status: {}", status);
     }
 
-    // Allow the daemon to initialize (grab devices, create uinput, etc.).
-    thread::sleep(Duration::from_millis(500));
+    // Wait for the daemon to signal readiness (it touches the ready file
+    // once it can process events).  This is more reliable than a fixed sleep
+    // because initialisation time varies: on a fresh CI runner the DriverKit
+    // driver may take several seconds to load into IOKit.
+    wait_for_ready_file(&ready_file, config_dir);
 
     DaemonGuard {
         config_dir: config_dir.to_path_buf(),
         stopped: false,
+    }
+}
+
+/// Wait until the daemon's readiness file appears, or fail.
+///
+/// Polls the ready file the daemon touches once it can process events.  If
+/// the daemon exits before signalling readiness, or the wait times out, the
+/// daemon log (which captures startup failures such as a missing DriverKit
+/// driver) is printed before panicking.
+fn wait_for_ready_file(ready_file: &Path, config_dir: &Path) {
+    // Generous bound: the daemon's own driver-wait timeout is 15s, so it
+    // will either signal readiness or exit well before this.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready_file.exists() {
+        if !daemon_alive(config_dir) {
+            eprintln!(
+                "daemon exited before signalling readiness; log:\n{}",
+                read_daemon_log(config_dir)
+            );
+            panic!("daemon exited before signalling readiness");
+        }
+        if Instant::now() >= deadline {
+            eprintln!(
+                "daemon did not signal readiness within 30s; log:\n{}",
+                read_daemon_log(config_dir)
+            );
+            panic!("daemon did not signal readiness in time");
+        }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 

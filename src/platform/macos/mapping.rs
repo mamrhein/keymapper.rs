@@ -59,6 +59,10 @@ pub fn start_mapping(
     )
     .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
 
+    // The socket is open and the seizure mapping is live, so the daemon can
+    // now process events.  Signal readiness for the e2e harness.
+    crate::daemon::signal_ready();
+
     run_event_loop(handle, shutdown)
 }
 

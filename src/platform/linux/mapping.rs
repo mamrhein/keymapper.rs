@@ -742,6 +742,11 @@ pub fn start_mapping(
         global_filter,
     );
 
+    // All devices are grabbed, the virtual output device is created, and the
+    // hot-plug monitor is running, so the daemon can now process events.
+    // Signal readiness for the e2e harness.
+    crate::daemon::signal_ready();
+
     let mut events = vec![epoll_event { events: 0, u64: 0 }; 64];
 
     while !shutdown.load(Ordering::Acquire) {

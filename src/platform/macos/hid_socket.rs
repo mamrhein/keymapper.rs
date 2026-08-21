@@ -16,6 +16,8 @@
 use std::{
     ffi::c_void,
     ptr::{self, NonNull},
+    thread,
+    time::{Duration, Instant},
 };
 
 // ---------------------------------------------------------------------------
@@ -265,11 +267,25 @@ pub struct HidSocket {
     socket: NonNull<IOHIDServiceSocket>,
 }
 
+/// Maximum time to wait for the DriverKit driver to become available.
+///
+/// On a fresh CI runner, the DriverKit extension may take a few seconds to
+/// load into the IOKit registry after installation.  This timeout gives it
+/// time to appear before giving up.  Override with the
+/// `KEYMAPPER_HID_DRIVER_TIMEOUT` environment variable (in seconds); set to
+/// 0 to fail fast.
+const DRIVER_WAIT_TIMEOUT_SECS: u64 = 15;
+
+/// Interval between driver-availability retries.
+const DRIVER_WAIT_INTERVAL: Duration = Duration::from_millis(500);
+
 impl HidSocket {
     /// Discover the virtual HID driver in IOKit and open a socket to it.
     ///
-    /// Enumerates services matching the expected driver class name.  If no
-    /// matching service is found, returns [`HidSocketError::DriverNotFound`].
+    /// Enumerates services matching the expected driver class name and
+    /// retries until one accepts a socket connection or the wait timeout
+    /// elapses.  If no matching service is found within the timeout, returns
+    /// [`HidSocketError::DriverNotFound`].
     pub fn discover_and_open() -> Result<Self, HidSocketError> {
         // Resolve the IOHIDServiceSocket* symbols at runtime.
         if !HidFunctions::resolve() {
@@ -277,6 +293,36 @@ impl HidSocket {
         }
         let functions = HID_FUNCS.get().expect("HID functions not resolved");
 
+        // Determine the wait timeout.  Default to DRIVER_WAIT_TIMEOUT_SECS,
+        // but allow override via environment variable (0 = fail fast).
+        let timeout_secs = std::env::var("KEYMAPPER_HID_DRIVER_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DRIVER_WAIT_TIMEOUT_SECS);
+
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+
+        loop {
+            match Self::try_discover_and_open(functions) {
+                Ok(socket) => return Ok(socket),
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return Err(e);
+                    }
+                    eprintln!(
+                        "HID driver not ready ({e}); retrying in {} ms...",
+                        DRIVER_WAIT_INTERVAL.as_millis()
+                    );
+                    thread::sleep(DRIVER_WAIT_INTERVAL);
+                }
+            }
+        }
+    }
+
+    /// Attempt to discover the driver and open a socket, without retrying.
+    fn try_discover_and_open(
+        functions: &HidFunctions,
+    ) -> Result<Self, HidSocketError> {
         let mut iterator: io_object_t = MACH_PORT_NULL;
 
         // Build a matching dictionary for our driver class name.
@@ -293,7 +339,10 @@ impl HidSocket {
         };
 
         if kern_return != 0 {
-            unsafe { IOObjectRelease(iterator) };
+            unsafe {
+                IOObjectRelease(iterator);
+                IOObjectRelease(matching);
+            };
             return Err(HidSocketError::DriverNotFound);
         }
 
@@ -350,7 +399,11 @@ impl HidSocket {
             }
         }
 
-        unsafe { IOObjectRelease(iterator) };
+        unsafe {
+            IOObjectRelease(iterator);
+            IOObjectRelease(matching);
+        };
+
         result
     }
 

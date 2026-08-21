@@ -442,6 +442,11 @@ pub fn start_mapping(
 
     println!("Windows low-level hook listening (three-thread mode).");
 
+    // The raw input loop, worker thread, and keyboard hook are all live, so
+    // the daemon can now process events.  Signal readiness for the e2e
+    // harness.
+    crate::daemon::signal_ready();
+
     // Run the message loop.  This blocks until WM_QUIT is received.
     unsafe {
         let mut msg = MSG::default();
