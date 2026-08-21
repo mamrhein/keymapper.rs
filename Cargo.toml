@@ -82,3 +82,6 @@ windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_Devices_HumanInterfaceDevice",
 ] }
+
+[dev-dependencies]
+tempfile = "3" # unique, auto-removed temp files for tests

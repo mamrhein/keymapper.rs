@@ -1536,6 +1536,7 @@ dependencies = [
  "serde_yaml",
  "signal-hook",
  "sysinfo",
+ "tempfile",
  "udev",
  "wayland-client",
  "windows",

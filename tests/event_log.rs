@@ -135,24 +135,22 @@ mod tests {
 
     #[test]
     fn parse_empty_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("event_log_test_empty.txt");
-        fs::write(&path, "").unwrap();
+        // `NamedTempFile` creates a unique file that is removed on drop,
+        // so concurrent test runs cannot collide or delete each other's
+        // files.
+        let file = tempfile::NamedTempFile::new().unwrap();
 
-        let events = parse(&path).unwrap();
+        let events = parse(file.path()).unwrap();
         assert!(events.is_empty());
-
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn parse_basic_events() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("event_log_test_basic.txt");
-        fs::write(&path, "down CapsLock\nup CapsLock\ndown A\nup A\n")
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), "down CapsLock\nup CapsLock\ndown A\nup A\n")
             .unwrap();
 
-        let events = parse(&path).unwrap();
+        let events = parse(file.path()).unwrap();
         assert_eq!(events.len(), 4);
         assert_eq!(
             events,
@@ -163,18 +161,18 @@ mod tests {
                 event_str("A", false),
             ]
         );
-
-        fs::remove_file(&path).ok();
     }
 
     #[test]
     fn parse_skips_empty_and_malformed_lines() {
-        let dir = std::env::temp_dir();
-        let path = dir.join("event_log_test_skip.txt");
-        fs::write(&path, "down LeftControl\n\nbadline\nup LeftControl\n   \n")
-            .unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            "down LeftControl\n\nbadline\nup LeftControl\n   \n",
+        )
+        .unwrap();
 
-        let events = parse(&path).unwrap();
+        let events = parse(file.path()).unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(
             events,
@@ -183,8 +181,6 @@ mod tests {
                 event_str("LeftControl", false),
             ]
         );
-
-        fs::remove_file(&path).ok();
     }
 
     #[test]
