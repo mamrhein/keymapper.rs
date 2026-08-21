@@ -96,5 +96,8 @@ Follow the git commit message style.
 - Keep explanations extremely concise, direct, and focused ("Zero-Fluff").
 - All code blocks MUST use the correct syntax highlighter (e.g., ```rust).
 - All comments inside code files MUST be written in English.
+- Respond directly with the code block. 
+- Plan the logic in maximum 3 bullet points before writing the code. 
+- Do not repeat your explanations.
 
 Here's a thinking process: Analyze User Input:
