@@ -70,10 +70,7 @@ pub fn spawn_daemon(
                 // Replace this process with the keymapperd binary.
                 match resolve_daemon_binary() {
                     Some(c_exe) => {
-                        libc::execvp(
-                            c_exe.as_ptr() as *const i8,
-                            std::ptr::null(),
-                        );
+                        libc::execvp(c_exe.as_ptr(), std::ptr::null());
                     }
                     None => {
                         let exe = b"keymapperd\0";
