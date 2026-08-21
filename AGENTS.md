@@ -42,7 +42,7 @@ auto-file-header service. In this case don't add a header.
 ### Rust edition and formatting
 
 - Use Rust 2024 edition.
-- Format with `rustfmt`.
+- Format with `rustfmt +nightly`.
 
 ### Type system patterns
 
@@ -96,3 +96,5 @@ Follow the git commit message style.
 - Keep explanations extremely concise, direct, and focused ("Zero-Fluff").
 - All code blocks MUST use the correct syntax highlighter (e.g., ```rust).
 - All comments inside code files MUST be written in English.
+
+Here's a thinking process: Analyze User Input:
