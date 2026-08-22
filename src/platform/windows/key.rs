@@ -9,10 +9,9 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::common::{
-    hid_usage::{HidUsage, PAGE_CONSUMER, PAGE_KEYBOARD},
-    modifier::ModifierRole,
-};
+use crate::common::
+    hid_usage::{HidUsage, PAGE_CONSUMER, PAGE_KEYBOARD}
+;
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the VK_* codes
@@ -137,37 +136,6 @@ pub enum Key {
 impl Key {
     pub const fn as_native(self) -> u16 {
         self as u16
-    }
-
-    pub const fn as_modifier_bit(self) -> Option<u8> {
-        let role = match self {
-            Self::LeftControl => ModifierRole::LeftControl,
-            Self::RightControl => ModifierRole::RightControl,
-            Self::LeftShift => ModifierRole::LeftShift,
-            Self::RightShift => ModifierRole::RightShift,
-            Self::LeftAlt => ModifierRole::LeftAlt,
-            Self::RightAlt => ModifierRole::RightAlt,
-            Self::LeftCommand => ModifierRole::LeftCommand,
-            Self::RightCommand => ModifierRole::RightCommand,
-            _ => return None,
-        };
-        Some(role.bit())
-    }
-
-    pub fn as_modifier_positions(self) -> Option<Vec<u8>> {
-        let role = match self {
-            Self::LeftControl => ModifierRole::LeftControl,
-            Self::RightControl => ModifierRole::RightControl,
-            Self::LeftShift => ModifierRole::LeftShift,
-            Self::RightShift => ModifierRole::RightShift,
-            Self::LeftAlt => ModifierRole::LeftAlt,
-            Self::RightAlt => ModifierRole::RightAlt,
-            Self::LeftCommand => ModifierRole::LeftCommand,
-            Self::RightCommand => ModifierRole::RightCommand,
-            _ => return None,
-        };
-        let (a, b) = role.family_positions();
-        Some(vec![a, b])
     }
 
     /// Convert a `HidUsage` to the Windows-native variant.
