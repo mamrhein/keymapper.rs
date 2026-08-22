@@ -56,11 +56,11 @@ use keymapper::{
 };
 
 // ---------------------------------------------------------------------------
-// CI gate — e2e tests require elevated privileges and a clean environment
+// e2e gate — e2e tests require elevated privileges
 // ---------------------------------------------------------------------------
 
 /// Cache the result of the e2e capability check.  We probe once at startup
-/// rather than per-test, because the result is a global property of the CI
+/// rather than per-test, because the result is a global property of the
 /// environment (Accessibility permission, HID driver availability, etc.).
 static CAN_RUN_E2E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -122,27 +122,9 @@ impl E2eLock {
 
 fn can_run_e2e() -> bool {
     *CAN_RUN_E2E.get_or_init(|| {
-        if !should_run_e2e_raw() {
-            return false;
-        }
-
         // Check that the injector can be created.
-        if !create_injector().is_ok_and(|opt| opt.is_some()) {
-            return false;
-        }
-
-        true
+        create_injector().is_ok_and(|opt| opt.is_some())
     })
-}
-
-/// Raw check: is the `CI` env-var set?
-fn should_run_e2e_raw() -> bool {
-    env::var("CI").is_ok()
-}
-
-/// Check whether e2e tests should run.
-fn should_run_e2e() -> bool {
-    can_run_e2e()
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,7 +1019,7 @@ fn read_daemon_log(config_dir: &Path) -> String {
 /// validates that the daemon remaps keys correctly.
 #[test]
 fn e2e_comprehensive_config() {
-    if !should_run_e2e() {
+    if !can_run_e2e() {
         eprintln!(
             "skipping e2e test: injector not available in this environment. \
              Set CI=1 and ensure required permissions are granted."
@@ -1255,7 +1237,7 @@ fn e2e_consumer_key_remap() {
 /// 3. Injects keys again and validates the new mappings.
 #[test]
 fn e2e_config_hot_reload() {
-    if !should_run_e2e() {
+    if !can_run_e2e() {
         eprintln!(
             "skipping e2e test: injector not available in this environment. \
              Set CI=1 and ensure required permissions are granted."
