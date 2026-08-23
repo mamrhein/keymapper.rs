@@ -13,9 +13,13 @@
 //! only this process receives its events.  Mapped output is emitted through
 //! the DriverKit virtual HID keyboard.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
@@ -24,7 +28,7 @@ use signal_hook::{
     flag::register,
 };
 
-use super::hid_virt_kbd_conn::HidVirtKbdConn;
+use super::karabiner_client::KarabinerClient;
 
 /// Start keyboard input capture via IOKit device seizure.
 ///
@@ -42,23 +46,50 @@ pub fn start_mapping(
     register(SIGTERM, shutdown.clone())
         .expect("failed to register SIGTERM handler");
 
-    // Open the virtual HID keyboard.  Fail fast if the driver is not loaded.
-    let conn = HidVirtKbdConn::discover_and_open().map_err(|e| {
+    // Connect to the Karabiner DriverKit VirtualHIDDevice daemon.  The
+    // client spawns a background thread that retries the connection until
+    // the daemon is reachable, so this returns immediately.
+    let client = KarabinerClient::connect().map_err(|e| {
         format!(
-            "DriverKit HID driver not available ({e}). Load the \
-             KeyMapperDriver extension."
+            "Karabiner client failed to start ({e}). Install and activate \
+             the Karabiner DriverKit package."
         )
     })?;
 
-    // HidVirtKbdConn holds only an IOService connection handle (a Mach port
-    // right), so it is Send + Sync.  In practice it is used only on the
-    // main thread (CFRunLoop), where the queue callbacks emit reports.
-    let handle =
-        super::iokit_hid::start_iohid_seizure_mapping(lookup, Arc::new(conn))
-            .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
+    // Wait for the virtual keyboard to become ready so that the first
+    // injected events are not dropped, but stay responsive to shutdown.  The
+    // client keeps retrying in the background, so if the timeout elapses we
+    // continue anyway and reports flow once it connects.
+    let ready_deadline = Instant::now() + Duration::from_secs(25);
+    while !client.is_ready() {
+        if shutdown.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if Instant::now() >= ready_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 
-    // The connection is open and the seizure mapping is live, so the daemon
-    // can now process events.  Signal readiness for the e2e harness.
+    if !client.is_ready() {
+        eprintln!(
+            "Karabiner virtual keyboard not ready after 25s; continuing and \
+             retrying in the background"
+        );
+    }
+
+    // KarabinerClient is Send + Sync (it holds an mpsc sender and atomic
+    // flags), so it can be shared with the queue callbacks.  In practice it
+    // is used only on the main thread (CFRunLoop), where the queue callbacks
+    // emit reports.
+    let handle = super::iokit_hid::start_iohid_seizure_mapping(
+        lookup,
+        Arc::new(client),
+    )
+    .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
+
+    // The seizure mapping is live, so the daemon can now process events.
+    // Signal readiness for the e2e harness.
     crate::daemon::signal_ready();
 
     run_event_loop(handle, shutdown)

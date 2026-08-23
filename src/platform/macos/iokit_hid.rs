@@ -747,8 +747,8 @@ pub struct HidQueueContext {
     // Shared lookup for remapping rules.
     pub lookup:
         std::sync::Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
-    // Shared connection to the DriverKit virtual HID keyboard.
-    pub conn: std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
+    // Shared client to the Karabiner DriverKit virtual HID keyboard.
+    pub conn: std::sync::Arc<super::karabiner_client::KarabinerClient>,
     // Bitmask tracking which modifier keys are physically pressed.
     pub modifier_state: u8,
     // Set of currently pressed keycodes for deduplication.
@@ -997,45 +997,30 @@ unsafe extern "C" fn hid_queue_value_callback(
     }
 }
 
-/// Emit a single `NativeKey` as USB HID reports.
+/// Emit a single `NativeKey` through the Karabiner virtual keyboard.
 ///
-/// Sends a report with the modifier and base key pressed, followed by
-/// an empty report to release.  Dispatches on the output usage's page:
-/// - Keyboard page (0x07): standard USB keyboard report.
-/// - Consumer page (0x0C): consumer control report.
+/// Posts a report with the modifier and base key pressed, followed by an
+/// all-clear report to release.  Dispatches on the output usage's page:
+/// - Keyboard page (0x07): a 67-byte `keyboard_input` report (32 × 16-bit
+///   usages).
+/// - Consumer page (0x0C): a `consumer_input` report.
 fn emit_hid_report(
-    conn: &std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
+    conn: &std::sync::Arc<super::karabiner_client::KarabinerClient>,
     native_key: &crate::daemon::mapping_cache::NativeKey,
 ) {
-    use super::hid_virt_kbd_conn::{
-        build_consumer_release_report, build_consumer_report,
-        build_keyboard_report,
-    };
     use crate::common::hid_usage::PAGE_KEYBOARD;
 
     if native_key.usage.page() == PAGE_KEYBOARD {
-        // Keyboard page: write the usage id directly into the report.
-        let usage_byte = native_key.usage.id() as u8;
-
-        if let Ok(report) =
-            build_keyboard_report(native_key.modifiers, Some(usage_byte))
-        {
-            let _ = conn.send_report(&report);
-        }
-
-        // Release the key by sending an empty report.
-        if let Ok(empty_report) = build_keyboard_report(0, None) {
-            let _ = conn.send_report(&empty_report);
-        }
+        // Keyboard page: post the usage in the first slot of the
+        // `keyboard_input` report, then an empty report to release.
+        let usage = native_key.usage.id();
+        let _ = conn.send_keyboard_report(native_key.modifiers, &[usage]);
+        let _ = conn.send_keyboard_report(0, &[]);
     } else {
-        // Consumer page: build a consumer control report.
-        if let Ok(report) = build_consumer_report(native_key.usage.id()) {
-            let _ = conn.send_report(&report);
-
-            // Release the consumer key by sending an all-clear report.
-            let release_report = build_consumer_release_report();
-            let _ = conn.send_report(&release_report);
-        }
+        // Consumer page: post the usage, then an all-clear report to
+        // release.
+        let _ = conn.send_consumer_report(native_key.usage.id());
+        let _ = conn.send_consumer_release();
     }
 }
 
@@ -1271,13 +1256,13 @@ pub struct SeizureHandle {
 ///
 /// Discovers keyboards via `HidDeviceManager`, opens each with
 /// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
-/// delivery.  Mapped output is emitted through the shared `HidVirtKbdConn`
-/// (DriverKit virtual keyboard).
+/// delivery.  Mapped output is emitted through the shared `KarabinerClient`
+/// (the Karabiner DriverKit virtual keyboard).
 pub fn start_iohid_seizure_mapping(
     lookup: std::sync::Arc<
         parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
     >,
-    conn: std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
+    conn: std::sync::Arc<super::karabiner_client::KarabinerClient>,
 ) -> Result<SeizureHandle, IoKitError> {
     // Discover physical keyboards.
     let manager = HidDeviceManager::new_keyboard_matcher()?;

@@ -353,6 +353,7 @@ impl Drop for HidVirtKbdConn {
 ///
 /// Because the bit positions line up exactly, the raw `u8` value is already
 /// a valid HID modifier byte.
+#[cfg(test)]
 #[inline]
 pub fn modifier_to_hid(modifiers: u8) -> u8 {
     modifiers
@@ -372,6 +373,7 @@ pub fn modifier_to_hid(modifiers: u8) -> u8 {
 ///
 /// For a key-down event, the raw USB HID usage byte is placed in slot 0
 /// (byte 3).  For a key-up event, all key slots are cleared to zero.
+#[cfg(test)]
 pub fn build_keyboard_report(
     modifiers: u8,
     code: Option<u8>,
@@ -400,6 +402,7 @@ pub fn build_keyboard_report(
 ///
 /// Returns [`HidVirtKbdConnError::UnknownConsumerUsage`] for usages without
 /// a known mapping.
+#[cfg(test)]
 pub fn build_consumer_report(
     usage_id: u16,
 ) -> Result<[u8; 5], HidVirtKbdConnError> {
@@ -434,6 +437,7 @@ pub fn build_consumer_report(
 ///
 /// Report format: `[report_id=2, 0, 0, 0, 0]` — both the press and release
 /// 16-bit usage fields are zero, which releases any held consumer key.
+#[cfg(test)]
 pub fn build_consumer_release_report() -> [u8; 5] {
     [2, 0, 0, 0, 0]
 }
