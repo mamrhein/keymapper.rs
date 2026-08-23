@@ -168,7 +168,12 @@ pub fn run(output_path: PathBuf) {
         super::linux::run(&output_path);
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    {
+        super::windows::run(&output_path);
+    }
+
+    #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
     {
         use crate::util::monitor::register_signal_handlers;
 

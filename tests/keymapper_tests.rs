@@ -7,7 +7,11 @@
 // $Source$
 // $Revision$
 
+mod common;
+
 use std::{env, path::PathBuf, process::Command};
+
+use common::E2eLock;
 
 /// Path to the compiled keymapper binary.
 fn bin_path() -> PathBuf {
@@ -867,6 +871,12 @@ fn server_status_not_running() {
 
 #[test]
 fn server_start_not_found() {
+    // Hold the e2e lock: the test probes the process list for `keymapperd`,
+    // and a daemon started by a concurrent e2e test would make `daemon
+    // start` report "started" (its 500 ms liveness check would see the
+    // e2e daemon), which is not one of the outcomes asserted below.
+    let _e2e_lock = E2eLock::acquire();
+
     // With service-manager integration, `daemon start` either fails with a
     // clear error (service not installed) or reports already-running if the
     // service is known to launchd/systemd.  Both outcomes are valid; we just

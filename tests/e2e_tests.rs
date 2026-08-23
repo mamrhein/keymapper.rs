@@ -36,6 +36,7 @@
 //! The temp directory, the monitor process, and the daemon are wrapped in
 //! RAII guards, so the environment is cleaned up even when a test fails.
 
+mod common;
 mod event_log;
 
 use std::{
@@ -46,6 +47,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use common::E2eLock;
 use event_log::{LogEvent, assert_events_match, event_str};
 use keymapper::{
     common::{
@@ -63,62 +65,6 @@ use keymapper::{
 /// rather than per-test, because the result is a global property of the
 /// environment (Accessibility permission, HID driver availability, etc.).
 static CAN_RUN_E2E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
-/// Cross-process lock that serializes the e2e tests.
-///
-/// The tests drive the system-wide input stack (they grab the physical
-/// keyboard and create virtual devices), so two e2e tests must never run
-/// concurrently: a second daemon would fail to grab the already grabbed
-/// keyboards and abort.  Holding the lock for the duration of the test
-/// serializes the e2e tests while leaving the unit tests free to run in
-/// parallel.
-#[cfg(unix)]
-struct E2eLock {
-    /// The lock is released when this file (and its descriptor) is closed.
-    _file: std::fs::File,
-}
-
-#[cfg(unix)]
-impl E2eLock {
-    /// Block until the exclusive e2e lock is acquired.
-    fn acquire() -> Self {
-        use std::os::unix::io::AsRawFd;
-
-        let path = env::temp_dir().join("keymapper_e2e.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&path)
-            .unwrap_or_else(|e| {
-                panic!("failed to open e2e lock file {path:?}: {e}")
-            });
-
-        // Safety: flock(2) on a descriptor owned by `file`.
-        loop {
-            let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-            if ret == 0 {
-                return E2eLock { _file: file };
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                panic!("failed to acquire e2e lock {path:?}: {err}");
-            }
-        }
-    }
-}
-
-/// Windows: no cross-process input-stack lock available; the Windows e2e
-/// path is expected to run one test at a time.
-#[cfg(not(unix))]
-struct E2eLock;
-
-#[cfg(not(unix))]
-impl E2eLock {
-    fn acquire() -> Self {
-        E2eLock
-    }
-}
 
 fn can_run_e2e() -> bool {
     *CAN_RUN_E2E.get_or_init(|| {
@@ -265,6 +211,7 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
         .copied()
         .filter(|k| k.page() != PAGE_CONSUMER)
         .filter(|k| !used_keys.contains(k))
+        .filter(|k| !platform_excludes_passthrough(*k))
         .take(5)
         .collect();
 
@@ -320,6 +267,23 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
     TestSequences { steps, expected }
 }
 
+/// Whether the platform's input stack rewrites a bare press of this key
+/// in a way the expected sequence cannot predict.
+///
+/// On Windows, AltGr-capable layouts (e.g. German) expand an injected
+/// Right Alt press into a Ctrl+Right Alt key pair, and Alt presses can put
+/// the system into menu mode, so both Alt keys are never used as bare
+/// passthrough keys there.
+#[cfg(target_os = "windows")]
+fn platform_excludes_passthrough(key: HidUsage) -> bool {
+    matches!(key, HidUsage::LeftAlt | HidUsage::RightAlt)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_excludes_passthrough(_key: HidUsage) -> bool {
+    false
+}
+
 /// The key name the monitor logs for a given key, or `None` when the
 /// monitor cannot see the key on this platform.
 ///
@@ -338,8 +302,21 @@ fn monitor_key_name(key: HidUsage) -> Option<&'static str> {
         Some(key.as_str())
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
+        // The Windows hook-capture backend sees every key under its exact
+        // name, just like the Linux direct-capture backend: left/right
+        // sides are distinguished and Super is visible.
+        Some(key.as_str())
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // The egui backend observes keyboard state through the windowing
+        // system, which is side-agnostic: right-side modifiers are reported
+        // under their left-side names, Super/Command is only visible on
+        // macOS (the egui backend drops the super key on other platforms),
+        // and CapsLock is not tracked by egui at all.
         match key {
             HidUsage::LeftControl | HidUsage::RightControl => {
                 Some("LeftControl")
@@ -808,6 +785,12 @@ fn start_daemon(config_dir: &Path) -> DaemonGuard {
         .arg(config_dir)
         .env("KEYMAPPER_ACTIVE_APP", MONITOR_APP_NAME)
         .env("KEYMAPPER_READY_FILE", &ready_file)
+        // On Windows, run the daemon in capture mode so it re-emits every key
+        // (mapped and unmapped) through the virtual keyboard, tagged, for the
+        // monitor's low-level hook to capture.  Without this the monitor
+        // window would depend on keyboard focus, which is brittle.
+        // Non-Windows daemons ignore the variable.
+        .env("KEYMAPPER_CAPTURE", "1")
         .status()
         .expect("failed to run keymapper daemon start");
 
@@ -1037,6 +1020,13 @@ fn e2e_comprehensive_config() {
     let mut dir_guard = TempDirGuard::new(temp_dir.clone());
     eprintln!("test dir: {:?}", temp_dir);
 
+    // a2. Truncate the Windows capture debug log so it contains only this
+    //     run's trace.  The daemon appends to a fixed path outside the temp
+    //     dir, which survives the temp dir's removal when the test fails.
+    let _ = std::fs::remove_file(
+        env::temp_dir().join("keymapper_capture_debug.log"),
+    );
+
     // b. Copy fixture config into temp directory.
     let config_in = Path::new(CONFIG_COMPREHENSIVE);
     let config_out = temp_dir.join("config.yaml");
@@ -1117,6 +1107,15 @@ fn e2e_comprehensive_config() {
     //    sequence).
     let mut expected_combined = passthrough_expected(HidUsage::Space);
     expected_combined.extend(sequences.expected);
+    if actual != expected_combined {
+        // The temp dir (and thus the daemon log) is removed when the test
+        // fails, so print both logs now while they are still available.
+        eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
+        let debug_log = env::temp_dir().join("keymapper_capture_debug.log");
+        if let Ok(contents) = std::fs::read_to_string(&debug_log) {
+            eprintln!("capture debug log:\n{contents}");
+        }
+    }
     assert_events_match(
         &actual,
         &expected_combined,

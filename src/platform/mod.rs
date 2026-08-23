@@ -30,6 +30,8 @@ pub(crate) use macos::get_active_app_name;
 #[cfg(target_os = "macos")]
 pub use macos::{HidVirtKbdConn, list_keyboards, start_mapping};
 #[cfg(target_os = "windows")]
+pub use windows::CAPTURE_TAG;
+#[cfg(target_os = "windows")]
 pub(crate) use windows::get_active_app_name;
 #[cfg(target_os = "windows")]
 pub use windows::{Key, list_keyboards, start_mapping};

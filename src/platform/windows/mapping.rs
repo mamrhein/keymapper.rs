@@ -28,7 +28,7 @@ use std::{
     io::Write,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
     },
 };
 
@@ -51,6 +51,7 @@ use windows::Win32::{
 };
 
 use super::{
+    CAPTURE_TAG,
     dispatch::{Decision, HookEvent, spawn_worker},
     key::{Key, hid_to_vk},
     raw_input::start_raw_input_loop,
@@ -288,6 +289,163 @@ pub(super) fn emit_key_event(native_key: &NativeKey) {
 }
 
 // ---------------------------------------------------------------------------
+// Capture mode
+// ---------------------------------------------------------------------------
+//
+// Capture mode makes the daemon re-emit every key through its virtual
+// keyboard, tagged with [`CAPTURE_TAG`], so the e2e monitor's
+// `WH_KEYBOARD_LL` hook can capture the daemon's output without depending on
+// a focused window.  It is gated on the `KEYMAPPER_CAPTURE` environment
+// variable so production behaviour (unmapped keys passing straight through)
+// is left untouched.
+
+/// Process start, for capture-debug timestamps.
+static CAPTURE_T0: std::sync::OnceLock<std::time::Instant> =
+    std::sync::OnceLock::new();
+
+/// Capture-mode debug log, appended to from the hook and worker threads.
+static CAPTURE_DEBUG: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
+    std::sync::OnceLock::new();
+
+pub(super) fn capture_debug(line: &str) {
+    let t0 = CAPTURE_T0.get_or_init(std::time::Instant::now);
+    let file = CAPTURE_DEBUG.get_or_init(|| {
+        let path = std::env::temp_dir().join("keymapper_capture_debug.log");
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map(std::sync::Mutex::new)
+            .expect("failed to open capture debug log")
+    });
+    let mut f = file.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = writeln!(f, "t={:6}ms {}", t0.elapsed().as_millis(), line);
+}
+
+/// Modifier keys currently pressed, tracked from the hook's own event
+/// stream.
+///
+/// `GetAsyncKeyState` cannot be used here: its state lags behind the very
+/// event the hook is processing (for `SendInput`-injected keys it does not
+/// yet reflect the key-down being dispatched), so fast chords would miss
+/// their modifiers.  It is also poisoned by session leftovers such as a
+/// modifier key stuck "down" in the async state after an interrupted input
+/// sequence.  Since every key event (physical or injected) passes through
+/// the low-level hook, tracking the state from the events themselves is
+/// both faster and exact.  Bit positions match [`ModifierRole`] (and the
+/// compiled rule masks).  Only the hook thread touches this value.
+static TRACKED_MODIFIERS: AtomicU8 = AtomicU8::new(0);
+
+/// Set once from `start_mapping` to record whether capture mode is active.
+static CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Whether capture mode is active (all emission tagged through the virtual
+/// keyboard).
+pub(super) fn capture_enabled() -> bool {
+    CAPTURE_MODE.load(Ordering::Relaxed)
+}
+
+/// Record the capture-mode flag determined at startup.
+fn set_capture_mode(enabled: bool) {
+    CAPTURE_MODE.store(enabled, Ordering::Relaxed);
+}
+
+/// Emit a single key-press or key-release via `SendInput`, tagged with
+/// [`CAPTURE_TAG`] so the monitor's hook can recognize it.  No
+/// `INJECTED_KEYS` tracking is needed: the tag alone identifies daemon
+/// re-emissions.
+fn simulate_key_event_tagged(vk: VIRTUAL_KEY, is_key_up: bool) {
+    if capture_enabled() {
+        capture_debug(&format!("emit vk={:#04x} up={}", vk.0, is_key_up));
+    }
+    let mut flags: u32 = if is_key_up { KEYEVENTF_KEYUP.0 } else { 0 };
+    if is_extended_key(vk) {
+        flags |= KEYEVENTF_EXTENDEDKEY.0;
+    }
+
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
+                time: 0,
+                dwExtraInfo: CAPTURE_TAG,
+            },
+        },
+    };
+    unsafe {
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+/// Emit a complete mapped-output chord (modifiers + base + modifiers) via
+/// `SendInput`, tagged with [`CAPTURE_TAG`].  Mirrors [`emit_key_event`] but
+/// is used in capture mode.
+fn emit_key_event_tagged(native_key: &NativeKey) {
+    let mut pressed_modifiers: Vec<VIRTUAL_KEY> = Vec::new();
+
+    for bit in 0..8 {
+        if (native_key.modifiers >> bit) & 1 == 1
+            && let Some(vk) = modifier_bit_to_vk(bit)
+        {
+            simulate_key_event_tagged(vk, false);
+            pressed_modifiers.push(vk);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    let base_vk = Key::from_hid_usage(native_key.usage)
+        .map(Key::as_native)
+        .or_else(|| hid_to_vk(native_key.usage));
+
+    let Some(base_vk) = base_vk else {
+        eprintln!(
+            "Windows: no VK code for output HID usage {:?}",
+            native_key.usage
+        );
+        for vk in pressed_modifiers.into_iter().rev() {
+            simulate_key_event_tagged(vk, true);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        return;
+    };
+
+    simulate_key_event_tagged(VIRTUAL_KEY(base_vk), false);
+    std::thread::sleep(std::time::Duration::from_millis(1));
+
+    simulate_key_event_tagged(VIRTUAL_KEY(base_vk), true);
+    std::thread::sleep(std::time::Duration::from_millis(1));
+
+    for vk in pressed_modifiers.into_iter().rev() {
+        simulate_key_event_tagged(vk, true);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Emit a mapped output, routing it through the virtual keyboard in capture
+/// mode and via a direct `SendInput` in normal mode.  This is the single
+/// emission entry point shared by the hook proc (mapped keyboard outputs)
+/// and the worker (standalone consumer outputs).
+pub(super) fn emit_mapped_output(native_key: &NativeKey) {
+    if capture_enabled() {
+        emit_key_event_tagged(native_key);
+    } else {
+        emit_key_event(native_key);
+    }
+}
+
+/// Forward a single (unmapped) key through the virtual keyboard in capture
+/// mode.  In normal mode unmapped keys pass straight through the OS, so this
+/// is a no-op.
+pub(super) fn emit_forwarded_key(vk: u16, is_key_up: bool) {
+    if capture_enabled() {
+        simulate_key_event_tagged(VIRTUAL_KEY(vk), is_key_up);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Low-level keyboard hook procedure
 // ---------------------------------------------------------------------------
 
@@ -310,6 +468,19 @@ extern "system" fn low_level_keyboard_proc(
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
 
+    // In capture mode the daemon re-emits every key through the virtual
+    // keyboard, tagged with [`CAPTURE_TAG`].  Let those tagged re-emissions
+    // flow on to the monitor's hook without re-mapping them.
+    if capture_enabled() && kbd_struct.dwExtraInfo == CAPTURE_TAG {
+        capture_debug(&format!(
+            "hook tagged vk={:#04x} msg={:#06x}",
+            kbd_struct.vkCode, w_param.0
+        ));
+        return unsafe {
+            CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
+        };
+    }
+
     let is_key_down =
         w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
     let is_key_up = !is_key_down;
@@ -326,10 +497,40 @@ extern "system" fn low_level_keyboard_proc(
         return unsafe { CallNextHookEx(None, code, w_param, l_param) };
     }
 
-    // Clear the current key's modifier bit from the polled state so that
+    // Maintain the tracked modifier state from the event stream.  This runs
+    // before the decision so the key-down of a modifier itself is included
+    // in the tracked set (the own-bit clear below handles bare-modifier
+    // triggers).  Tagged re-emissions (capture mode) and the daemon's own
+    // injections (normal mode) were skipped earlier and never reach here.
+    if let Some(usage) = usage
+        && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
+    {
+        let mask = 1u8 << bit;
+        let tracked = TRACKED_MODIFIERS.load(Ordering::Relaxed);
+        if is_key_up {
+            TRACKED_MODIFIERS.store(tracked & !mask, Ordering::Relaxed);
+        } else {
+            TRACKED_MODIFIERS.store(tracked | mask, Ordering::Relaxed);
+        }
+    }
+
+    // Clear the current key's modifier bit from the tracked state so that
     // bare-modifier triggers (e.g. "LeftControl: A") match correctly against
     // the concurrent modifier set.
-    let mut pressed_modifiers = extract_modifier_bits();
+    let mut pressed_modifiers = TRACKED_MODIFIERS.load(Ordering::Relaxed);
+
+    if capture_enabled() {
+        capture_debug(&format!(
+            "hook vk={:#04x} up={} msg={:#06x} extra={:#010x} mods={:#04x} \
+             usage={:?}",
+            vk_code.0,
+            is_key_up,
+            w_param.0,
+            kbd_struct.dwExtraInfo,
+            pressed_modifiers,
+            usage
+        ));
+    }
     if let Some(usage) = usage
         && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
     {
@@ -376,16 +577,25 @@ extern "system" fn low_level_keyboard_proc(
 
     match decision {
         Decision::Swallow(outputs) => {
-            // Emit mapped outputs provided by the worker.  The worker
-            // resolved the mapping with device identification, so these
-            // outputs are authoritative.
-            for native_key in &outputs {
-                emit_key_event(native_key);
+            // In capture mode the worker already re-emitted the mapped
+            // outputs through the virtual keyboard, so the hook proc must
+            // not emit them again.  In normal mode emission happens here,
+            // where the hook context still reaches the focused window.
+            if !capture_enabled() {
+                for native_key in &outputs {
+                    emit_key_event(native_key);
+                }
             }
-            return LRESULT(1); // Swallow
+            // Swallow in both modes: the daemon fully owns the output.
+            return LRESULT(1);
         }
         Decision::PassThrough => {
-            // No mapping or timeout — pass through.
+            // In capture mode the worker forwarded the original key through
+            // the virtual keyboard, so swallow the real one to avoid double
+            // delivery.  In normal mode there is no mapping — pass through.
+            if capture_enabled() {
+                return LRESULT(1);
+            }
         }
     };
 
@@ -418,6 +628,17 @@ pub fn start_mapping(
     // Small delay to allow raw input registration to complete before the
     // hook starts firing events.
     std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`): the daemon
+    // swallows every key and re-emits it through the virtual keyboard, tagged
+    // with [`CAPTURE_TAG`], so the monitor's `WH_KEYBOARD_LL` hook can capture
+    // the output without depending on a focused window.  In this mode the
+    // worker performs all emission on its own (non-hook) thread — `SendInput`
+    // from within a `WH_KEYBOARD_LL` callback would not reach other hooks.
+    if std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty()) {
+        set_capture_mode(true);
+        eprintln!("Windows: capture mode enabled (KEYMAPPER_CAPTURE).");
+    }
 
     // Spawn the worker thread.
     let hook_tx = spawn_worker(Arc::clone(&lookup), raw_rx);

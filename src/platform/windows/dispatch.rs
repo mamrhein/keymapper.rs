@@ -50,7 +50,10 @@ use crate::{
     common::hid_usage::{HidUsage, PAGE_CONSUMER},
     daemon::state::Lookup,
     platform::windows::{
-        mapping::{emit_key_event, extract_modifier_bits},
+        mapping::{
+            capture_enabled, emit_forwarded_key, emit_mapped_output,
+            extract_modifier_bits,
+        },
         raw_input::RawInputEvent,
     },
 };
@@ -254,6 +257,11 @@ fn worker_loop(
             recv(raw_rx) -> raw_result => {
                 match raw_result {
                     Ok(event) => {
+                        if capture_enabled() {
+                            crate::platform::windows::mapping::capture_debug(&format!(
+                                "raw {:?}", event
+                            ));
+                        }
                         // Buffer only key-down events; key-ups are matched
                         // via the decision cache in the hook processor.
                         if event.is_key_up {
@@ -367,6 +375,33 @@ fn process_hook_event(
         decision
     };
 
+    // In capture mode the worker performs all emission, on this non-hook
+    // thread, so the e2e monitor's hook observes it (a `SendInput` issued
+    // from within the hook proc would not reach other hooks).  Mapped
+    // outputs are emitted as complete taps; an unmapped (pass-through) key
+    // is forwarded as-is.  Emission completes before the reply is sent, so
+    // the hook proc only returns once the output has gone out.
+    if capture_enabled() {
+        crate::platform::windows::mapping::capture_debug(&format!(
+            "decide vk={:#04x} up={} mods={:#04x} usage={:?} -> {:?}",
+            event.vk_code.0,
+            event.is_key_up,
+            event.modifiers,
+            event.usage,
+            decision
+        ));
+        match &decision {
+            Decision::Swallow(outputs) => {
+                for native_key in outputs {
+                    emit_mapped_output(native_key);
+                }
+            }
+            Decision::PassThrough => {
+                emit_forwarded_key(event.vk_code.0, event.is_key_up);
+            }
+        }
+    }
+
     // Drop the sender if the receiver was already dropped (hook proc timed
     // out or returned).  This is harmless — the error is simply ignored.
     let _ = event.reply_tx.send(decision);
@@ -428,7 +463,7 @@ fn process_consumer_event(
 
     if let Some(outputs) = outputs {
         for native_key in &outputs {
-            emit_key_event(native_key);
+            emit_mapped_output(native_key);
         }
     }
 }
