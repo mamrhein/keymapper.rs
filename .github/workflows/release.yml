@@ -64,11 +64,6 @@ jobs:
       - name: Run tests
         run: cargo nextest run
 
-      - name: Build DriverKit driver
-        run: |
-          cd driver && make release
-          echo "Driver built at driver/Build/Products/Release/KeyMapperVirtualHID.kext"
-
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -82,8 +77,11 @@ jobs:
           cp "target/${{ matrix.target }}/release/keymapper" "$STAGING/"
           cp "target/${{ matrix.target }}/release/keymapperd" "$STAGING/"
           cp resources/launchd/de.adrhinum.keymapperd.plist "$STAGING/resources/launchd/"
+          cp resources/launchd/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist "$STAGING/resources/launchd/"
           cp scripts/install-macos.sh "$STAGING/"
           cp scripts/uninstall-macos.sh "$STAGING/"
+          cp scripts/install-karabiner-macos.sh "$STAGING/"
+          cp scripts/uninstall-karabiner-macos.sh "$STAGING/"
           cp LICENSE.TXT README.md "$STAGING/"
           tar -cJf "$ARCHIVE" "dist/keymapper/${{ github.ref_name }}"
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
@@ -113,9 +111,6 @@ jobs:
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
-
-      - name: Build DriverKit driver
-        run: cd driver && make release
 
       - name: Run e2e tests as root
         run: |

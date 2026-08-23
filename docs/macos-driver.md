@@ -43,7 +43,7 @@ Compared to `CGEventTap`-based interception:
 brew install keymapper
 ```
 
-The Homebrew formula builds both the Rust binaries and the DriverKit extension from source. Requires Xcode command-line tools.
+The Homebrew formula builds the Rust binaries from source and installs the Karabiner DriverKit VirtualHIDDevice driver (via a cask dependency). The driver setup requires sudo.
 
 Start the LaunchDaemon:
 
@@ -54,63 +54,58 @@ brew services start keymapper
 ### From source (development)
 
 ```bash
-# Build and install the driver to ~/Library/Extensions/
-cd driver && make install
-
 # Build the Rust binaries
 cargo build --release
 
-# Install the LaunchDaemon
+# Install the LaunchDaemon and the Karabiner DriverKit driver
 sudo scripts/install-macos.sh target/debug/keymapperd
 ```
 
-The `make install` target builds a universal binary (arm64 + x86_64) and copies the `.kext` bundle to `~/Library/Extensions/`, where macOS loads it automatically.
+The install script registers the keymapperd LaunchDaemon, then installs the pinned Karabiner DriverKit package (downloading it from the pqrs GitHub releases if no local copy is available), activates the DriverKit extension, and registers the Karabiner daemon LaunchDaemon.
 
 ### Standalone binaries (DMG)
 
-The release DMG includes the prebuilt driver and all installation scripts. Mount the DMG and run:
+The release DMG includes the pinned Karabiner DriverKit package and all installation scripts. Mount the DMG and run:
 
 ```bash
 sudo ./install.sh
 ```
 
-This copies binaries to `/usr/local/bin/`, installs the driver, and registers the LaunchDaemon.
+This copies binaries to `/usr/local/bin/`, installs the driver, and registers both LaunchDaemons.
 
 ## First-run approval
 
-The first time the DriverKit driver loads, macOS will block it until you approve it:
+The first time the Karabiner DriverKit extension loads, macOS may require you to enable it:
 
-1. Open **System Settings** > **Privacy & Security**.
-2. Scroll to the **Security** section. You will see a message like:
-   > "KeyMapperVirtualHID from developer \"(ad-hoc)\" was blocked from loading."
-3. Click **Allow**.
-4. Reboot (required on macOS Ventura and later for ad-hoc signed extensions).
-5. Verify the daemon is running: `launchctl print system/de.adrhinum.keymapperd`.
+1. Open **System Settings** > **General** > **Login Items & Extensions**.
+2. Select **Driver Extensions**.
+3. Toggle on the Karabiner entry (`org.pqrs.Karabiner-DriverKit-VirtualHIDDevice`).
+
+No reboot is required. Verify the daemon is running: `launchctl print system/de.adrhinum.keymapperd`.
 
 ## Verifying the setup
 
 ```bash
-# Check that the LaunchDaemon is loaded
+# Check that the keymapperd LaunchDaemon is loaded
 launchctl print system/de.adrhinum.keymapperd
 
-# Check that the virtual HID driver is loaded
-ioreg -p IOService | grep KeyMapperVirtualHID
+# Check that the Karabiner daemon LaunchDaemon is loaded
+launchctl print system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon
 
-# Check seized devices (devices opened by keymapperd disappear from the
-# standard event stream)
-system_profiler SPUSBDataType | grep -A5 Keyboard
+# Check that the DriverKit extension is enabled (requires sudo)
+sudo systemextensionsctl list | grep Karabiner
 ```
 
 You should see output similar to:
 
 ```
-|   +--o KeyMapperVirtualHID  <class KeyMapperVirtualHID, id..., registered, matched, active>
+... org.pqrs.Karabiner-DriverKit-VirtualHIDDevice ... activated enabled
 ```
 
-If the device does not appear, check system logs for DriverKit errors:
+If the extension is not enabled, check system logs for DriverKit errors:
 
 ```bash
-log show --predicate 'process == "KeyMapperVirtualHID"' --last 1h
+log show --predicate 'subsystem == "com.apple.systemextensions"' --last 1h
 ```
 
 ## Daemon logs
@@ -143,13 +138,13 @@ If the issue persists, check the error log: `sudo cat /var/log/keymapperd/keymap
 
 ### Driver not loading
 
-**Symptom:** `keymapperd` starts but remapped keys do not produce output, or you see "driver not available" in the logs.
+**Symptom:** `keymapperd` starts but remapped keys do not produce output, or you see "Karabiner virtual keyboard not ready" in the logs.
 
 **Fix:**
-1. Verify the `.kext` bundle exists at `~/Library/Extensions/KeyMapperVirtualHID.kext`. If missing, rebuild and install: `cd driver && make install`.
-2. Check **System Settings** > **Privacy & Security** for a blocked driver prompt. Click **Allow**.
-3. Reboot and try again. macOS sometimes requires a full reboot after allowing an ad-hoc signed extension.
-4. Check system logs for load failures: `log show --predicate 'process == "KeyMapperVirtualHID"' --last 1h`.
+1. Verify the extension is enabled: `sudo systemextensionsctl list | grep Karabiner` should show `activated enabled`. If it shows `activated disabled`, enable it in **System Settings** > **General** > **Login Items & Extensions** > **Driver Extensions**.
+2. Verify the Karabiner daemon is running: `launchctl print system/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon`.
+3. Re-run the installer to repair the setup: `sudo scripts/install-karabiner-macos.sh`.
+4. Check system logs for load failures: `log show --predicate 'subsystem == "com.apple.systemextensions"' --last 1h`.
 
 ### Remapped keys not working in specific applications
 
@@ -171,24 +166,12 @@ If the issue persists, check the error log: `sudo cat /var/log/keymapperd/keymap
 
 ## Uninstalling
 
-### Remove the daemon and binaries
-
 ```bash
 sudo ./uninstall-macos.sh
 sudo rm /usr/local/bin/keymapper /usr/local/bin/keymapperd
 ```
 
-### Remove the driver
-
-```bash
-# Stop the daemon first
-sudo ./uninstall-macos.sh
-
-# Remove the driver bundle
-rm -rf ~/Library/Extensions/KeyMapperVirtualHID.kext
-```
-
-The driver does not persist across reboots unless the LaunchDaemon is configured to auto-start. After removing both, all keyboards return to normal operation.
+`uninstall-macos.sh` stops and removes the keymapperd LaunchDaemon, deactivates the Karabiner DriverKit extension, and removes the Karabiner package files (including its daemon LaunchDaemon). After removing both, all keyboards return to normal operation.
 
 ## Building the driver (advanced)
 

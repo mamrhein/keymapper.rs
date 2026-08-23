@@ -1,8 +1,9 @@
 # Homebrew formula for keymapper.
 #
-# Builds the Rust crate and the DriverKit virtual HID extension from source.
-# The driver is installed to ~/Library/Extensions/ and discovered at runtime
-# via IOKit.
+# Builds the Rust crate from source.  On macOS, remapped keys are emitted
+# through the Karabiner DriverKit VirtualHIDDevice driver (installed via the
+# karabiner-driverkit-virtualhiddevice cask dependency); the formula then
+# activates the driver and registers its daemon LaunchDaemon.
 #
 # Install locally (not yet in a tap):
 #   brew install --build-from-source path/to/brew/keymapper.rb
@@ -20,7 +21,9 @@ class Keymapper < Formula
     depends_on "rust" => :build
 
     on_macos do
-        depends_on "xcode" => :build
+        # The driver through which keymapperd emits remapped keys.  The cask
+        # installs the package only; activation happens in install below.
+        depends_on "mamrhein/keymapper/karabiner-driverkit-virtualhiddevice"
     end
 
     def install
@@ -28,33 +31,20 @@ class Keymapper < Formula
         system "cargo", "install", "--root", prefix, "--locked"
 
         on_macos do
-            # Build the DriverKit driver with ad-hoc signing.
-            system "xcodebuild", \
-                    "-project", "driver/KeyMapperVirtualHID.xcodeproj",
-                    "-scheme", "KeyMapperVirtualHID",
-                    "-configuration", "Release",
-                    "-derivedDataPath", "driver-build",
-                    "CODE_SIGN_IDENTITY=-",
-                    "CODE_SIGN_ENTITLEMENTS=driver/KeyMapperVirtualHID/KeyMapperVirtualHID.entitlements",
-                    "CODE_SIGNING_REQUIRED=YES",
-                    "CODE_SIGNING_ALLOWED=YES"
-
-            # Install the driver bundle to the user Extensions directory so
-            # macOS loads it automatically.
-            kext_dir = HOMEBREW_USER_EXTENSIONS
-            kext_dir.mkpath
-            cp_r "driver-build/Build/Products/Release/KeyMapperVirtualHID.kext",
-                 kext_dir
+            # Install the Karabiner DriverKit package (if not already
+            # installed), activate the extension, and register the daemon
+            # LaunchDaemon.  Requires sudo.
+            system "sudo", "scripts/install-karabiner-macos.sh"
         end
     end
 
     def caveats
         <<~EOS
-            The KeyMapperVirtualHID driver was installed to
-            #{HOMEBREW_USER_EXTENSIONS}.
+            On first run, the Karabiner DriverKit extension may need to be
+            enabled once in:
+            System Settings > General > Login Items & Extensions > Driver Extensions.
 
-            On first run, approve the driver in
-            System Settings > Privacy & Security.
+            No reboot is required.
         EOS
     end
 

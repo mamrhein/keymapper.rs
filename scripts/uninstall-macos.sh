@@ -3,10 +3,14 @@
 # Uninstalls the keymapperd LaunchDaemon from macOS.
 #
 # Boots out the service and removes the plist from /Library/LaunchDaemons/.
-# Does not delete log files.  Requires sudo privileges.
+# Does not delete log files.  It also removes the Karabiner DriverKit
+# VirtualHIDDevice package (deactivate driver + remove files) via
+# uninstall-karabiner-macos.sh.  Requires sudo privileges.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 LABEL="de.adrhinum.keymapperd"
 PLIST_PATH="/Library/LaunchDaemons/${LABEL}.plist"
@@ -32,3 +36,7 @@ if [ -f "$PLIST_PATH" ]; then
 else
     echo "No plist found at ${PLIST_PATH}"
 fi
+
+# Remove the Karabiner DriverKit package (deactivate driver + remove files).
+echo ""
+"${SCRIPT_DIR}/uninstall-karabiner-macos.sh"
