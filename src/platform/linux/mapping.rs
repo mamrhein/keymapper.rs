@@ -939,36 +939,36 @@ mod tests {
         assert_eq!(mods_a, 0b0000_0001);
         assert_eq!(mods_b, 0); // Device B unaffected.
 
-        // Device A: press LeftShift (bit 2).
+        // Device A: press LeftShift (bit 1).
         let bit =
             HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftShift).unwrap();
         mods_a |= 1 << bit;
-        assert_eq!(mods_a, 0b0000_0101);
+        assert_eq!(mods_a, 0b0000_0011);
         assert_eq!(mods_b, 0); // Device B unaffected.
 
-        // Device B: press RightAlt (bit 5).
+        // Device B: press RightAlt (bit 6).
         let bit =
             HidUsage::hid_usage_to_modifier_bit(HidUsage::RightAlt).unwrap();
         mods_b |= 1 << bit;
-        assert_eq!(mods_a, 0b0000_0101); // Device A unaffected.
-        assert_eq!(mods_b, 0b0010_0000);
+        assert_eq!(mods_a, 0b0000_0011); // Device A unaffected.
+        assert_eq!(mods_b, 0b0100_0000);
 
         // Device A: release LeftControl.
         let bit = HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftControl)
             .unwrap();
         mods_a &= !(1 << bit);
-        assert_eq!(mods_a, 0b0000_0100);
-        assert_eq!(mods_b, 0b0010_0000);
+        assert_eq!(mods_a, 0b0000_0010);
+        assert_eq!(mods_b, 0b0100_0000);
 
-        // Device B: release RightAlt, press LeftCommand (bit 6).
+        // Device B: release RightAlt, press LeftCommand (bit 3).
         let bit =
             HidUsage::hid_usage_to_modifier_bit(HidUsage::RightAlt).unwrap();
         mods_b &= !(1 << bit);
         let bit = HidUsage::hid_usage_to_modifier_bit(HidUsage::LeftCommand)
             .unwrap();
         mods_b |= 1 << bit;
-        assert_eq!(mods_a, 0b0000_0100);
-        assert_eq!(mods_b, 0b0100_0000);
+        assert_eq!(mods_a, 0b0000_0010);
+        assert_eq!(mods_b, 0b0000_1000);
     }
 
     // -----------------------------------------------------------------------

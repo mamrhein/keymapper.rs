@@ -18,14 +18,17 @@ use crate::common::{
 // ---------------------------------------------------------------------------
 // Modifier bitmask layout (u8): specific key bits only.
 //
-// bit 0: left control      bit 1: right control
-// bit 2: left shift        bit 3: right shift
-// bit 4: left alt          bit 5: right alt
-// bit 6: left command/win  bit 7: right command/win
+// bit 0: left control      bit 4: right control
+// bit 1: left shift        bit 5: right shift
+// bit 2: left alt          bit 6: right alt
+// bit 3: left command/win  bit 7: right command/win
+//
+// The bit positions match the HID modifier usage ids (0xE0–0xE7), so left
+// side modifiers occupy bits 0–3 and right side modifiers bits 4–7.
 //
 // Input matching uses exact equality.  "Either side" semantics (e.g. "ctrl"
 // matching left or right) are achieved by compile-time rule expansion: a
-// rule with "ctrl" produces two entries, one with bit 0 and one with bit 1.
+// rule with "ctrl" produces two entries, one with bit 0 and one with bit 4.
 // ---------------------------------------------------------------------------
 
 /// A platform-native key event: modifiers held together with a base key press.
@@ -215,12 +218,12 @@ fn expand_modifier_bits(modifiers: &[HidUsage]) -> Vec<u8> {
     // Collect the possible bit positions for each modifier.  Left-side
     // modifier usages come from generic aliases ("Ctrl" -> LeftControl) and
     // match both left and right bits.  Right-side usages match only their
-    // specific bit.  The modifier-bit layout pairs consecutive bits as
-    // (left, right), so left-side positions are even.
+    // specific bit.  Left side modifiers occupy bits 0–3, so the matching
+    // right side bit is always 4 positions higher.
     let choices: Vec<Vec<u8>> = modifiers
         .iter()
         .map(|usage| match HidUsage::hid_usage_to_modifier_bit(*usage) {
-            Some(bit) if bit % 2 == 0 => vec![bit, bit + 1],
+            Some(bit @ 0..=3) => vec![bit, bit + 4],
             Some(bit) => vec![bit],
             // Non-modifier in modifier position.
             None => vec![0],
@@ -251,10 +254,10 @@ mod tests {
     use super::*;
 
     // Bit positions per the header comment:
-    // bit 0: left control,   bit 1: right control
-    // bit 2: left shift,     bit 3: right shift
-    // bit 4: left alt,       bit 5: right alt
-    // bit 6: left command,   bit 7: right command
+    // bit 0: left control,   bit 4: right control
+    // bit 1: left shift,     bit 5: right shift
+    // bit 2: left alt,       bit 6: right alt
+    // bit 3: left command,   bit 7: right command
 
     // -----------------------------------------------------------------------
     // expand_modifier_bits
@@ -268,21 +271,21 @@ mod tests {
 
     #[test]
     fn expand_single_generic_modifier() {
-        // LeftControl maps to modifier group [0, 1], so "either side" matches.
+        // LeftControl maps to modifier group [0, 4], so "either side" matches.
         let result = expand_modifier_bits(&[HidUsage::LeftControl]);
-        assert_eq!(result, vec![1 << 0, 1 << 1]);
+        assert_eq!(result, vec![1 << 0, 1 << 4]);
     }
 
     #[test]
     fn expand_single_specific_modifier() {
-        // RightControl matches only its own bit (bit 1).
+        // RightControl matches only its own bit (bit 4).
         let result = expand_modifier_bits(&[HidUsage::RightControl]);
-        assert_eq!(result, vec![1 << 1]);
+        assert_eq!(result, vec![1 << 4]);
     }
 
     #[test]
     fn expand_two_modifiers() {
-        // Ctrl + Shift → cartesian product of {0,1} × {2,3}.
+        // Ctrl + Shift → cartesian product of {0,4} × {1,5}.
         let result = expand_modifier_bits(&[
             HidUsage::LeftControl,
             HidUsage::LeftShift,
@@ -290,10 +293,10 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                (1 << 0) | (1 << 2), // left ctrl + left shift
-                (1 << 0) | (1 << 3), // left ctrl + right shift
-                (1 << 1) | (1 << 2), // right ctrl + left shift
-                (1 << 1) | (1 << 3), // right ctrl + right shift
+                (1 << 0) | (1 << 1), // left ctrl + left shift
+                (1 << 0) | (1 << 5), // left ctrl + right shift
+                (1 << 4) | (1 << 1), // right ctrl + left shift
+                (1 << 4) | (1 << 5), // right ctrl + right shift
             ]
         );
     }
@@ -330,12 +333,12 @@ mod tests {
     #[test]
     fn compile_modifier_bits_single() {
         assert_eq!(compile_modifier_bits(&[HidUsage::LeftControl]), 1 << 0);
-        assert_eq!(compile_modifier_bits(&[HidUsage::RightControl]), 1 << 1);
-        assert_eq!(compile_modifier_bits(&[HidUsage::LeftShift]), 1 << 2);
-        assert_eq!(compile_modifier_bits(&[HidUsage::RightShift]), 1 << 3);
-        assert_eq!(compile_modifier_bits(&[HidUsage::LeftAlt]), 1 << 4);
-        assert_eq!(compile_modifier_bits(&[HidUsage::RightAlt]), 1 << 5);
-        assert_eq!(compile_modifier_bits(&[HidUsage::LeftCommand]), 1 << 6);
+        assert_eq!(compile_modifier_bits(&[HidUsage::LeftShift]), 1 << 1);
+        assert_eq!(compile_modifier_bits(&[HidUsage::LeftAlt]), 1 << 2);
+        assert_eq!(compile_modifier_bits(&[HidUsage::LeftCommand]), 1 << 3);
+        assert_eq!(compile_modifier_bits(&[HidUsage::RightControl]), 1 << 4);
+        assert_eq!(compile_modifier_bits(&[HidUsage::RightShift]), 1 << 5);
+        assert_eq!(compile_modifier_bits(&[HidUsage::RightAlt]), 1 << 6);
         assert_eq!(compile_modifier_bits(&[HidUsage::RightCommand]), 1 << 7);
     }
 
@@ -346,7 +349,7 @@ mod tests {
                 HidUsage::LeftControl,
                 HidUsage::LeftShift
             ]),
-            (1 << 0) | (1 << 2)
+            (1 << 0) | (1 << 1)
         );
     }
 
@@ -427,7 +430,7 @@ mod tests {
         assert!(usages.contains(&HidUsage::H));
         assert_eq!(mods.len(), 2);
         assert!(mods.contains(&(1 << 0))); // left control
-        assert!(mods.contains(&(1 << 1))); // right control
+        assert!(mods.contains(&(1 << 4))); // right control
     }
 
     #[test]
@@ -441,8 +444,8 @@ mod tests {
 
         assert_eq!(rule.outputs.len(), 1);
         assert_eq!(rule.outputs[0].usage, HidUsage::LeftArrow);
-        // Cmd resolves to LeftCommand → bit 6.
-        assert_eq!(rule.outputs[0].modifiers, 1 << 6);
+        // Cmd resolves to LeftCommand → bit 3.
+        assert_eq!(rule.outputs[0].modifiers, 1 << 3);
     }
 
     #[test]
@@ -456,7 +459,7 @@ mod tests {
 
         assert_eq!(rule.outputs.len(), 2);
         assert_eq!(rule.outputs[0].usage, HidUsage::T);
-        assert_eq!(rule.outputs[0].modifiers, 1 << 6); // Cmd
+        assert_eq!(rule.outputs[0].modifiers, 1 << 3); // Cmd
         assert_eq!(rule.outputs[1].usage, HidUsage::F1);
         assert_eq!(rule.outputs[1].modifiers, 0);
     }
@@ -541,7 +544,7 @@ mod tests {
         assert_eq!(rule.modifiers, 0); // bare key, no modifiers
         assert_eq!(rule.outputs.len(), 1);
         assert_eq!(rule.outputs[0].usage, HidUsage::L);
-        assert_eq!(rule.outputs[0].modifiers, 1 << 4); // LeftAlt → bit 4
+        assert_eq!(rule.outputs[0].modifiers, 1 << 2); // LeftAlt → bit 2
     }
 
     #[test]

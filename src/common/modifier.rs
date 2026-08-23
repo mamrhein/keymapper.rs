@@ -13,14 +13,15 @@
 //! to a specific physical modifier key.  This module defines the canonical
 //! mapping so platforms don't duplicate magic numbers.
 //!
-//! Bit positions:
+//! Bit positions (matching the HID modifier usage ids 0xE0–0xE7 and the
+//! USB HID modifier byte):
 //!   0 — Left Control
-//!   1 — Right Control
-//!   2 — Left Shift
-//!   3 — Right Shift
-//!   4 — Left Alt
-//!   5 — Right Alt
-//!   6 — Left Command (Win on Windows, Cmd on macOS)
+//!   1 — Left Shift
+//!   2 — Left Alt
+//!   3 — Left Command (Win on Windows, Cmd on macOS)
+//!   4 — Right Control
+//!   5 — Right Shift
+//!   6 — Right Alt
 //!   7 — Right Command
 
 /// Identifies a specific modifier key role.  The discriminant IS the bit
@@ -29,12 +30,12 @@
 #[repr(u8)]
 pub(crate) enum ModifierRole {
     LeftControl = 0,
-    RightControl = 1,
-    LeftShift = 2,
-    RightShift = 3,
-    LeftAlt = 4,
-    RightAlt = 5,
-    LeftCommand = 6,
+    LeftShift = 1,
+    LeftAlt = 2,
+    LeftCommand = 3,
+    RightControl = 4,
+    RightShift = 5,
+    RightAlt = 6,
     RightCommand = 7,
 }
 
@@ -52,12 +53,12 @@ impl ModifierRole {
     pub(crate) const fn try_from_bit(bit: u8) -> Option<Self> {
         match bit {
             0 => Some(Self::LeftControl),
-            1 => Some(Self::RightControl),
-            2 => Some(Self::LeftShift),
-            3 => Some(Self::RightShift),
-            4 => Some(Self::LeftAlt),
-            5 => Some(Self::RightAlt),
-            6 => Some(Self::LeftCommand),
+            1 => Some(Self::LeftShift),
+            2 => Some(Self::LeftAlt),
+            3 => Some(Self::LeftCommand),
+            4 => Some(Self::RightControl),
+            5 => Some(Self::RightShift),
+            6 => Some(Self::RightAlt),
             7 => Some(Self::RightCommand),
             _ => None,
         }

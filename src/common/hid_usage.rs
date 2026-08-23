@@ -38,31 +38,32 @@ pub const PAGE_CONSUMER: u16 = 0x0C;
 pub enum HidUsage {
     // --- Keyboard page (0x07) — Modifiers ---
     LeftControl = 0x0700E0,
-    RightControl = 0x0700E1,
-    LeftShift = 0x0700E2,
-    RightShift = 0x0700E3,
-    LeftAlt = 0x0700E4,
-    RightAlt = 0x0700E5,
-    LeftCommand = 0x0700E6,
+    LeftShift = 0x0700E1,
+    LeftAlt = 0x0700E2,
+    LeftCommand = 0x0700E3,
+    RightControl = 0x0700E4,
+    RightShift = 0x0700E5,
+    RightAlt = 0x0700E6,
     RightCommand = 0x0700E7,
     // --- Keyboard page — Caps Lock ---
     CapsLock = 0x070039,
     // --- Keyboard page — Editor / misc ---
+    Return = 0x070028,
+    Escape = 0x070029,
+    Backspace = 0x07002A,
     Tab = 0x07002B,
     Space = 0x07002C,
-    Return = 0x070028,
-    Backspace = 0x07002A,
+    // Insert = 0x070049
     Delete = 0x07004C,
-    Escape = 0x070029,
     // --- Keyboard page — Navigation ---
-    UpArrow = 0x070052,
-    DownArrow = 0x070051,
-    LeftArrow = 0x070050,
-    RightArrow = 0x07004B,
-    PageUp = 0x07004E,
-    PageDown = 0x07004F,
     Home = 0x07004A,
+    PageUp = 0x07004B,
     End = 0x07004D,
+    PageDown = 0x07004E,
+    RightArrow = 0x07004F,
+    LeftArrow = 0x070050,
+    DownArrow = 0x070051,
+    UpArrow = 0x070052,
     // --- Keyboard page — Function keys ---
     F1 = 0x07003A,
     F2 = 0x07003B,
@@ -76,6 +77,9 @@ pub enum HidUsage {
     F10 = 0x070043,
     F11 = 0x070044,
     F12 = 0x070045,
+    // PrintScreen = 0x070046
+    // ScrollLock = 0x070047
+    // Pause = 0x070048
     // --- Keyboard page — Letters ---
     A = 0x070004,
     B = 0x070005,
@@ -115,7 +119,6 @@ pub enum HidUsage {
     Number9 = 0x070026,
     Number0 = 0x070027,
     // --- Keyboard page — Numpad ---
-    Numpad0 = 0x070062,
     Numpad1 = 0x070059,
     Numpad2 = 0x07005A,
     Numpad3 = 0x07005B,
@@ -125,6 +128,7 @@ pub enum HidUsage {
     Numpad7 = 0x07005F,
     Numpad8 = 0x070060,
     Numpad9 = 0x070061,
+    Numpad0 = 0x070062,
     NumpadDecimal = 0x070063,
     NumpadMultiply = 0x070055,
     NumpadPlus = 0x070057,
@@ -182,28 +186,28 @@ impl HidUsage {
     pub fn from_code(code: u32) -> Option<Self> {
         match code {
             0x0700E0 => Some(Self::LeftControl),
-            0x0700E1 => Some(Self::RightControl),
-            0x0700E2 => Some(Self::LeftShift),
-            0x0700E3 => Some(Self::RightShift),
-            0x0700E4 => Some(Self::LeftAlt),
-            0x0700E5 => Some(Self::RightAlt),
-            0x0700E6 => Some(Self::LeftCommand),
+            0x0700E1 => Some(Self::LeftShift),
+            0x0700E2 => Some(Self::LeftAlt),
+            0x0700E3 => Some(Self::LeftCommand),
+            0x0700E4 => Some(Self::RightControl),
+            0x0700E5 => Some(Self::RightShift),
+            0x0700E6 => Some(Self::RightAlt),
             0x0700E7 => Some(Self::RightCommand),
             0x070039 => Some(Self::CapsLock),
+            0x070028 => Some(Self::Return),
+            0x070029 => Some(Self::Escape),
+            0x07002A => Some(Self::Backspace),
             0x07002B => Some(Self::Tab),
             0x07002C => Some(Self::Space),
-            0x070028 => Some(Self::Return),
-            0x07002A => Some(Self::Backspace),
             0x07004C => Some(Self::Delete),
-            0x070029 => Some(Self::Escape),
-            0x070052 => Some(Self::UpArrow),
-            0x070051 => Some(Self::DownArrow),
-            0x070050 => Some(Self::LeftArrow),
-            0x07004B => Some(Self::RightArrow),
-            0x07004E => Some(Self::PageUp),
-            0x07004F => Some(Self::PageDown),
             0x07004A => Some(Self::Home),
+            0x07004B => Some(Self::PageUp),
             0x07004D => Some(Self::End),
+            0x07004E => Some(Self::PageDown),
+            0x07004F => Some(Self::RightArrow),
+            0x070050 => Some(Self::LeftArrow),
+            0x070051 => Some(Self::DownArrow),
+            0x070052 => Some(Self::UpArrow),
             0x07003A => Some(Self::F1),
             0x07003B => Some(Self::F2),
             0x07003C => Some(Self::F3),
@@ -1082,12 +1086,12 @@ mod tests {
         // The HID modifier ids (0xE0-0xE7) map directly to bits 0-7.
         let modifiers: [(HidUsage, u8); 8] = [
             (HidUsage::LeftControl, 0),
-            (HidUsage::RightControl, 1),
-            (HidUsage::LeftShift, 2),
-            (HidUsage::RightShift, 3),
-            (HidUsage::LeftAlt, 4),
-            (HidUsage::RightAlt, 5),
-            (HidUsage::LeftCommand, 6),
+            (HidUsage::LeftShift, 1),
+            (HidUsage::LeftAlt, 2),
+            (HidUsage::LeftCommand, 3),
+            (HidUsage::RightControl, 4),
+            (HidUsage::RightShift, 5),
+            (HidUsage::RightAlt, 6),
             (HidUsage::RightCommand, 7),
         ];
         for (usage, expected_bit) in modifiers {
@@ -1186,9 +1190,9 @@ mod tests {
         assert_eq!(HidUsage::Tab.id(), 0x2B);
         assert_eq!(HidUsage::Space.id(), 0x2C);
         assert_eq!(HidUsage::LeftControl.id(), 0xE0);
-        assert_eq!(HidUsage::LeftShift.id(), 0xE2);
-        assert_eq!(HidUsage::LeftAlt.id(), 0xE4);
-        assert_eq!(HidUsage::LeftCommand.id(), 0xE6);
+        assert_eq!(HidUsage::LeftShift.id(), 0xE1);
+        assert_eq!(HidUsage::LeftAlt.id(), 0xE2);
+        assert_eq!(HidUsage::LeftCommand.id(), 0xE3);
 
         // Consumer page
         assert_eq!(HidUsage::PlayPause.id(), 0xCD);

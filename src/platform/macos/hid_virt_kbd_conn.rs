@@ -343,12 +343,12 @@ impl Drop for HidVirtKbdConn {
 /// | Bit position | ModifierRole   | HID modifier bit |
 /// |--------------|----------------|------------------|
 /// | 0            | LeftControl    | bit 0 = 0x01     |
-/// | 1            | RightControl   | bit 1 = 0x02     |
-/// | 2            | LeftShift      | bit 2 = 0x04     |
-/// | 3            | RightShift     | bit 3 = 0x08     |
-/// | 4            | LeftAlt        | bit 4 = 0x10     |
-/// | 5            | RightAlt       | bit 5 = 0x20     |
-/// | 6            | LeftCommand    | bit 6 = 0x40     |
+/// | 1            | LeftShift      | bit 1 = 0x02     |
+/// | 2            | LeftAlt        | bit 2 = 0x04     |
+/// | 3            | LeftCommand    | bit 3 = 0x08     |
+/// | 4            | RightControl   | bit 4 = 0x10     |
+/// | 5            | RightShift     | bit 5 = 0x20     |
+/// | 6            | RightAlt       | bit 6 = 0x40     |
 /// | 7            | RightCommand   | bit 7 = 0x80     |
 ///
 /// Because the bit positions line up exactly, the raw `u8` value is already

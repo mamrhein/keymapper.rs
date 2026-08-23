@@ -837,10 +837,10 @@ groups:
         // Key-down produces one chord output: Cmd+A.
         let down_outputs = results[0].as_ref().unwrap();
         assert_eq!(down_outputs.len(), 1);
-        let chord = &down_outputs[0];
+                let chord = &down_outputs[0];
         assert_eq!(chord.usage, HidUsage::A);
-        // Cmd modifier bit should be set (bit 6 for LeftCommand).
-        assert!((chord.modifiers & (1 << 6)) != 0);
+        // Cmd modifier bit should be set (bit 3 for LeftCommand).
+        assert!((chord.modifiers & (1 << 3)) != 0);
 
         // Key-up produces the same chord release.
         let up_outputs = results[1].as_ref().unwrap();
