@@ -239,5 +239,5 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 | Platform | Mechanism |
 |----------|-----------|
 | Linux | `evdev` device grab + `uinput` virtual keyboard |
-| macOS | IOKit device seizure for input capture, DriverKit virtual HID driver for event emission |
+| macOS | IOKit device seizure for input capture, Karabiner DriverKit daemon for event emission |
 | Windows | Low-level keyboard hook (`WH_KEYBOARD_LL`) |

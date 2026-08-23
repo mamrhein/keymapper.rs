@@ -235,7 +235,7 @@ fn check_io_return(result: u32, context: &str) -> Result<(), IoKitError> {
 
 // On modern macOS with SIP, the IOKit framework is a "stub" — the actual
 // IOHIDLib symbols are only accessible at runtime via dlopen/dlsym, not at
-// link time.  This follows the same pattern as hid_virt_kbd_conn.rs.
+// link time.
 
 /// Function pointer types for IOHIDLib symbols.
 type FnIOHIDManagerCreate =

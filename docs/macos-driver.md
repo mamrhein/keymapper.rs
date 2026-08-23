@@ -3,7 +3,7 @@
 keymapper uses two kernel-adjacent mechanisms on macOS:
 
 1. **IOKit device seizure** — captures input by opening the physical keyboard via `IOHIDManager`, filtering it out of the normal event stream, and reading raw HID reports directly.
-2. **DriverKit virtual HID driver** — emits remapped key events through a virtual USB HID keyboard device, which the macOS I/O HID stack treats as input from a real physical keyboard.
+2. **Karabiner DriverKit virtual HID driver** — emits remapped key events through the [Karabiner DriverKit VirtualHIDDevice](https://github.com/pqrs-org/Karabiner-DriverKit-VirtualHIDDevice) package (pqrs), which exposes a virtual USB HID keyboard device that the macOS I/O HID stack treats as input from a real physical keyboard.
 
 Together, these give reliable, hardware-level interception and injection that works across all applications.
 
@@ -17,11 +17,11 @@ The daemon then creates an `IOHIDQueue` per device and registers a value-availab
 
 Because device seizure requires privileged access, `keymapperd` runs as a **LaunchDaemon** (`/Library/LaunchDaemons/de.adrhinum.keymapperd.plist`) rather than a user-level LaunchAgent.
 
-### Output emission (DriverKit virtual HID driver)
+### Output emission (Karabiner DriverKit virtual HID driver)
 
-The `KeyMapperVirtualHID` DriverKit extension exposes a virtual USB HID keyboard device. When a remapped key is produced, `keymapperd` opens the driver with `IOServiceOpen()` and sends the resulting USB HID keyboard report to it through `IOConnectCallMethod()`. The macOS I/O HID stack treats this as input from a physical keyboard, so it works in all applications — including those that use raw input APIs or have accessibility restrictions.
+The Karabiner package ships a root daemon that owns a DriverKit extension exposing a virtual USB HID keyboard device. When a remapped key is produced, `keymapperd` sends the resulting 67-byte `keyboard_input` report to the daemon over a UNIX stream socket (`/Library/Application Support/org.pqrs/tmp/rootonly/karabiner_virtual_hid_device_service.sock`); the daemon forwards it to the virtual keyboard. The macOS I/O HID stack treats this as input from a physical keyboard, so it works in all applications — including those that use raw input APIs or have accessibility restrictions.
 
-Communication between `keymapperd` and the driver is handled through IOKit Mach messages on the opened service connection.
+The Karabiner daemon is registered as a LaunchDaemon (`/Library/LaunchDaemons/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist`) with `KeepAlive`, so it restarts automatically if it exits. The client in `keymapperd` reconnects automatically if the connection is lost.
 
 ### Why this approach?
 
@@ -172,21 +172,3 @@ sudo rm /usr/local/bin/keymapper /usr/local/bin/keymapperd
 ```
 
 `uninstall-macos.sh` stops and removes the keymapperd LaunchDaemon, deactivates the Karabiner DriverKit extension, and removes the Karabiner package files (including its daemon LaunchDaemon). After removing both, all keyboards return to normal operation.
-
-## Building the driver (advanced)
-
-The driver is an Xcode project located at `driver/KeyMapperVirtualHID.xcodeproj`. It requires:
-
-- macOS 13.0+ (Ventura) as the host OS.
-- Xcode 14+ with command-line tools.
-
-Build commands:
-
-| Target | Command | Description |
-|--------|---------|-------------|
-| `make build` | Debug, active architecture only | Fast iteration |
-| `make release` | Release, universal (arm64 + x86_64) | Distribution build |
-| `make install` | Build release + copy to `~/Library/Extensions/` | Full dev install |
-| `make clean` | Remove build artifacts | Clean slate |
-
-The driver is ad-hoc signed automatically during the build. No certificate provisioning is required.
