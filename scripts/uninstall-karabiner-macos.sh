@@ -49,7 +49,7 @@ else
     echo "Manager binary not found; skipping deactivation."
 fi
 
-# Remove the package files (manager app, Application Support directory, tmp).
+# Remove the package files (manager app, Application Support directory).
 if [ -f "$REMOVE_FILES_SH" ]; then
     # Copy the script out first: it removes its own directory while running,
     # which would truncate the file bash is reading from.
@@ -61,6 +61,17 @@ else
     echo "remove_files.sh not found; removing files manually."
     rm -rf "/Applications/.Karabiner-VirtualHIDDevice-Manager.app"
     rm -rf "$KARABINER_APP_DIR"
+fi
+
+# The package's remove_files.sh is stale with respect to its own current
+# layout: it removes previous-version file names but not the current socket
+# (karabiner_virtual_hid_device_service.sock) or the console-user sockets,
+# so the tmp directory survives.  Finish the job.  The socket paths are
+# shared with Karabiner-Elements, so leave them alone if it is running.
+if pgrep -f "Karabiner-Elements" >/dev/null 2>&1; then
+    echo "Karabiner-Elements is running; leaving /Library/Application Support/org.pqrs/tmp in place."
+else
+    rm -rf "/Library/Application Support/org.pqrs/tmp"
 fi
 
 echo "Karabiner DriverKit package removed."
