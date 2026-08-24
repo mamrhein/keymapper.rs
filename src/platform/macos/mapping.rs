@@ -78,6 +78,16 @@ pub fn start_mapping(
         );
     }
 
+    // Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`): the daemon
+    // re-emits every key through the virtual keyboard (mapped keys as their
+    // mapped output, unmapped keys forwarded), so the monitor can seize the
+    // virtual keyboard and capture the daemon's output without depending on a
+    // focused window.  Production behaviour is left untouched.
+    if std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty()) {
+        super::iokit_hid::set_capture_mode(true);
+        eprintln!("macOS: capture mode enabled (KEYMAPPER_CAPTURE).");
+    }
+
     // KarabinerClient is Send + Sync (it holds an mpsc sender and atomic
     // flags), so it can be shared with the queue callbacks.  In practice it
     // is used only on the main thread (CFRunLoop), where the queue callbacks

@@ -19,14 +19,22 @@
 //! permission in System Settings.
 #![allow(dead_code, non_snake_case)]
 
-use std::{ffi::c_void, ptr};
+use std::{
+    collections::HashSet,
+    ffi::c_void,
+    ptr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use objc2_core_foundation::{
     CFIndex, CFRunLoop, CFString, CFStringBuiltInEncodings,
     kCFRunLoopDefaultMode,
 };
 
-use crate::common::hid_usage::HidUsage;
+use crate::common::hid_usage::{HidUsage, PAGE_CONSUMER};
 
 // ---------------------------------------------------------------------------
 // Opaque IOKit HID types
@@ -797,6 +805,42 @@ pub struct HidQueueContext {
     pub pressed_keys: std::collections::HashSet<u16>,
     // Device location ID string for keyboard filtering.
     pub device_id: String,
+    // Capture mode only: usage ids of non-modifier keys that were forwarded
+    // (unmapped) and are still held.  The virtual keyboard report is a state
+    // snapshot, so every forwarded report must include all of these.
+    pub forwarded_keys: HashSet<u16>,
+    // Capture mode only: full usage codes of keys whose key-down was mapped,
+    // so their key-up is swallowed rather than forwarded.
+    pub mapped_keys: HashSet<u32>,
+    // Capture mode only: bitmask of modifier keys that were forwarded
+    // (unmapped) and are still held.  Mapped modifiers are excluded so their
+    // self-contained output taps do not leak into forwarded reports.
+    pub forwarded_modifiers: u8,
+}
+
+// ---------------------------------------------------------------------------
+// Capture mode
+// ---------------------------------------------------------------------------
+//
+// Capture mode makes the daemon re-emit every key through the virtual
+// keyboard (mapped keys as their mapped output, unmapped keys forwarded), so
+// the e2e monitor can seize the virtual keyboard and capture the daemon's
+// output without depending on a focused window.  It is gated on the
+// `KEYMAPPER_CAPTURE` environment variable so production behaviour (unmapped
+// keys dropped, key-ups ignored) is left untouched.
+
+/// Set once from `start_mapping` to record whether capture mode is active.
+static CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Whether capture mode is active (all keys re-emitted through the virtual
+/// keyboard).
+pub fn capture_enabled() -> bool {
+    CAPTURE_MODE.load(Ordering::Relaxed)
+}
+
+/// Record the capture-mode flag determined at startup.
+pub fn set_capture_mode(enabled: bool) {
+    CAPTURE_MODE.store(enabled, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,74 +1112,186 @@ unsafe extern "C" fn hid_queue_value_callback(
         // Track pressed keys for deduplication.  Use the raw HID usage id
         // (page-specific, unambiguous).
         let key_id = hid_usage.id();
-        let actually_down = context.pressed_keys.insert(key_id);
-        if !is_down {
-            context.pressed_keys.remove(&key_id);
-        }
 
-        // Only process key-down events for remapping.
-        if !is_down || !actually_down {
-            continue;
-        }
-
-        // Get the device ID for keyboard filtering.
-        let device_id = Some(context.device_id.as_str());
-
-        // Track modifier state using HidUsage directly.
-        let lookup_modifiers = context.modifier_state;
-        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
-            context.modifier_state |= 1 << bit;
-        }
-
-        // Perform the lookup.  Compiled rules store the trigger as a
-        // `HidUsage`, so the lookup is keyed by the full page-specific
-        // usage.
-        let guard = context.lookup.read();
-        let active_outputs = guard
-            .for_app(
-                &guard.active_app(),
-                hid_usage,
-                lookup_modifiers,
-                device_id,
-            )
-            .or_else(|| guard.global(hid_usage, lookup_modifiers, device_id))
-            .map(|v| v.to_vec());
-        drop(guard);
-
-        // Emit mapped outputs via the virtual HID keyboard.
-        if let Some(outputs) = active_outputs {
-            for native_key in &outputs {
-                emit_hid_report(&context.conn, native_key);
+        if is_down {
+            // Key-down.  Ignore auto-repeat (the key is already tracked).
+            if !context.pressed_keys.insert(key_id) {
+                continue;
             }
+
+            // Get the device ID for keyboard filtering.
+            let device_id = Some(context.device_id.as_str());
+
+            // Track modifier state using HidUsage directly.  The lookup uses
+            // the state captured before this key's own bit is set, so a bare
+            // modifier trigger does not match itself.
+            let lookup_modifiers = context.modifier_state;
+            if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
+                context.modifier_state |= 1 << bit;
+            }
+
+            // Perform the lookup.  Compiled rules store the trigger as a
+            // `HidUsage`, so the lookup is keyed by the full page-specific
+            // usage.
+            let guard = context.lookup.read();
+            let active_outputs = guard
+                .for_app(
+                    &guard.active_app(),
+                    hid_usage,
+                    lookup_modifiers,
+                    device_id,
+                )
+                .or_else(|| {
+                    guard.global(hid_usage, lookup_modifiers, device_id)
+                })
+                .map(|v| v.to_vec());
+            drop(guard);
+
+            if let Some(outputs) = active_outputs {
+                // Mapped: emit the mapped outputs via the virtual HID
+                // keyboard.  In capture mode, remember the key was mapped so
+                // its release is swallowed.
+                for native_key in &outputs {
+                    emit_hid_report(
+                        &context.conn,
+                        native_key,
+                        &context.forwarded_keys,
+                        context.forwarded_modifiers,
+                    );
+                }
+                if capture_enabled() {
+                    context.mapped_keys.insert(hid_usage.code());
+                }
+            } else if capture_enabled() {
+                // Unmapped (capture mode): forward the key through the
+                // virtual keyboard so the monitor can see it.
+                forward_key_down(context, hid_usage);
+            }
+        } else if capture_enabled() {
+            // Key-up (capture mode only).  Ignore releases for keys that were
+            // never tracked as down.
+            if !context.pressed_keys.remove(&key_id) {
+                continue;
+            }
+
+            // Clear the modifier bit so subsequent forwarded reports carry the
+            // correct modifier state.
+            if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
+                context.modifier_state &= !(1 << bit);
+            }
+
+            // A mapped key's release is swallowed; a forwarded key's release
+            // is forwarded.
+            if !context.mapped_keys.remove(&hid_usage.code()) {
+                forward_key_up(context, hid_usage);
+            }
+        } else {
+            // Non-capture key-up: drop it (existing behaviour).
+            context.pressed_keys.remove(&key_id);
         }
     }
 }
 
 /// Emit a single `NativeKey` through the Karabiner virtual keyboard.
 ///
-/// Posts a report with the modifier and base key pressed, followed by an
-/// all-clear report to release.  Dispatches on the output usage's page:
+/// Posts a report with the modifier and base key pressed, followed by a
+/// release report.  Because the virtual keyboard report is a shared state
+/// snapshot, both reports also carry the currently-held forwarded keys and
+/// modifier byte so that emitting a mapped output does not clear them.
+/// Dispatches on the output usage's page:
 /// - Keyboard page (0x07): a 67-byte `keyboard_input` report (32 × 16-bit
 ///   usages).
 /// - Consumer page (0x0C): a `consumer_input` report.
 fn emit_hid_report(
-    conn: &std::sync::Arc<super::karabiner_client::KarabinerClient>,
+    conn: &Arc<super::karabiner_client::KarabinerClient>,
     native_key: &crate::daemon::mapping_cache::NativeKey,
+    forwarded_keys: &HashSet<u16>,
+    forwarded_modifiers: u8,
 ) {
     use crate::common::hid_usage::PAGE_KEYBOARD;
 
     if native_key.usage.page() == PAGE_KEYBOARD {
-        // Keyboard page: post the usage in the first slot of the
-        // `keyboard_input` report, then an empty report to release.
-        let usage = native_key.usage.id();
-        let _ = conn.send_keyboard_report(native_key.modifiers, &[usage]);
-        let _ = conn.send_keyboard_report(0, &[]);
+        // Keyboard page: post the base usage together with every held
+        // forwarded key, then a release report that keeps the forwarded keys
+        // but drops the base.
+        let mut usages: Vec<u16> = forwarded_keys.iter().copied().collect();
+        usages.push(native_key.usage.id());
+        usages.sort_unstable();
+
+        let modifiers = native_key.modifiers | forwarded_modifiers;
+        let _ = conn.send_keyboard_report(modifiers, &usages);
+
+        // Release: the forwarded keys stay held; only the base is dropped.
+        let release_usages: Vec<u16> =
+            forwarded_keys.iter().copied().collect();
+        let _ =
+            conn.send_keyboard_report(forwarded_modifiers, &release_usages);
     } else {
-        // Consumer page: post the usage, then an all-clear report to
-        // release.
+        // Consumer page: post the usage, then an all-clear report to release.
         let _ = conn.send_consumer_report(native_key.usage.id());
         let _ = conn.send_consumer_release();
     }
+}
+
+/// Forward an unmapped key-down through the virtual keyboard (capture mode).
+///
+/// Keyboard-page keys are added to the held set and the full state snapshot
+/// is posted; consumer-page keys are pressed directly.
+fn forward_key_down(context: &mut HidQueueContext, hid_usage: HidUsage) {
+    if hid_usage.page() == PAGE_CONSUMER {
+        let _ = context.conn.send_consumer_report(hid_usage.id());
+        return;
+    }
+
+    if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
+        // Modifier: tracked in the modifier byte, not a usage slot.
+        context.forwarded_modifiers |= 1 << bit;
+    } else {
+        context.forwarded_keys.insert(hid_usage.id());
+    }
+
+    post_forwarded_state(
+        &context.conn,
+        &context.forwarded_keys,
+        context.forwarded_modifiers,
+    );
+}
+
+/// Forward an unmapped key-up through the virtual keyboard (capture mode).
+fn forward_key_up(context: &mut HidQueueContext, hid_usage: HidUsage) {
+    if hid_usage.page() == PAGE_CONSUMER {
+        let _ = context.conn.send_consumer_release();
+        return;
+    }
+
+    if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
+        context.forwarded_modifiers &= !(1 << bit);
+    } else {
+        context.forwarded_keys.remove(&hid_usage.id());
+    }
+
+    post_forwarded_state(
+        &context.conn,
+        &context.forwarded_keys,
+        context.forwarded_modifiers,
+    );
+}
+
+/// Post the current forwarded keyboard state as a `keyboard_input` report.
+///
+/// The report is a state snapshot: it carries every held forwarded key and the
+/// forwarded modifier byte.  The virtual keyboard emits a down for each newly
+/// present usage and an up for each usage that is no longer present.
+fn post_forwarded_state(
+    conn: &Arc<super::karabiner_client::KarabinerClient>,
+    forwarded_keys: &HashSet<u16>,
+    modifiers: u8,
+) {
+    let mut usages: Vec<u16> = forwarded_keys.iter().copied().collect();
+    // Sort for a deterministic report layout (slot order is irrelevant to the
+    // virtual keyboard's state tracking, but determinism aids debugging).
+    usages.sort_unstable();
+    let _ = conn.send_keyboard_report(modifiers, &usages);
 }
 
 /// Handle that keeps a queue and its context alive, and cleans up on drop.
@@ -1431,6 +1587,9 @@ pub fn start_iohid_seizure_mapping(
             modifier_state: 0,
             pressed_keys: std::collections::HashSet::new(),
             device_id,
+            forwarded_keys: HashSet::new(),
+            mapped_keys: HashSet::new(),
+            forwarded_modifiers: 0,
         };
 
         let handle = queue.register_value_callback(ctx);
