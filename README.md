@@ -240,4 +240,4 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 |----------|-----------|
 | Linux | `evdev` device grab + `uinput` virtual keyboard |
 | macOS | IOKit device seizure for input capture, DriverKit virtual HID driver for event emission |
-| Windows | Low-level keyboard hook (`WH_KEYBOARD_LL`) |
+| Windows | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (a VHF virtual HID driver is planned, see [windows-driver.md](docs/windows-driver.md)) |
