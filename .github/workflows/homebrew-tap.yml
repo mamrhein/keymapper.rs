@@ -55,6 +55,8 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Update formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
 
@@ -64,6 +66,11 @@ jobs:
             -e "s|url \".*/v[^\"]*\"|url \"https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz\"|" \
             "./Formula/keymapper.rb"
 
+          # Fetch the pinned Karabiner cask from the keymapper repository at
+          # the release tag (it is maintained there, not in the tap).
+          gh api "repos/${{ github.repository }}/contents/brew/karabiner-driverkit-virtualhiddevice.rb?ref=v${VERSION}" \
+            --jq '.content' | base64 -d > "Casks/karabiner-driverkit-virtualhiddevice.rb"
+
       - name: Open pull request
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -71,7 +78,7 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           BRANCH="update-to-${VERSION}"
           git checkout -b "$BRANCH"
-          git add Formula/keymapper.rb
+          git add Formula/keymapper.rb Casks/karabiner-driverkit-virtualhiddevice.rb
           git diff --cached --quiet || git commit -m "chore: update to version ${VERSION}"
           git push origin "$BRANCH" --force-with-lease
           gh pr create \

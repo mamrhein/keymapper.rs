@@ -6,10 +6,17 @@
 # path, and boots the service.  The daemon runs as root to perform IOKit
 # device seizure.  This script requires sudo privileges.
 #
+# It also installs the Karabiner DriverKit VirtualHIDDevice package (the
+# driver through which keymapperd emits remapped keys) via
+# install-karabiner-macos.sh.
+#
 # Idempotent — safe to run multiple times.
 #
-# Usage: scripts/install-macos.sh [binary_path]
-#   binary_path — absolute path to keymapperd (default: found via `which`).
+# Usage: scripts/install-macos.sh [binary_path] [karabiner_pkg_path]
+#   binary_path        — absolute path to keymapperd (default: found via `which`).
+#   karabiner_pkg_path — path to the Karabiner .pkg (default: bundled next to
+#                        the script, or the pinned release downloaded from
+#                        GitHub).
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -83,4 +90,14 @@ if launchctl print system/"$LABEL" >/dev/null 2>&1; then
 else
     echo "Warning: service was installed but does not appear to be running." >&2
     echo "Check logs at ${LOG_DIR}/keymapperd-err.log" >&2
+fi
+
+# Install the Karabiner DriverKit package (pkg install, driver activation,
+# and the daemon LaunchDaemon).  An explicit pkg path is passed through when
+# given (the DMG bundles one).
+echo ""
+if [ $# -ge 2 ]; then
+    "${SCRIPT_DIR}/install-karabiner-macos.sh" "$2"
+else
+    "${SCRIPT_DIR}/install-karabiner-macos.sh"
 fi

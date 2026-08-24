@@ -16,8 +16,7 @@ use keymapper::{
         keyboard::KeyboardSpecifier,
     },
     util::platform::{
-        appnames_cmd, daemon_cmd, driver_cmd, keyboard_cmd, keys_cmd,
-        server_cmd,
+        appnames_cmd, daemon_cmd, keyboard_cmd, keys_cmd, server_cmd,
     },
 };
 
@@ -44,15 +43,6 @@ enum Commands {
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
-    },
-
-    /// Virtual HID driver management (macOS only).
-    ///
-    /// Install the DriverKit extension and check its status.  No-op on
-    /// non-macOS platforms.
-    Driver {
-        #[command(subcommand)]
-        command: DriverCommands,
     },
 
     /// List all connected keyboard devices.
@@ -114,25 +104,6 @@ enum DaemonCommands {
         #[arg(long)]
         config_dir: Option<PathBuf>,
     },
-}
-
-#[derive(Subcommand)]
-enum DriverCommands {
-    /// Build and install the DriverKit virtual HID extension.
-    ///
-    /// Requires Xcode Command Line Tools.  The driver is built with
-    /// ad-hoc signing and copied to `~/Library/Application
-    /// Support/keymapper/`.
-    ///
-    /// For Homebrew installations the driver is already installed, so this
-    /// command prints a confirmation instead.
-    Install,
-
-    /// Report the current status of the virtual HID driver.
-    ///
-    /// Shows whether the driver is installed, loaded in IOKit, and
-    /// accepting connections.
-    Status,
 }
 
 #[derive(Subcommand)]
@@ -248,10 +219,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DaemonCommands::Restart { config_dir } => {
                 cmd_daemon_restart(config_dir)?
             }
-        },
-        Commands::Driver { command } => match command {
-            DriverCommands::Install => cmd_driver_install()?,
-            DriverCommands::Status => cmd_driver_status(),
         },
     }
 
@@ -675,69 +642,6 @@ fn cmd_keys_probe() {
 
 fn cmd_keyboards() {
     keyboard_cmd::list();
-}
-
-fn cmd_driver_install() -> Result<(), Box<dyn std::error::Error>> {
-    driver_cmd::install().map_err(|e| -> Box<dyn std::error::Error> {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    })?;
-    Ok(())
-}
-
-fn cmd_driver_status() {
-    let status = driver_cmd::status();
-
-    println!("Virtual HID Driver Status");
-    println!("─────────────────────────");
-
-    // Installed?
-    print!("Installed:            ");
-    match status.installed_path {
-        Some(ref path) => println!("yes ({})", path.display()),
-        None => println!("no"),
-    }
-
-    // IOKit loaded?
-    print!("Loaded in IOKit:      ");
-    if status.loaded_in_iokit {
-        println!("yes");
-    } else {
-        println!("no");
-    }
-
-    // Connection established?
-    print!("Connection:           ");
-    if status.conn_established {
-        println!("yes");
-    } else {
-        println!("no");
-    }
-
-    // Signing
-    print!("Code signing:         ");
-    println!("{}", status.signing);
-
-    // Guidance if not fully operational
-    if !status.installed {
-        println!();
-        println!("Driver not installed. Run: keymapper driver install");
-    } else if !status.loaded_in_iokit {
-        println!();
-        println!("Virtual HID driver is installed but not loaded.");
-        println!(
-            "First launch may prompt in System Settings → Privacy & Security."
-        );
-        println!("Start keymapperd to trigger the driver load.");
-    } else if !status.conn_established {
-        println!();
-        println!("Virtual HID driver is loaded but the connection could not \
-                 be established.");
-        println!(
-            "The driver may be blocked. Check System Settings → Privacy & \
-             Security."
-        );
-    }
 }
 
 #[cfg(test)]

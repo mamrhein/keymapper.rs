@@ -25,9 +25,9 @@ Run `keymapperd` as root on macOS (required for IOKit device seizure), or with a
 brew install keymapper
 ```
 
-This builds both the Rust binaries and the DriverKit virtual HID extension from source. Requires Xcode command-line tools.
+This builds the Rust binaries from source and installs the Karabiner DriverKit VirtualHIDDevice driver (via a cask dependency). The driver setup requires sudo.
 
-The driver must be approved in System Settings > Privacy & Security on first run. See [macos-driver.md](docs/macos-driver.md) for details.
+The driver must be enabled in System Settings > General > Login Items & Extensions > Driver Extensions on first run. No reboot is required. See [macos-driver.md](docs/macos-driver.md) for details.
 
 ## Quick start
 
@@ -226,7 +226,7 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 **macOS — daemon not capturing keys:** the daemon must run as root to seize HID devices via IOKit. Verify it is running: `launchctl print system/de.adrhinum.keymapperd`. If it is not loaded, install the LaunchDaemon: `sudo ./install-macos.sh /usr/local/bin/keymapperd`.
 
-**macOS — driver not loaded:** check System Settings > Privacy & Security for a blocked driver prompt. Click **Allow** and reboot. See [macos-driver.md](docs/macos-driver.md) for full troubleshooting.
+**macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-driver.md](docs/macos-driver.md) for full troubleshooting.
 
 **Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
 
@@ -239,5 +239,5 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 | Platform | Mechanism |
 |----------|-----------|
 | Linux | `evdev` device grab + `uinput` virtual keyboard |
-| macOS | IOKit device seizure for input capture, DriverKit virtual HID driver for event emission |
+| macOS | IOKit device seizure for input capture, Karabiner DriverKit daemon for event emission |
 | Windows | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (a VHF virtual HID driver is planned, see [windows-driver.md](docs/windows-driver.md)) |

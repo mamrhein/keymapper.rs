@@ -21,7 +21,10 @@
 
 use std::{ffi::c_void, ptr};
 
-use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+use objc2_core_foundation::{
+    CFIndex, CFRunLoop, CFString, CFStringBuiltInEncodings,
+    kCFRunLoopDefaultMode,
+};
 
 use crate::common::hid_usage::HidUsage;
 
@@ -119,6 +122,30 @@ const kIOHIDMapKeyProductID: &str = "Product ID";
 #[allow(non_upper_case_globals)]
 const kIOHIDMapKeyRegistryEntryID: &str = "Registry Entry ID";
 
+/// `kIOHIDSerialNumberKey`.
+#[allow(non_upper_case_globals)]
+const kIOHIDSerialNumberKey: &str = "Serial Number";
+
+/// `kIOHIDProductKey`.
+#[allow(non_upper_case_globals)]
+const kIOHIDProductKey: &str = "Product";
+
+/// Serial number of the Karabiner DriverKit virtual keyboard.
+///
+/// Hardcoded in the pqrs driver, so it is stable across versions.  This is
+/// the primary marker used to exclude our own output device from seizure —
+/// seizing it would create an infinite remap loop (feedback loop).
+const KARABINER_VIRTUAL_KEYBOARD_SERIAL: &str =
+    "pqrs.org:Karabiner-DriverKit-VirtualHIDKeyboard";
+
+/// Product-name prefix of the Karabiner DriverKit virtual keyboard.
+///
+/// The full product string is `Karabiner DriverKit VirtualHIDKeyboard
+/// <driver-version>`, so only a prefix match is possible.  Used as a
+/// secondary check when the serial number property is unavailable.
+const KARABINER_VIRTUAL_KEYBOARD_PRODUCT_PREFIX: &str =
+    "Karabiner DriverKit VirtualHIDKeyboard";
+
 /// USB HID usage page for Keyboard/Keypad.
 const HID_USAGE_PAGE_KEYBOARD: u32 = 0x07;
 
@@ -208,7 +235,7 @@ fn check_io_return(result: u32, context: &str) -> Result<(), IoKitError> {
 
 // On modern macOS with SIP, the IOKit framework is a "stub" — the actual
 // IOHIDLib symbols are only accessible at runtime via dlopen/dlsym, not at
-// link time.  This follows the same pattern as hid_virt_kbd_conn.rs.
+// link time.
 
 /// Function pointer types for IOHIDLib symbols.
 type FnIOHIDManagerCreate =
@@ -227,6 +254,8 @@ type FnIOHIDDeviceOpen = unsafe extern "C" fn(*mut IOHIDDevice, u32) -> u32;
 type FnIOHIDDeviceClose = unsafe extern "C" fn(*mut IOHIDDevice, u32) -> u32;
 type FnIOHIDDeviceGetLocationID =
     unsafe extern "C" fn(*mut IOHIDDevice) -> u32;
+type FnIOHIDDeviceGetProperty =
+    unsafe extern "C" fn(*mut IOHIDDevice, CFStringRef) -> *const c_void;
 type FnIOHIDDeviceCreateQueue =
     unsafe extern "C" fn(*mut IOHIDDevice, CFAllocatorRef) -> *mut IOHIDQueue;
 type FnIOHIDQueueRegisterValueAvailableCallback = unsafe extern "C" fn(
@@ -295,6 +324,7 @@ struct IoKitFunctions {
     device_open: FnIOHIDDeviceOpen,
     device_close: FnIOHIDDeviceClose,
     device_get_location_id: FnIOHIDDeviceGetLocationID,
+    device_get_property: FnIOHIDDeviceGetProperty,
     device_create_queue: FnIOHIDDeviceCreateQueue,
     queue_register_callback: FnIOHIDQueueRegisterValueAvailableCallback,
     queue_schedule_with_runloop: FnIOHIDQueueScheduleWithRunLoop,
@@ -398,6 +428,11 @@ impl IoKitFunctions {
                 handle,
                 b"IOHIDDeviceGetLocationID\0",
                 FnIOHIDDeviceGetLocationID
+            )?,
+            device_get_property: resolve_sym!(
+                handle,
+                b"IOHIDDeviceGetProperty\0",
+                FnIOHIDDeviceGetProperty
             )?,
             device_create_queue: resolve_sym!(
                 handle,
@@ -565,6 +600,13 @@ unsafe fn IOHIDDeviceClose(device: *mut IOHIDDevice, flags: u32) -> u32 {
 
 unsafe fn IOHIDDeviceGetLocationID(device: *mut IOHIDDevice) -> u32 {
     unsafe { (IoKitFunctions::get().device_get_location_id)(device) }
+}
+
+unsafe fn IOHIDDeviceGetProperty(
+    device: *mut IOHIDDevice,
+    property: CFStringRef,
+) -> *const c_void {
+    unsafe { (IoKitFunctions::get().device_get_property)(device, property) }
 }
 
 unsafe fn IOHIDDeviceCreateQueue(
@@ -747,8 +789,8 @@ pub struct HidQueueContext {
     // Shared lookup for remapping rules.
     pub lookup:
         std::sync::Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
-    // Shared connection to the DriverKit virtual HID keyboard.
-    pub conn: std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
+    // Shared client to the Karabiner DriverKit virtual HID keyboard.
+    pub conn: std::sync::Arc<super::karabiner_client::KarabinerClient>,
     // Bitmask tracking which modifier keys are physically pressed.
     pub modifier_state: u8,
     // Set of currently pressed keycodes for deduplication.
@@ -826,10 +868,82 @@ impl HidDevice {
         format!("0x{:08x}", self.location_id)
     }
 
+    // Returns a string property of this device, or `None` if the property
+    // is absent or not a string.
+    fn string_property(&self, key: &str) -> Option<String> {
+        let key_cf = create_cf_string(key);
+        let value = unsafe { IOHIDDeviceGetProperty(self.device, key_cf) };
+        unsafe { CFRelease(key_cf as *const _) };
+
+        if value.is_null() {
+            return None;
+        }
+
+        // The property is a CFString; the raw pointer can be used directly
+        // as a `&CFString` reference (zero-sized CF type).
+        let cf_string = unsafe { &*(value as *const CFString) };
+
+        // UTF-8 needs at most 4 bytes per UTF-16 code unit (a surrogate
+        // pair is two units encoding one 4-byte character).
+        let capacity = (cf_string.length() as usize).saturating_mul(4) + 1;
+        let mut buffer = vec![0u8; capacity];
+
+        let ok = unsafe {
+            cf_string.c_string(
+                buffer.as_mut_ptr().cast::<std::ffi::c_char>(),
+                capacity as CFIndex,
+                CFStringBuiltInEncodings::EncodingUTF8.0,
+            )
+        };
+
+        unsafe { CFRelease(value) };
+
+        if !ok {
+            return None;
+        }
+
+        // The buffer is NUL-terminated by CFStringGetCString.
+        let len = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
+        Some(String::from_utf8_lossy(&buffer[..len]).into_owned())
+    }
+
+    /// Returns true if this device is the Karabiner DriverKit virtual
+    /// keyboard (our own output device).
+    ///
+    /// The virtual keyboard matches the generic keyboard matcher (usage
+    /// page 0x01, usage 0x06), so it must be excluded from seizure to
+    /// prevent a feedback loop.  Identified by the driver's hardcoded
+    /// serial number, with a product-name prefix match as a secondary
+    /// check.
+    pub fn is_karabiner_virtual_keyboard(&self) -> bool {
+        let serial = self.string_property(kIOHIDSerialNumberKey);
+        let product = self.string_property(kIOHIDProductKey);
+        matches_karabiner_virtual_keyboard(
+            serial.as_deref(),
+            product.as_deref(),
+        )
+    }
+
     // Returns the raw device reference.
     pub fn as_raw(&self) -> *mut IOHIDDevice {
         self.device
     }
+}
+
+/// Returns true if the given device properties identify the Karabiner
+/// DriverKit virtual keyboard.
+///
+/// The serial number is the primary marker (exact match); the product name
+/// is a secondary check (prefix match, because the suffix is the driver
+/// version).
+fn matches_karabiner_virtual_keyboard(
+    serial: Option<&str>,
+    product: Option<&str>,
+) -> bool {
+    serial.is_some_and(|s| s == KARABINER_VIRTUAL_KEYBOARD_SERIAL)
+        || product.is_some_and(|p| {
+            p.starts_with(KARABINER_VIRTUAL_KEYBOARD_PRODUCT_PREFIX)
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -997,45 +1111,30 @@ unsafe extern "C" fn hid_queue_value_callback(
     }
 }
 
-/// Emit a single `NativeKey` as USB HID reports.
+/// Emit a single `NativeKey` through the Karabiner virtual keyboard.
 ///
-/// Sends a report with the modifier and base key pressed, followed by
-/// an empty report to release.  Dispatches on the output usage's page:
-/// - Keyboard page (0x07): standard USB keyboard report.
-/// - Consumer page (0x0C): consumer control report.
+/// Posts a report with the modifier and base key pressed, followed by an
+/// all-clear report to release.  Dispatches on the output usage's page:
+/// - Keyboard page (0x07): a 67-byte `keyboard_input` report (32 × 16-bit
+///   usages).
+/// - Consumer page (0x0C): a `consumer_input` report.
 fn emit_hid_report(
-    conn: &std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
+    conn: &std::sync::Arc<super::karabiner_client::KarabinerClient>,
     native_key: &crate::daemon::mapping_cache::NativeKey,
 ) {
-    use super::hid_virt_kbd_conn::{
-        build_consumer_release_report, build_consumer_report,
-        build_keyboard_report,
-    };
     use crate::common::hid_usage::PAGE_KEYBOARD;
 
     if native_key.usage.page() == PAGE_KEYBOARD {
-        // Keyboard page: write the usage id directly into the report.
-        let usage_byte = native_key.usage.id() as u8;
-
-        if let Ok(report) =
-            build_keyboard_report(native_key.modifiers, Some(usage_byte))
-        {
-            let _ = conn.send_report(&report);
-        }
-
-        // Release the key by sending an empty report.
-        if let Ok(empty_report) = build_keyboard_report(0, None) {
-            let _ = conn.send_report(&empty_report);
-        }
+        // Keyboard page: post the usage in the first slot of the
+        // `keyboard_input` report, then an empty report to release.
+        let usage = native_key.usage.id();
+        let _ = conn.send_keyboard_report(native_key.modifiers, &[usage]);
+        let _ = conn.send_keyboard_report(0, &[]);
     } else {
-        // Consumer page: build a consumer control report.
-        if let Ok(report) = build_consumer_report(native_key.usage.id()) {
-            let _ = conn.send_report(&report);
-
-            // Release the consumer key by sending an all-clear report.
-            let release_report = build_consumer_release_report();
-            let _ = conn.send_report(&release_report);
-        }
+        // Consumer page: post the usage, then an all-clear report to
+        // release.
+        let _ = conn.send_consumer_report(native_key.usage.id());
+        let _ = conn.send_consumer_release();
     }
 }
 
@@ -1180,10 +1279,24 @@ impl HidDeviceManager {
                 // Get the location ID.
                 let location_id = unsafe { IOHIDDeviceGetLocationID(device) };
 
-                devices.push(HidDevice {
+                let hid_device = HidDevice {
                     device,
                     location_id,
-                });
+                };
+
+                // Skip the Karabiner DriverKit virtual keyboard: it matches
+                // the generic keyboard matcher, and seizing our own output
+                // device would create an infinite remap loop.
+                if hid_device.is_karabiner_virtual_keyboard() {
+                    println!(
+                        "IOKit HID: skipping Karabiner virtual keyboard at \
+                         location {}",
+                        hid_device.location_id_string()
+                    );
+                    continue;
+                }
+
+                devices.push(hid_device);
             }
 
             unsafe { CFRelease(iterator as *const _) };
@@ -1271,13 +1384,13 @@ pub struct SeizureHandle {
 ///
 /// Discovers keyboards via `HidDeviceManager`, opens each with
 /// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
-/// delivery.  Mapped output is emitted through the shared `HidVirtKbdConn`
-/// (DriverKit virtual keyboard).
+/// delivery.  Mapped output is emitted through the shared `KarabinerClient`
+/// (the Karabiner DriverKit virtual keyboard).
 pub fn start_iohid_seizure_mapping(
     lookup: std::sync::Arc<
         parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
     >,
-    conn: std::sync::Arc<super::hid_virt_kbd_conn::HidVirtKbdConn>,
+    conn: std::sync::Arc<super::karabiner_client::KarabinerClient>,
 ) -> Result<SeizureHandle, IoKitError> {
     // Discover physical keyboards.
     let manager = HidDeviceManager::new_keyboard_matcher()?;
@@ -1391,5 +1504,66 @@ mod tests {
     fn check_io_return_generic() {
         let err = check_io_return(0xdeadbeef, "test");
         assert!(matches!(err, Err(IoKitError::IoReturn(0xdeadbeef, _))));
+    }
+
+    // -----------------------------------------------------------------------
+    // Karabiner virtual keyboard marker matching (feedback-loop filter)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn karabiner_marker_matches_by_serial_number() {
+        assert!(matches_karabiner_virtual_keyboard(
+            Some(KARABINER_VIRTUAL_KEYBOARD_SERIAL),
+            None,
+        ));
+    }
+
+    #[test]
+    fn karabiner_marker_matches_by_product_prefix() {
+        // The product string carries the driver version as a suffix.
+        assert!(matches_karabiner_virtual_keyboard(
+            None,
+            Some("Karabiner DriverKit VirtualHIDKeyboard 1.8.0"),
+        ));
+    }
+
+    #[test]
+    fn karabiner_marker_matches_when_both_present() {
+        assert!(matches_karabiner_virtual_keyboard(
+            Some(KARABINER_VIRTUAL_KEYBOARD_SERIAL),
+            Some("Karabiner DriverKit VirtualHIDKeyboard 1.8.0"),
+        ));
+    }
+
+    #[test]
+    fn karabiner_marker_rejects_physical_keyboard() {
+        assert!(!matches_karabiner_virtual_keyboard(
+            Some("ABC123"),
+            Some("Magic Keyboard"),
+        ));
+    }
+
+    #[test]
+    fn karabiner_marker_rejects_missing_properties() {
+        assert!(!matches_karabiner_virtual_keyboard(None, None));
+    }
+
+    #[test]
+    fn karabiner_marker_rejects_similar_serial() {
+        // A different serial must not match, even with a similar prefix.
+        assert!(!matches_karabiner_virtual_keyboard(
+            Some("pqrs.org:Karabiner-DriverKit-VirtualHIDKeyboard-clone"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn karabiner_marker_rejects_similar_product() {
+        // The prefix match must not fire on unrelated product names that
+        // merely share a word.
+        assert!(!matches_karabiner_virtual_keyboard(
+            None,
+            Some("My Karabiner DriverKit VirtualHIDKeyboard Clone"),
+        ));
     }
 }
