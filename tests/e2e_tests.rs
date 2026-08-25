@@ -14,12 +14,15 @@
 //! platform injector, and validate the daemon's remapped output against
 //! expected sequences derived from the config fixture files.
 //!
-//! On Linux the monitor runs headless: it grabs the daemon's uinput output
-//! device directly, so the capture is deterministic, works on interactive
-//! sessions, and the daemon's output can never leak into the compositor or
-//! a focused window.  The daemon's active-app query is pinned to the
-//! monitor's app name via `KEYMAPPER_ACTIVE_APP`, so app-scoped rules are
-//! evaluated deterministically even though the monitor has no window.
+//! On every supported platform the monitor runs headless and captures the
+//! daemon's output directly: on Linux it grabs the daemon's uinput output
+//! device, on Windows a low-level hook captures the daemon's tagged
+//! re-emissions, and on macOS it seizes the daemon's Karabiner DriverKit
+//! virtual keyboard.  The capture is therefore deterministic, works on
+//! interactive sessions, and the daemon's output can never leak into the
+//! compositor or a focused window.  The daemon's active-app query is pinned
+//! to the monitor's app name via `KEYMAPPER_ACTIVE_APP`, so app-scoped rules
+//! are evaluated deterministically even though the monitor has no window.
 //!
 //! The test flow is:
 //! 1. Create a temp directory and copy a fixture config into it.
@@ -134,7 +137,7 @@ struct TestSequences {
     expected: Vec<LogEvent>,
 }
 
-/// Application name the monitor window reports as the active app while the
+/// Application name the monitor process reports as the active app while the
 /// test runs.  App-scoped rules for this app are expected to fire; rules
 /// scoped to any other app (e.g. "to_be_ignored") must not.
 const MONITOR_APP_NAME: &str = "keymapper_monitor";
@@ -150,7 +153,7 @@ struct CollectedRule<'a> {
 }
 
 impl CollectedRule<'_> {
-    /// Whether the rule is expected to fire while the monitor window is the
+    /// Whether the rule is expected to fire while the monitor process is the
     /// active application.
     fn fires_for_monitor(&self) -> bool {
         self.apps.is_empty() || self.apps.iter().any(|a| a == MONITOR_APP_NAME)
@@ -204,8 +207,8 @@ fn build_test_sequences(config_path: &Path) -> TestSequences {
     }
 
     // Pick 5 passthrough keys that are not used by any rule.  Consumer
-    // page usages are excluded: the egui monitor cannot capture them and
-    // the macOS injector has no CGKeyCode for them.
+    // page usages are excluded: the macOS injector has no CGKeyCode for
+    // them, so they cannot be part of a cross-platform injection sequence.
     let passthrough_keys: Vec<HidUsage> = HidUsage::all()
         .iter()
         .copied()
@@ -287,53 +290,13 @@ fn platform_excludes_passthrough(_key: HidUsage) -> bool {
 /// The key name the monitor logs for a given key, or `None` when the
 /// monitor cannot see the key on this platform.
 ///
-/// On Linux the monitor captures the daemon's output device directly, so
-/// every emitted key is visible under its exact name (left/right sides
-/// are distinguished, Super and CapsLock included).  On other platforms
-/// the monitor observes keyboard state through the windowing system, which
-/// is side-agnostic: right-side modifiers are reported under their
-/// left-side names, Super/Command is only visible on macOS (the egui
-/// backend drops the super key on other platforms), and CapsLock is not
-/// tracked by egui at all.
+/// On every supported platform the monitor captures the daemon's output
+/// directly (uinput grab on Linux, tagged hook on Windows, IOKit seizure of
+/// the virtual keyboard on macOS), so every emitted key is visible under
+/// its exact name (left/right sides are distinguished, Super and CapsLock
+/// included).
 fn monitor_key_name(key: HidUsage) -> Option<&'static str> {
-    // Linux direct-capture mode sees every key under its exact name.
-    #[cfg(target_os = "linux")]
-    {
-        Some(key.as_str())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // The Windows hook-capture backend sees every key under its exact
-        // name, just like the Linux direct-capture backend: left/right
-        // sides are distinguished and Super is visible.
-        Some(key.as_str())
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        // The egui backend observes keyboard state through the windowing
-        // system, which is side-agnostic: right-side modifiers are reported
-        // under their left-side names, Super/Command is only visible on
-        // macOS (the egui backend drops the super key on other platforms),
-        // and CapsLock is not tracked by egui at all.
-        match key {
-            HidUsage::LeftControl | HidUsage::RightControl => {
-                Some("LeftControl")
-            }
-            HidUsage::LeftShift | HidUsage::RightShift => Some("LeftShift"),
-            HidUsage::LeftAlt | HidUsage::RightAlt => Some("LeftAlt"),
-            HidUsage::LeftCommand | HidUsage::RightCommand => {
-                if cfg!(target_os = "macos") {
-                    Some("LeftCommand")
-                } else {
-                    None
-                }
-            }
-            HidUsage::CapsLock => None,
-            other => Some(other.as_str()),
-        }
-    }
+    Some(key.as_str())
 }
 
 /// Modifier bit position, shared with the daemon's bitmask layout (see
@@ -744,7 +707,9 @@ fn start_monitor(output_path: &Path) -> ProcessGuard {
         label: "monitor",
     };
 
-    // Give the egui window time to open and become ready.
+    // Give the monitor a moment to start up, so an immediate crash (e.g.
+    // failing to open the output file) is caught by the liveness check
+    // below.
     thread::sleep(Duration::from_secs(2));
 
     // Check that the monitor is still alive.  `try_wait` returns
@@ -769,9 +734,9 @@ fn start_monitor(output_path: &Path) -> ProcessGuard {
 /// cleaned up even when the test fails.
 fn start_daemon(config_dir: &Path) -> DaemonGuard {
     // Pin the daemon's active-app query to the monitor's app name so
-    // app-scoped rule evaluation is deterministic: the monitor is
-    // windowless on Linux and can never be the compositor's active
-    // window, yet the test expects the monitor-scoped rules to fire.
+    // app-scoped rule evaluation is deterministic: the monitor is windowless
+    // and can never be the compositor's active window, yet the test expects
+    // the monitor-scoped rules to fire.
     //
     // Also tell the daemon where to write its readiness file so we can wait
     // for it to finish initialisation (e.g. the DriverKit virtual HID driver
@@ -785,11 +750,12 @@ fn start_daemon(config_dir: &Path) -> DaemonGuard {
         .arg(config_dir)
         .env("KEYMAPPER_ACTIVE_APP", MONITOR_APP_NAME)
         .env("KEYMAPPER_READY_FILE", &ready_file)
-        // On Windows, run the daemon in capture mode so it re-emits every key
-        // (mapped and unmapped) through the virtual keyboard, tagged, for the
-        // monitor's low-level hook to capture.  Without this the monitor
-        // window would depend on keyboard focus, which is brittle.
-        // Non-Windows daemons ignore the variable.
+        // On Windows and macOS, run the daemon in capture mode so it re-emits
+        // every key (mapped and unmapped) through the virtual keyboard, for
+        // the monitor to capture (tagged hook on Windows, IOKit seizure of
+        // the virtual keyboard on macOS).  Without this the monitor would
+        // depend on keyboard focus, which is brittle.  The Linux daemon
+        // always re-emits every key and ignores the variable.
         .env("KEYMAPPER_CAPTURE", "1")
         .status()
         .expect("failed to run keymapper daemon start");
@@ -879,9 +845,8 @@ fn inject_step(injector: &dyn KeyInjector, step: &InjectionStep) {
         thread::sleep(Duration::from_millis(3));
     }
 
-    // Hold the full chord long enough to span at least one frame of the
-    // monitor's per-frame keyboard sampling, so the press is never
-    // coalesced away between two samples.
+    // Hold the full chord briefly so the down and up events are processed
+    // as a distinct press+release pair.
     thread::sleep(Duration::from_millis(50));
 
     for &code in &step.keys_up {
@@ -1069,8 +1034,8 @@ fn e2e_comprehensive_config() {
     }
 
     // g. Inject a canary key first to verify the full capture path
-    //    (injector -> daemon -> virtual device -> compositor -> monitor
-    //    window) is live before running the real sequence.
+    //    (injector -> daemon -> virtual keyboard -> monitor) is live before
+    //    running the real sequence.
     eprintln!("injecting canary key (Space)...");
     inject_step(&*injector, &single_key_injection_step(HidUsage::Space));
 
@@ -1098,8 +1063,8 @@ fn e2e_comprehensive_config() {
 
     if actual.is_empty() {
         panic!(
-            "monitor captured no events at all — its window probably does \
-             not have keyboard focus"
+            "monitor captured no events at all — the capture path is not \
+             live (check the monitor and daemon logs)"
         );
     }
 
@@ -1351,8 +1316,8 @@ fn e2e_config_hot_reload() {
 
     if actual.is_empty() {
         panic!(
-            "monitor captured no events at all — its window probably does \
-             not have keyboard focus"
+            "monitor captured no events at all — the capture path is not \
+             live (check the monitor and daemon logs)"
         );
     }
 
