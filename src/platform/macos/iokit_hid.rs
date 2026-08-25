@@ -1658,12 +1658,16 @@ unsafe extern "C" fn find_karabiner_applier(
 /// Create a `CFString` from a Rust string slice.  The returned pointer
 /// must be released with `CFRelease` when no longer needed.
 fn create_cf_string(s: &str) -> CFStringRef {
+    use objc2::rc::Retained;
     use objc2_foundation::NSString;
 
     let ns = NSString::from_str(s);
-    // CFString and NSString are toll-free bridged.  We transfer ownership
-    // to the caller via a raw pointer that they must CFRelease.
-    let ptr: *const objc2_foundation::NSString = ns.as_ref();
+    // CFString and NSString are toll-free bridged.  Consume the `Retained`
+    // so its +1 retain count is transferred to the raw pointer; the caller
+    // owns it and must release it with `CFRelease`.  (Extracting a pointer
+    // from a borrowed reference and letting the `Retained` drop would free
+    // the object and leave the returned pointer dangling.)
+    let ptr: *mut objc2_foundation::NSString = Retained::into_raw(ns);
     ptr as CFStringRef
 }
 
