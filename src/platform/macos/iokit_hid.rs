@@ -191,6 +191,8 @@ pub enum IoKitError {
     IoReturn(u32, String),
     // A required FFI symbol could not be resolved.
     SymbolMissing(String),
+    // The IOKit framework itself could not be loaded.
+    FrameworkLoadFailed(String),
 }
 
 impl std::fmt::Display for IoKitError {
@@ -217,6 +219,9 @@ impl std::fmt::Display for IoKitError {
             }
             IoKitError::SymbolMissing(sym) => {
                 write!(f, "IOKit symbol not found: {}", sym)
+            }
+            IoKitError::FrameworkLoadFailed(ctx) => {
+                write!(f, "failed to load the IOKit framework: {}", ctx)
             }
         }
     }
@@ -360,11 +365,10 @@ struct IoKitFunctions {
 impl IoKitFunctions {
     /// Resolve all IOHIDLib symbols from IOKit at runtime.
     ///
-    /// Returns `true` when all required symbols are available.
-    /// Resolve all IOHIDLib symbols from IOKit at runtime.
-    ///
-    /// Returns `Ok(())` when all required symbols are available.
-    fn resolve() -> Result<(), ()> {
+    /// Returns `Ok(())` when all required symbols are available, or an
+    /// [`IoKitError`] naming the missing symbol or the framework load
+    /// failure.
+    fn resolve() -> Result<(), IoKitError> {
         if IOHID_FUNCS.get().is_some() {
             return Ok(());
         }
@@ -374,7 +378,15 @@ impl IoKitFunctions {
         let handle =
             unsafe { libc::dlopen(path.as_ptr() as *const _, libc::RTLD_NOW) };
         if handle.is_null() {
-            return Err(());
+            let err_ptr = unsafe { libc::dlerror() };
+            let msg = if err_ptr.is_null() {
+                "unknown error".to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(err_ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            return Err(IoKitError::FrameworkLoadFailed(msg));
         }
 
         // SAFETY: `Option<FnType>` uses niche optimization where null pointer
@@ -383,11 +395,16 @@ impl IoKitFunctions {
         // alignment, and the null/non-null bit patterns match.
         macro_rules! resolve_sym {
             ($handle:expr, $name:expr, $ty:ty) => {{
+                let c_name = std::str::from_utf8($name)
+                    .expect("symbol names are valid UTF-8");
                 let raw = unsafe {
-                    libc::dlsym($handle, $name.as_ptr() as *const _)
+                    libc::dlsym($handle, c_name.as_ptr() as *const _)
                 };
                 let opt: Option<$ty> = unsafe { std::mem::transmute(raw) };
-                opt.ok_or(())
+                // Strip the trailing NUL so the error names the symbol
+                // cleanly.
+                let name = c_name.strip_suffix('\0').unwrap_or(c_name);
+                opt.ok_or_else(|| IoKitError::SymbolMissing(name.to_string()))
             }};
         }
 
@@ -545,18 +562,23 @@ impl IoKitFunctions {
             )?,
         };
 
-        IOHID_FUNCS.set(funcs).map_err(|_| ())
+        // A concurrent `resolve()` may have won the race and stored its own
+        // copy; that is fine, so ignore the `set` failure.
+        let _ = IOHID_FUNCS.set(funcs);
+        Ok(())
     }
 
     /// Get the resolved function pointers.
     ///
-    /// Panics if resolution failed. Callers must ensure `resolve()` succeeded
-    /// before calling this.
+    /// Resolves on first use and panics with a descriptive error if the IOKit
+    /// framework or any required symbol is unavailable.
     fn get() -> &'static Self {
-        let _ = Self::resolve();
+        Self::resolve().unwrap_or_else(|e| {
+            panic!("failed to resolve IOHID functions: {e}")
+        });
         IOHID_FUNCS
             .get()
-            .expect("IOHID functions not resolved. Call resolve() first.")
+            .expect("IOHID functions not stored after successful resolve")
     }
 }
 
