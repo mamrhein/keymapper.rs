@@ -972,7 +972,9 @@ impl HidDevice {
             )
         };
 
-        unsafe { CFRelease(value) };
+        // The value is a borrowed reference (the "Get" function does not
+        // transfer ownership), so it must not be released; IOKit caches the
+        // CFString and reuses it across devices.
 
         if !ok {
             return None;
