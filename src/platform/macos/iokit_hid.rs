@@ -74,10 +74,6 @@ pub struct IOHIDValue {
 #[allow(non_camel_case_types)]
 type CFSetRef = *mut c_void;
 
-/// Opaque `CFTypeRef` (iterator element from `CFSet`).
-#[allow(non_camel_case_types)]
-type CFTypeRef = *const c_void;
-
 /// Opaque `CFAllocatorRef` (we use null for `kCFAllocatorDefault`).
 #[allow(non_camel_case_types)]
 type CFAllocatorRef = *mut c_void;
@@ -253,7 +249,8 @@ fn check_io_return(result: u32, context: &str) -> Result<(), IoKitError> {
 /// Function pointer types for IOHIDLib symbols.
 type FnIOHIDManagerCreate =
     unsafe extern "C" fn(CFAllocatorRef, u32) -> *mut IOHIDManager;
-type FnIOHIDManagerSetDeviceMatching = unsafe extern "C" fn(*mut IOHIDManager);
+type FnIOHIDManagerSetDeviceMatching =
+    unsafe extern "C" fn(*mut IOHIDManager, CFDictionaryRef);
 type FnIOHIDManagerCopyDevices =
     unsafe extern "C" fn(*mut IOHIDManager) -> CFSetRef;
 type FnIOHIDManagerScheduleWithRunLoop = unsafe extern "C" fn(
@@ -265,12 +262,24 @@ type FnIOHIDManagerOpen = unsafe extern "C" fn(*mut IOHIDManager, u32) -> u32;
 type FnIOHIDManagerClose = unsafe extern "C" fn(*mut IOHIDManager, u32) -> u32;
 type FnIOHIDDeviceOpen = unsafe extern "C" fn(*mut IOHIDDevice, u32) -> u32;
 type FnIOHIDDeviceClose = unsafe extern "C" fn(*mut IOHIDDevice, u32) -> u32;
-type FnIOHIDDeviceGetLocationID =
-    unsafe extern "C" fn(*mut IOHIDDevice) -> u32;
 type FnIOHIDDeviceGetProperty =
     unsafe extern "C" fn(*mut IOHIDDevice, CFStringRef) -> *const c_void;
-type FnIOHIDDeviceCreateQueue =
-    unsafe extern "C" fn(*mut IOHIDDevice, CFAllocatorRef) -> *mut IOHIDQueue;
+type FnIOHIDDeviceCopyMatchingElements = unsafe extern "C" fn(
+    *mut IOHIDDevice,
+    CFDictionaryRef,
+    u32,
+)
+    -> *const c_void; // CFArrayRef of IOHIDElementRef
+type FnIOHIDQueueCreate = unsafe extern "C" fn(
+    CFAllocatorRef,
+    *mut IOHIDDevice,
+    CFIndex,
+    u32,
+) -> *mut IOHIDQueue;
+type FnIOHIDQueueAddElement =
+    unsafe extern "C" fn(*mut IOHIDQueue, *mut IOHIDElement);
+type FnIOHIDQueueStart = unsafe extern "C" fn(*mut IOHIDQueue);
+type FnIOHIDQueueStop = unsafe extern "C" fn(*mut IOHIDQueue);
 type FnIOHIDQueueRegisterValueAvailableCallback = unsafe extern "C" fn(
     *mut IOHIDQueue,
     Option<
@@ -288,9 +297,8 @@ type FnIOHIDQueueScheduleWithRunLoop = unsafe extern "C" fn(
     *mut c_void, // CFRunLoopRef
     *mut c_void, // CFStringRef
 );
-type FnIOHIDQueueOpen = unsafe extern "C" fn(*mut IOHIDQueue) -> u32;
-type FnIOHIDQueueClose = unsafe extern "C" fn(*mut IOHIDQueue, u32);
-type FnIOHIDValueGetInteger = unsafe extern "C" fn(*mut IOHIDValue) -> u32;
+type FnIOHIDValueGetIntegerValue =
+    unsafe extern "C" fn(*mut IOHIDValue) -> CFIndex;
 type FnIOHIDValueGetElement =
     unsafe extern "C" fn(*mut IOHIDValue) -> *mut IOHIDElement;
 type FnIOHIDElementGetUsagePage =
@@ -300,12 +308,12 @@ type FnCFArrayGetCount = unsafe extern "C" fn(*const c_void) -> usize;
 type FnCFArrayGetValueAtIndex =
     unsafe extern "C" fn(*const c_void, usize) -> *const c_void;
 type FnCFSetGetCount = unsafe extern "C" fn(CFSetRef) -> usize;
-type FnCFSetCreateIterator =
-    unsafe extern "C" fn(CFSetRef, *mut *mut c_void) -> bool;
-type FnCFSetIteratorGetNext = unsafe extern "C" fn(*mut c_void) -> CFTypeRef;
+type FnCFSetApplyFunction = unsafe extern "C" fn(
+    CFSetRef,
+    unsafe extern "C" fn(*const c_void, *mut c_void),
+    *mut c_void,
+);
 type FnCFRelease = unsafe extern "C" fn(*const c_void);
-type FnIOHIDDeviceCopyCFTypeArgumentByIndex =
-    unsafe extern "C" fn(*mut IOHIDDevice, usize) -> *const c_void;
 type FnCFNumberCreate =
     unsafe extern "C" fn(CFAllocatorRef, u32, *const c_void) -> CFNumberRef;
 #[allow(improper_ctypes_definitions)]
@@ -319,8 +327,6 @@ type FnCFDictionaryCreateMutable = unsafe extern "C" fn(
 ) -> *mut c_void;
 type FnCFDictionarySetValue =
     unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void);
-type FnIOHIDManagerSetDeviceMatchingWithDictionary =
-    unsafe extern "C" fn(*mut IOHIDManager, CFDictionaryRef);
 
 /// Resolved function pointers for the IOHIDLib API.
 static IOHID_FUNCS: std::sync::OnceLock<IoKitFunctions> =
@@ -336,30 +342,27 @@ struct IoKitFunctions {
     manager_close: FnIOHIDManagerClose,
     device_open: FnIOHIDDeviceOpen,
     device_close: FnIOHIDDeviceClose,
-    device_get_location_id: FnIOHIDDeviceGetLocationID,
     device_get_property: FnIOHIDDeviceGetProperty,
-    device_create_queue: FnIOHIDDeviceCreateQueue,
+    device_copy_matching_elements: FnIOHIDDeviceCopyMatchingElements,
+    queue_create: FnIOHIDQueueCreate,
+    queue_add_element: FnIOHIDQueueAddElement,
+    queue_start: FnIOHIDQueueStart,
+    queue_stop: FnIOHIDQueueStop,
     queue_register_callback: FnIOHIDQueueRegisterValueAvailableCallback,
     queue_schedule_with_runloop: FnIOHIDQueueScheduleWithRunLoop,
-    queue_open: FnIOHIDQueueOpen,
-    queue_close: FnIOHIDQueueClose,
-    value_get_integer: FnIOHIDValueGetInteger,
+    value_get_integer_value: FnIOHIDValueGetIntegerValue,
     value_get_element: FnIOHIDValueGetElement,
     element_get_usage_page: FnIOHIDElementGetUsagePage,
     element_get_usage: FnIOHIDElementGetUsage,
     cf_array_get_count: FnCFArrayGetCount,
     cf_array_get_value_at_index: FnCFArrayGetValueAtIndex,
     cf_set_get_count: FnCFSetGetCount,
-    cf_set_create_iterator: FnCFSetCreateIterator,
-    cf_set_iterator_get_next: FnCFSetIteratorGetNext,
+    cf_set_apply_function: FnCFSetApplyFunction,
     cf_release: FnCFRelease,
-    device_copy_cf_type_arg_by_index: FnIOHIDDeviceCopyCFTypeArgumentByIndex,
     cf_number_create: FnCFNumberCreate,
     cf_number_get_value: FnCFNumberGetValue,
     cf_dict_create_mutable: FnCFDictionaryCreateMutable,
     cf_dict_set_value: FnCFDictionarySetValue,
-    manager_set_device_matching_with_dict:
-        FnIOHIDManagerSetDeviceMatchingWithDictionary,
 }
 
 impl IoKitFunctions {
@@ -449,20 +452,35 @@ impl IoKitFunctions {
                 b"IOHIDDeviceClose\0",
                 FnIOHIDDeviceClose
             )?,
-            device_get_location_id: resolve_sym!(
-                handle,
-                b"IOHIDDeviceGetLocationID\0",
-                FnIOHIDDeviceGetLocationID
-            )?,
             device_get_property: resolve_sym!(
                 handle,
                 b"IOHIDDeviceGetProperty\0",
                 FnIOHIDDeviceGetProperty
             )?,
-            device_create_queue: resolve_sym!(
+            device_copy_matching_elements: resolve_sym!(
                 handle,
-                b"IOHIDDeviceCreateQueue\0",
-                FnIOHIDDeviceCreateQueue
+                b"IOHIDDeviceCopyMatchingElements\0",
+                FnIOHIDDeviceCopyMatchingElements
+            )?,
+            queue_create: resolve_sym!(
+                handle,
+                b"IOHIDQueueCreate\0",
+                FnIOHIDQueueCreate
+            )?,
+            queue_add_element: resolve_sym!(
+                handle,
+                b"IOHIDQueueAddElement\0",
+                FnIOHIDQueueAddElement
+            )?,
+            queue_start: resolve_sym!(
+                handle,
+                b"IOHIDQueueStart\0",
+                FnIOHIDQueueStart
+            )?,
+            queue_stop: resolve_sym!(
+                handle,
+                b"IOHIDQueueStop\0",
+                FnIOHIDQueueStop
             )?,
             queue_register_callback: resolve_sym!(
                 handle,
@@ -474,20 +492,10 @@ impl IoKitFunctions {
                 b"IOHIDQueueScheduleWithRunLoop\0",
                 FnIOHIDQueueScheduleWithRunLoop
             )?,
-            queue_open: resolve_sym!(
+            value_get_integer_value: resolve_sym!(
                 handle,
-                b"IOHIDQueueOpen\0",
-                FnIOHIDQueueOpen
-            )?,
-            queue_close: resolve_sym!(
-                handle,
-                b"IOHIDQueueClose\0",
-                FnIOHIDQueueClose
-            )?,
-            value_get_integer: resolve_sym!(
-                handle,
-                b"IOHIDValueGetInteger\0",
-                FnIOHIDValueGetInteger
+                b"IOHIDValueGetIntegerValue\0",
+                FnIOHIDValueGetIntegerValue
             )?,
             value_get_element: resolve_sym!(
                 handle,
@@ -519,22 +527,12 @@ impl IoKitFunctions {
                 b"CFSetGetCount\0",
                 FnCFSetGetCount
             )?,
-            cf_set_create_iterator: resolve_sym!(
+            cf_set_apply_function: resolve_sym!(
                 handle,
-                b"CFSetCreateIterator\0",
-                FnCFSetCreateIterator
-            )?,
-            cf_set_iterator_get_next: resolve_sym!(
-                handle,
-                b"CFSetIteratorGetNext\0",
-                FnCFSetIteratorGetNext
+                b"CFSetApplyFunction\0",
+                FnCFSetApplyFunction
             )?,
             cf_release: resolve_sym!(handle, b"CFRelease\0", FnCFRelease)?,
-            device_copy_cf_type_arg_by_index: resolve_sym!(
-                handle,
-                b"IOHIDDeviceCopyCFTypeArgumentByIndex\0",
-                FnIOHIDDeviceCopyCFTypeArgumentByIndex
-            )?,
             cf_number_create: resolve_sym!(
                 handle,
                 b"CFNumberCreate\0",
@@ -554,11 +552,6 @@ impl IoKitFunctions {
                 handle,
                 b"CFDictionarySetValue\0",
                 FnCFDictionarySetValue
-            )?,
-            manager_set_device_matching_with_dict: resolve_sym!(
-                handle,
-                b"IOHIDManagerSetDeviceMatchingWithDictionary\0",
-                FnIOHIDManagerSetDeviceMatchingWithDictionary
             )?,
         };
 
@@ -592,8 +585,13 @@ unsafe fn IOHIDManagerCreate(
     unsafe { (IoKitFunctions::get().manager_create)(allocator, options) }
 }
 
-unsafe fn IOHIDManagerSetDeviceMatching(manager: *mut IOHIDManager) {
-    unsafe { (IoKitFunctions::get().manager_set_device_matching)(manager) }
+unsafe fn IOHIDManagerSetDeviceMatching(
+    manager: *mut IOHIDManager,
+    matching: CFDictionaryRef,
+) {
+    unsafe {
+        (IoKitFunctions::get().manager_set_device_matching)(manager, matching)
+    }
 }
 
 unsafe fn IOHIDManagerCopyDevices(manager: *mut IOHIDManager) -> CFSetRef {
@@ -628,10 +626,6 @@ unsafe fn IOHIDDeviceClose(device: *mut IOHIDDevice, flags: u32) -> u32 {
     unsafe { (IoKitFunctions::get().device_close)(device, flags) }
 }
 
-unsafe fn IOHIDDeviceGetLocationID(device: *mut IOHIDDevice) -> u32 {
-    unsafe { (IoKitFunctions::get().device_get_location_id)(device) }
-}
-
 unsafe fn IOHIDDeviceGetProperty(
     device: *mut IOHIDDevice,
     property: CFStringRef,
@@ -639,11 +633,34 @@ unsafe fn IOHIDDeviceGetProperty(
     unsafe { (IoKitFunctions::get().device_get_property)(device, property) }
 }
 
-unsafe fn IOHIDDeviceCreateQueue(
+unsafe fn IOHIDDeviceCopyMatchingElements(
     device: *mut IOHIDDevice,
+    matching: CFDictionaryRef,
+    options: u32,
+) -> *const c_void {
+    unsafe {
+        (IoKitFunctions::get().device_copy_matching_elements)(
+            device, matching, options,
+        )
+    }
+}
+
+unsafe fn IOHIDQueueCreate(
     allocator: CFAllocatorRef,
+    device: *mut IOHIDDevice,
+    depth: CFIndex,
+    options: u32,
 ) -> *mut IOHIDQueue {
-    unsafe { (IoKitFunctions::get().device_create_queue)(device, allocator) }
+    unsafe {
+        (IoKitFunctions::get().queue_create)(allocator, device, depth, options)
+    }
+}
+
+unsafe fn IOHIDQueueAddElement(
+    queue: *mut IOHIDQueue,
+    element: *mut IOHIDElement,
+) {
+    unsafe { (IoKitFunctions::get().queue_add_element)(queue, element) }
 }
 
 unsafe fn IOHIDQueueRegisterValueAvailableCallback(
@@ -677,16 +694,16 @@ unsafe fn IOHIDQueueScheduleWithRunLoop(
     }
 }
 
-unsafe fn IOHIDQueueOpen(queue: *mut IOHIDQueue) -> u32 {
-    unsafe { (IoKitFunctions::get().queue_open)(queue) }
+unsafe fn IOHIDQueueStart(queue: *mut IOHIDQueue) {
+    unsafe { (IoKitFunctions::get().queue_start)(queue) }
 }
 
-unsafe fn IOHIDQueueClose(queue: *mut IOHIDQueue, flags: u32) {
-    unsafe { (IoKitFunctions::get().queue_close)(queue, flags) }
+unsafe fn IOHIDQueueStop(queue: *mut IOHIDQueue) {
+    unsafe { (IoKitFunctions::get().queue_stop)(queue) }
 }
 
-unsafe fn IOHIDValueGetInteger(value: *mut IOHIDValue) -> u32 {
-    unsafe { (IoKitFunctions::get().value_get_integer)(value) }
+unsafe fn IOHIDValueGetIntegerValue(value: *mut IOHIDValue) -> CFIndex {
+    unsafe { (IoKitFunctions::get().value_get_integer_value)(value) }
 }
 
 unsafe fn IOHIDValueGetElement(value: *mut IOHIDValue) -> *mut IOHIDElement {
@@ -718,30 +735,20 @@ unsafe fn CFSetGetCount(the_set: CFSetRef) -> usize {
     unsafe { (IoKitFunctions::get().cf_set_get_count)(the_set) }
 }
 
-unsafe fn CFSetCreateIterator(
+unsafe fn CFSetApplyFunction(
     the_set: CFSetRef,
-    iterator: *mut *mut c_void,
-) -> bool {
+    applier: unsafe extern "C" fn(*const c_void, *mut c_void),
+    context: *mut c_void,
+) {
     unsafe {
-        (IoKitFunctions::get().cf_set_create_iterator)(the_set, iterator)
+        (IoKitFunctions::get().cf_set_apply_function)(
+            the_set, applier, context,
+        )
     }
-}
-
-unsafe fn CFSetIteratorGetNext(iterator: *mut c_void) -> CFTypeRef {
-    unsafe { (IoKitFunctions::get().cf_set_iterator_get_next)(iterator) }
 }
 
 unsafe fn CFRelease(cf: *const c_void) {
     unsafe { (IoKitFunctions::get().cf_release)(cf) }
-}
-
-unsafe fn IOHIDDeviceCopyCFTypeArgumentByIndex(
-    device: *mut IOHIDDevice,
-    index: usize,
-) -> *const c_void {
-    unsafe {
-        (IoKitFunctions::get().device_copy_cf_type_arg_by_index)(device, index)
-    }
 }
 
 unsafe fn CFNumberCreate(
@@ -789,26 +796,6 @@ unsafe fn CFDictionarySetValue(
 ) {
     unsafe { (IoKitFunctions::get().cf_dict_set_value)(dict, key, value) }
 }
-
-unsafe fn IOHIDManagerSetDeviceMatchingWithDictionary(
-    manager: *mut IOHIDManager,
-    dict: CFDictionaryRef,
-) {
-    unsafe {
-        (IoKitFunctions::get().manager_set_device_matching_with_dict)(
-            manager, dict,
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// HID input element type constant (kHIDElementTypeInput_Misc = 0)
-// ---------------------------------------------------------------------------
-
-/// `kHIDInputElementTypeInputMisc` — used for creating a queue that
-/// receives all input events from the device.
-#[allow(non_upper_case_globals)]
-const kHIDInputElementTypeInputMisc: u32 = 0;
 
 // ---------------------------------------------------------------------------
 // HID value callback context
@@ -871,12 +858,10 @@ pub fn set_capture_mode(enabled: bool) {
 
 /// A single HID keyboard device discovered via IOHIDManager.
 ///
-/// Holds the `IOHIDDeviceRef` and pre-cached properties for filtering.
+/// Holds the `IOHIDDeviceRef` for filtering and event capture.
 pub struct HidDevice {
     // Raw device reference.
     device: *mut IOHIDDevice,
-    // Pre-cached location ID.
-    location_id: u32,
 }
 
 impl HidDevice {
@@ -895,8 +880,8 @@ impl HidDevice {
         check_io_return(
             result,
             &format!(
-                "IOHIDDeviceOpen for device at location 0x{:08x}",
-                self.location_id,
+                "IOHIDDeviceOpen for device at location {}",
+                self.location_id_string(),
             ),
         )
     }
@@ -911,27 +896,52 @@ impl HidDevice {
     // Create an input queue for this device.
     pub fn create_queue(&self) -> Result<HidQueue, IoKitError> {
         let queue = unsafe {
-            IOHIDDeviceCreateQueue(self.device, kCFAllocatorDefault)
+            IOHIDQueueCreate(
+                kCFAllocatorDefault,
+                self.device,
+                1024,
+                kIOHIDOptionsTypeNone,
+            )
         };
 
         if queue.is_null() {
             return Err(IoKitError::IoReturn(
                 0xfffffff0, // kIOReturnBadArgument
-                "IOHIDDeviceCreateQueue returned null".into(),
+                "IOHIDQueueCreate returned null".into(),
             ));
+        }
+
+        // Register every element of the device so the queue receives all
+        // input events (a null matching dictionary returns all elements).
+        let elements = unsafe {
+            IOHIDDeviceCopyMatchingElements(
+                self.device,
+                ptr::null(),
+                kIOHIDOptionsTypeNone,
+            )
+        };
+
+        if !elements.is_null() {
+            let count = unsafe { CFArrayGetCount(elements) };
+            for i in 0..count {
+                let element = unsafe { CFArrayGetValueAtIndex(elements, i) }
+                    as *mut IOHIDElement;
+                if !element.is_null() {
+                    unsafe { IOHIDQueueAddElement(queue, element) };
+                }
+            }
+            unsafe { CFRelease(elements) };
         }
 
         Ok(HidQueue { queue })
     }
 
-    // Returns the location ID of this device.
-    pub fn location_id(&self) -> u32 {
-        self.location_id
-    }
-
-    // Returns the location ID as a hex string for the lookup trait.
+    // Returns a stable identifier for this device as a hex string.
+    //
+    // The modern IOHID API no longer exposes a location ID, so the device
+    // pointer itself is used; it is unique for the lifetime of the device.
     pub fn location_id_string(&self) -> String {
-        format!("0x{:08x}", self.location_id)
+        format!("0x{:x}", self.device as usize)
     }
 
     // Returns a string property of this device, or `None` if the property
@@ -1087,8 +1097,9 @@ impl HidQueue {
 
     // Open (start) the queue.  Must be called after registering callbacks.
     pub fn open(&self) -> Result<(), IoKitError> {
-        let result = unsafe { IOHIDQueueOpen(self.queue) };
-        check_io_return(result, "IOHIDQueueOpen")
+        // `IOHIDQueueStart` is infallible in the modern API (void return).
+        unsafe { IOHIDQueueStart(self.queue) };
+        Ok(())
     }
 }
 
@@ -1141,7 +1152,7 @@ unsafe extern "C" fn hid_queue_value_callback(
         }
 
         // Get the value (0 = up, non-zero = down).
-        let raw_value = unsafe { IOHIDValueGetInteger(value_ref) };
+        let raw_value = unsafe { IOHIDValueGetIntegerValue(value_ref) };
         let is_down = raw_value != 0;
 
         // Construct HidUsage from raw HID page/id.  Use this for all
@@ -1272,7 +1283,7 @@ pub fn for_each_hid_value(values: *mut c_void, mut f: impl FnMut(u32, bool)) {
         }
 
         let usage = unsafe { IOHIDElementGetUsage(element) };
-        let raw_value = unsafe { IOHIDValueGetInteger(value_ref) };
+        let raw_value = unsafe { IOHIDValueGetIntegerValue(value_ref) };
 
         f((usage_page << 16) | usage, raw_value != 0);
     }
@@ -1394,7 +1405,7 @@ pub struct HidQueueHandle<T> {
 impl<T> Drop for HidQueueHandle<T> {
     fn drop(&mut self) {
         unsafe {
-            IOHIDQueueClose(self.queue, kIOHIDOptionsTypeNone);
+            IOHIDQueueStop(self.queue);
             if !self.context_ptr.is_null() {
                 drop(Box::from_raw(self.context_ptr));
             }
@@ -1475,7 +1486,7 @@ impl HidDeviceManager {
 
         // Apply the matching dictionary.
         unsafe {
-            IOHIDManagerSetDeviceMatchingWithDictionary(manager, dict);
+            IOHIDManagerSetDeviceMatching(manager, dict);
         }
 
         // Release CF objects.
@@ -1511,44 +1522,14 @@ impl HidDeviceManager {
 
         let mut devices = Vec::new();
 
-        // Iterate the CFSet of matched devices.
-        let mut iterator: *mut c_void = ptr::null_mut();
-        let has_iterator =
-            unsafe { CFSetCreateIterator(device_set, &mut iterator) };
-
-        if has_iterator {
-            loop {
-                let device_ptr = unsafe { CFSetIteratorGetNext(iterator) };
-                if device_ptr.is_null() {
-                    break;
-                }
-
-                let device = device_ptr as *mut IOHIDDevice;
-
-                // Get the location ID.
-                let location_id = unsafe { IOHIDDeviceGetLocationID(device) };
-
-                let hid_device = HidDevice {
-                    device,
-                    location_id,
-                };
-
-                // Skip the Karabiner DriverKit virtual keyboard: it matches
-                // the generic keyboard matcher, and seizing our own output
-                // device would create an infinite remap loop.
-                if hid_device.is_karabiner_virtual_keyboard() {
-                    println!(
-                        "IOKit HID: skipping Karabiner virtual keyboard at \
-                         location {}",
-                        hid_device.location_id_string()
-                    );
-                    continue;
-                }
-
-                devices.push(hid_device);
-            }
-
-            unsafe { CFRelease(iterator as *const _) };
+        // Collect the matched devices.  The applier is a raw C function
+        // pointer, so the accumulator travels in the context argument.
+        unsafe {
+            CFSetApplyFunction(
+                device_set,
+                scan_devices_applier,
+                &mut devices as *mut Vec<HidDevice> as *mut c_void,
+            );
         }
 
         // Release the CFSet.
@@ -1572,28 +1553,14 @@ impl HidDeviceManager {
 
         let mut result = None;
 
-        let mut iterator: *mut c_void = ptr::null_mut();
-        if unsafe { CFSetCreateIterator(device_set, &mut iterator) } {
-            loop {
-                let device_ptr = unsafe { CFSetIteratorGetNext(iterator) };
-                if device_ptr.is_null() {
-                    break;
-                }
-
-                let device = device_ptr as *mut IOHIDDevice;
-                let location_id = unsafe { IOHIDDeviceGetLocationID(device) };
-                let hid_device = HidDevice {
-                    device,
-                    location_id,
-                };
-
-                if hid_device.is_karabiner_virtual_keyboard() {
-                    result = Some(hid_device);
-                    break;
-                }
-            }
-
-            unsafe { CFRelease(iterator as *const _) };
+        // `CFSetApplyFunction` has no early exit, so the applier stops
+        // recording once a match has been found.
+        unsafe {
+            CFSetApplyFunction(
+                device_set,
+                find_karabiner_applier,
+                &mut result as *mut Option<HidDevice> as *mut c_void,
+            );
         }
 
         // Release the CFSet.
@@ -1631,6 +1598,56 @@ impl Drop for HidDeviceManager {
                 IOHIDManagerClose(self.manager, kIOHIDOptionsTypeNone);
             }
         }
+    }
+}
+
+/// `CFSetApplyFunction` applier for [`HidDeviceManager::scan_devices`].
+///
+/// Collects every matched device into the `Vec<HidDevice>` passed as the
+/// context, skipping the Karabiner DriverKit virtual keyboard: it matches
+/// the generic keyboard matcher, and seizing our own output device would
+/// create an infinite remap loop.
+unsafe extern "C" fn scan_devices_applier(
+    value: *const c_void,
+    info: *mut c_void,
+) {
+    let devices = unsafe { &mut *(info as *mut Vec<HidDevice>) };
+    let device = value as *mut IOHIDDevice;
+
+    let hid_device = HidDevice { device };
+
+    if hid_device.is_karabiner_virtual_keyboard() {
+        println!(
+            "IOKit HID: skipping Karabiner virtual keyboard at location {}",
+            hid_device.location_id_string()
+        );
+        return;
+    }
+
+    devices.push(hid_device);
+}
+
+/// `CFSetApplyFunction` applier for
+/// [`HidDeviceManager::find_karabiner_virtual_keyboard`].
+///
+/// Records the first device that identifies as the Karabiner DriverKit
+/// virtual keyboard in the `Option<HidDevice>` passed as the context.
+unsafe extern "C" fn find_karabiner_applier(
+    value: *const c_void,
+    info: *mut c_void,
+) {
+    let result = unsafe { &mut *(info as *mut Option<HidDevice>) };
+
+    // A match was already found; nothing left to do.
+    if result.is_some() {
+        return;
+    }
+
+    let device = value as *mut IOHIDDevice;
+    let hid_device = HidDevice { device };
+
+    if hid_device.is_karabiner_virtual_keyboard() {
+        *result = Some(hid_device);
     }
 }
 
