@@ -173,7 +173,16 @@ pub fn run(output_path: PathBuf) {
         super::windows::run(&output_path);
     }
 
-    #[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+    #[cfg(target_os = "macos")]
+    {
+        super::macos::run(&output_path);
+    }
+
+    #[cfg(all(
+        not(target_os = "linux"),
+        not(target_os = "windows"),
+        not(target_os = "macos")
+    ))]
     {
         use crate::util::monitor::register_signal_handlers;
 

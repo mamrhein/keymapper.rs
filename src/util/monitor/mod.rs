@@ -22,6 +22,8 @@ use crate::common::hid_usage::HidUsage;
 pub mod app;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 pub mod writer;

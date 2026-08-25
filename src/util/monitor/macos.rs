@@ -1,0 +1,166 @@
+// ---------------------------------------------------------------------------
+// Copyright:   (c) 2026 ff. Michael Amrhein (michael@adrhinum.de)
+// License:     This program is part of a larger application. For license
+//              details please read the file LICENSE.TXT provided together
+//              with the application.
+// ---------------------------------------------------------------------------
+// $Source$
+// $Revision$
+
+//! macOS IOKit-seizure backend for the keyboard monitor.
+//!
+//! Instead of a focused egui window — whose capture depends on the window
+//! server keeping keyboard focus on it, and which is therefore brittle and
+//! steals focus from the user on an interactive session — the macOS monitor
+//! seizes the daemon's own Karabiner DriverKit virtual keyboard and logs the
+//! raw HID events it emits.  This is the true analogue of the Linux uinput
+//! grab: it is deterministic, needs no window or keyboard focus, and is
+//! headless friendly.  Seizing the virtual keyboard also guarantees the
+//! daemon's output never leaks into the compositor or any focused window.
+
+use std::{
+    collections::HashSet,
+    ffi::c_void,
+    path::Path,
+    sync::atomic::Ordering,
+    thread,
+    time::{Duration, Instant},
+};
+
+use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+
+use super::{OutputEvent, register_signal_handlers, writer::EventWriter};
+use crate::{
+    common::hid_usage::HidUsage,
+    platform::{HidDevice, HidDeviceManager, IOHIDQueue, for_each_hid_value},
+};
+
+/// Interval between polls while waiting for the virtual keyboard.
+const VIRTUAL_KEYBOARD_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How long to wait for the virtual keyboard to appear.
+const VIRTUAL_KEYBOARD_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Context passed to the monitor's queue value callback.
+struct MonitorContext {
+    /// File writer for captured events.
+    writer: EventWriter,
+    /// Combined usage codes of keys currently down, for repeat suppression.
+    pressed: HashSet<u32>,
+}
+
+/// FFI callback invoked by IOHIDQueue for every HID value event.
+///
+/// Logs each keyboard/consumer key as `down <Key>` / `up <Key>`, mapping the
+/// raw HID usage to a `HidUsage` via its combined code.  Repeats (a key-down
+/// for a key already down, or a key-up for a key not down) are suppressed so
+/// the log matches the daemon's emission one-for-one.
+unsafe extern "C" fn monitor_value_callback(
+    user_info: *mut c_void,
+    _queue: *mut IOHIDQueue,
+    _unused: u32,
+    values: *mut c_void, // CFArrayRef of IOHIDValueRef
+) {
+    if user_info.is_null() || values.is_null() {
+        return;
+    }
+
+    let context = unsafe { &mut *(user_info as *mut MonitorContext) };
+
+    for_each_hid_value(values, |usage_code, is_down| {
+        let Some(key) = HidUsage::from_code(usage_code) else {
+            return;
+        };
+
+        // Suppress repeats so the log matches the daemon's emission.
+        if is_down {
+            if !context.pressed.insert(usage_code) {
+                return;
+            }
+        } else if !context.pressed.remove(&usage_code) {
+            return;
+        }
+
+        let _ = context.writer.write(OutputEvent { down: is_down, key });
+    });
+}
+
+/// Wait until the Karabiner virtual keyboard appears, then return it.
+///
+/// The virtual keyboard is created by the Karabiner DriverKit daemon and may
+/// take a moment to load into IOKit on a fresh runner, so it is polled until
+/// it appears or the timeout elapses.
+fn wait_for_virtual_keyboard(manager: &HidDeviceManager) -> HidDevice {
+    let deadline = Instant::now() + VIRTUAL_KEYBOARD_WAIT_TIMEOUT;
+
+    loop {
+        if let Some(device) = manager.find_karabiner_virtual_keyboard() {
+            return device;
+        }
+
+        if Instant::now() >= deadline {
+            panic!(
+                "the Karabiner virtual keyboard did not appear within {} ms; \
+                 is the DriverKit driver loaded?",
+                VIRTUAL_KEYBOARD_WAIT_TIMEOUT.as_millis()
+            );
+        }
+
+        thread::sleep(VIRTUAL_KEYBOARD_POLL_INTERVAL);
+    }
+}
+
+/// Entry point for the macOS IOKit-seizure monitor.
+///
+/// Seizes the daemon's Karabiner DriverKit virtual keyboard and logs every key
+/// event it emits to the output file until SIGTERM/SIGINT.  Because the device
+/// is seized, only this process receives its events, so the daemon's output
+/// never leaks into the compositor or any focused window.
+pub fn run(output_path: &Path) {
+    let writer = EventWriter::new(output_path)
+        .expect("failed to open output file for event logging");
+    let shutdown = register_signal_handlers();
+
+    // Discover keyboards and wait for the virtual keyboard to appear.
+    let manager = HidDeviceManager::new_keyboard_matcher()
+        .expect("failed to create IOHIDManager");
+    let device = wait_for_virtual_keyboard(&manager);
+
+    eprintln!(
+        "monitor: seizing Karabiner virtual keyboard at {}",
+        device.location_id_string()
+    );
+
+    // Seize the device for exclusive input capture.
+    device
+        .open(true)
+        .expect("failed to seize the Karabiner virtual keyboard");
+
+    // Create a queue and register the logging callback.
+    let queue = device
+        .create_queue()
+        .expect("failed to create IOHIDQueue for the virtual keyboard");
+    let context = MonitorContext {
+        writer,
+        pressed: HashSet::new(),
+    };
+    let _handle =
+        queue.register_value_callback_generic(monitor_value_callback, context);
+
+    // Schedule and open the queue so events are delivered.
+    queue.schedule_with_runloop();
+    queue
+        .open()
+        .expect("failed to open IOHIDQueue for the virtual keyboard");
+
+    eprintln!("monitor: capturing daemon-emitted keys via IOKit seizure");
+
+    // Poll the run loop until a shutdown signal is received.  The queue
+    // callbacks fire on this run loop; the 0.5s timeout keeps the shutdown
+    // check responsive.
+    while !shutdown.load(Ordering::Relaxed) {
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
+    }
+
+    // Cleanup happens via Drop: the queue handle closes the queue and frees
+    // the context.  The seized device is released when the process exits.
+}

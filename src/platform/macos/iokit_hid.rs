@@ -999,29 +999,51 @@ pub struct HidQueue {
     queue: *mut IOHIDQueue,
 }
 
+/// Signature of an `IOHIDQueue` value-available callback.
+pub type HidValueCallback = unsafe extern "C" fn(
+    user_info: *mut c_void,
+    queue: *mut IOHIDQueue,
+    unused: u32,
+    values: *mut c_void, // CFArrayRef of IOHIDValueRef
+);
+
 impl HidQueue {
-    /// Register a callback for HID value events.
+    /// Register the daemon's remapping callback with a `HidQueueContext`.
     ///
-    /// The context will be leaked and freed when the queue is dropped.  This
-    /// is safe because the queue outlives the context in normal operation, and
-    /// we free it explicitly on drop.
+    /// The context is boxed and passed to the callback as `user_info`; it is
+    /// freed when the returned handle is dropped.
     pub fn register_value_callback(
         &self,
         context: HidQueueContext,
-    ) -> HidQueueHandle {
+    ) -> HidQueueHandle<HidQueueContext> {
+        self.register_value_callback_generic(hid_queue_value_callback, context)
+    }
+
+    /// Register an arbitrary value-available callback with a caller-provided
+    /// context.
+    ///
+    /// The context is boxed and passed to the callback as `user_info`; it is
+    /// freed when the returned handle is dropped.  This lets callers (e.g. the
+    /// e2e monitor) register their own logging callback instead of the
+    /// daemon's remapping one.
+    pub fn register_value_callback_generic<T>(
+        &self,
+        callback: HidValueCallback,
+        context: T,
+    ) -> HidQueueHandle<T> {
         let context_ptr = Box::into_raw(Box::new(context));
 
         unsafe {
             IOHIDQueueRegisterValueAvailableCallback(
                 self.queue,
-                Some(hid_queue_value_callback),
+                Some(callback),
                 context_ptr as *mut c_void,
             );
         }
 
         HidQueueHandle {
             queue: self.queue,
-            context_ptr: context_ptr as *mut c_void,
+            context_ptr,
         }
     }
 
@@ -1192,6 +1214,48 @@ unsafe extern "C" fn hid_queue_value_callback(
     }
 }
 
+/// Iterate the values in a CFArray of `IOHIDValueRef` and invoke `f` for each
+/// recognized keyboard/consumer key event, passing the combined HID usage code
+/// (`(page << 16) | id`) and whether the key is down.
+///
+/// Non-keyboard/consumer values are skipped.  Used by the e2e monitor's
+/// logging callback to extract key events from the seized virtual keyboard.
+pub fn for_each_hid_value(values: *mut c_void, mut f: impl FnMut(u32, bool)) {
+    if values.is_null() {
+        return;
+    }
+
+    let count = unsafe { CFArrayGetCount(values as *const c_void) };
+
+    for i in 0..count {
+        let value_ref = unsafe {
+            CFArrayGetValueAtIndex(values as *const c_void, i)
+                as *mut IOHIDValue
+        };
+
+        if value_ref.is_null() {
+            continue;
+        }
+
+        let element = unsafe { IOHIDValueGetElement(value_ref) };
+        if element.is_null() {
+            continue;
+        }
+
+        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
+        if usage_page != HID_USAGE_PAGE_KEYBOARD
+            && usage_page != HID_USAGE_PAGE_CONSUMER
+        {
+            continue;
+        }
+
+        let usage = unsafe { IOHIDElementGetUsage(element) };
+        let raw_value = unsafe { IOHIDValueGetInteger(value_ref) };
+
+        f((usage_page << 16) | usage, raw_value != 0);
+    }
+}
+
 /// Emit a single `NativeKey` through the Karabiner virtual keyboard.
 ///
 /// Posts a report with the modifier and base key pressed, followed by a
@@ -1295,16 +1359,23 @@ fn post_forwarded_state(
 }
 
 /// Handle that keeps a queue and its context alive, and cleans up on drop.
-pub struct HidQueueHandle {
+///
+/// Generic over the context type `T` so callers can register their own
+/// callback with their own context (see
+/// [`HidQueue::register_value_callback_generic`]).  The context is freed on
+/// drop.
+pub struct HidQueueHandle<T> {
     queue: *mut IOHIDQueue,
-    context_ptr: *mut c_void,
+    context_ptr: *mut T,
 }
 
-impl Drop for HidQueueHandle {
+impl<T> Drop for HidQueueHandle<T> {
     fn drop(&mut self) {
         unsafe {
             IOHIDQueueClose(self.queue, kIOHIDOptionsTypeNone);
-            drop(Box::from_raw(self.context_ptr as *mut HidQueueContext));
+            if !self.context_ptr.is_null() {
+                drop(Box::from_raw(self.context_ptr));
+            }
         }
     }
 }
@@ -1464,6 +1535,51 @@ impl HidDeviceManager {
         devices
     }
 
+    /// Find the Karabiner DriverKit virtual keyboard among the matched
+    /// devices, if it is currently connected.
+    ///
+    /// Unlike [`Self::scan_devices`], which skips the virtual keyboard (to
+    /// prevent a remap feedback loop), this returns it — the e2e monitor
+    /// seizes it to capture the daemon's output.
+    pub fn find_karabiner_virtual_keyboard(&self) -> Option<HidDevice> {
+        let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
+
+        if device_set.is_null() {
+            return None;
+        }
+
+        let mut result = None;
+
+        let mut iterator: *mut c_void = ptr::null_mut();
+        if unsafe { CFSetCreateIterator(device_set, &mut iterator) } {
+            loop {
+                let device_ptr = unsafe { CFSetIteratorGetNext(iterator) };
+                if device_ptr.is_null() {
+                    break;
+                }
+
+                let device = device_ptr as *mut IOHIDDevice;
+                let location_id = unsafe { IOHIDDeviceGetLocationID(device) };
+                let hid_device = HidDevice {
+                    device,
+                    location_id,
+                };
+
+                if hid_device.is_karabiner_virtual_keyboard() {
+                    result = Some(hid_device);
+                    break;
+                }
+            }
+
+            unsafe { CFRelease(iterator as *const _) };
+        }
+
+        // Release the CFSet.
+        unsafe { CFRelease(device_set as *const _) };
+
+        result
+    }
+
     // Schedule the manager with the current run loop for hotplug support.
     pub fn schedule_with_runloop(&self) {
         let run_loop = CFRunLoop::current()
@@ -1529,7 +1645,7 @@ fn create_cf_string(s: &str) -> CFStringRef {
 pub struct SeizureHandle {
     _manager: HidDeviceManager,
     _devices: Vec<HidDevice>,
-    _queue_handles: Vec<HidQueueHandle>,
+    _queue_handles: Vec<HidQueueHandle<HidQueueContext>>,
 }
 
 // ---------------------------------------------------------------------------

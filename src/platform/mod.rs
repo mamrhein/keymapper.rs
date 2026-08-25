@@ -28,7 +28,11 @@ pub use linux::{discover_and_open_keyboards, list_keyboards, start_mapping};
 #[cfg(target_os = "macos")]
 pub(crate) use macos::get_active_app_name;
 #[cfg(target_os = "macos")]
-pub use macos::{KarabinerClient, list_keyboards, start_mapping};
+pub use macos::{
+    HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
+    IOHIDQueue, KarabinerClient, for_each_hid_value, list_keyboards,
+    start_mapping,
+};
 #[cfg(target_os = "windows")]
 pub use windows::CAPTURE_TAG;
 #[cfg(target_os = "windows")]

@@ -14,6 +14,10 @@ mod keyboard;
 mod mapping;
 
 pub(crate) use active_app::get_active_app_name;
+pub use iokit_hid::{
+    HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
+    IOHIDQueue, for_each_hid_value,
+};
 pub use karabiner_client::KarabinerClient;
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;
