@@ -23,7 +23,6 @@ use std::{
     ffi::c_void,
     path::Path,
     sync::atomic::Ordering,
-    thread,
     time::{Duration, Instant},
 };
 
@@ -35,8 +34,6 @@ use crate::{
     platform::{HidDevice, HidDeviceManager, IOHIDQueue, for_each_hid_value},
 };
 
-/// Interval between polls while waiting for the virtual keyboard.
-const VIRTUAL_KEYBOARD_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// How long to wait for the virtual keyboard to appear.
 const VIRTUAL_KEYBOARD_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -48,40 +45,44 @@ struct MonitorContext {
     pressed: HashSet<u32>,
 }
 
-/// FFI callback invoked by IOHIDQueue for every HID value event.
+/// FFI callback invoked by IOHIDQueue when values are available.
 ///
-/// Logs each keyboard/consumer key as `down <Key>` / `up <Key>`, mapping the
-/// raw HID usage to a `HidUsage` via its combined code.  Repeats (a key-down
-/// for a key already down, or a key-up for a key not down) are suppressed so
-/// the log matches the daemon's emission one-for-one.
+/// Matches the C `IOHIDCallback` signature: `(void *context, IOReturn
+/// result, void *sender)`, where `sender` is the queue.  Values are drained
+/// from the queue by `for_each_hid_value`.  Logs each keyboard/consumer key
+/// as `down <Key>` / `up <Key>`, mapping the raw HID usage to a `HidUsage`
+/// via its combined code.  Repeats (a key-down for a key already down, or a
+/// key-up for a key not down) are suppressed so the log matches the daemon's
+/// emission one-for-one.
 unsafe extern "C" fn monitor_value_callback(
     user_info: *mut c_void,
-    _queue: *mut IOHIDQueue,
-    _unused: u32,
-    values: *mut c_void, // CFArrayRef of IOHIDValueRef
+    _result: i32,
+    queue: *mut IOHIDQueue,
 ) {
-    if user_info.is_null() || values.is_null() {
+    if user_info.is_null() || queue.is_null() {
         return;
     }
 
     let context = unsafe { &mut *(user_info as *mut MonitorContext) };
 
-    for_each_hid_value(values, |usage_code, is_down| {
-        let Some(key) = HidUsage::from_code(usage_code) else {
-            return;
-        };
+    unsafe {
+        for_each_hid_value(queue, |usage_code, is_down| {
+            let Some(key) = HidUsage::from_code(usage_code) else {
+                return;
+            };
 
-        // Suppress repeats so the log matches the daemon's emission.
-        if is_down {
-            if !context.pressed.insert(usage_code) {
+            // Suppress repeats so the log matches the daemon's emission.
+            if is_down {
+                if !context.pressed.insert(usage_code) {
+                    return;
+                }
+            } else if !context.pressed.remove(&usage_code) {
                 return;
             }
-        } else if !context.pressed.remove(&usage_code) {
-            return;
-        }
 
-        let _ = context.writer.write(OutputEvent { down: is_down, key });
-    });
+            let _ = context.writer.write(OutputEvent { down: is_down, key });
+        });
+    }
 }
 
 /// Wait until the Karabiner virtual keyboard appears, then return it.
@@ -89,9 +90,19 @@ unsafe extern "C" fn monitor_value_callback(
 /// The virtual keyboard is created by the Karabiner DriverKit daemon and may
 /// take a moment to load into IOKit on a fresh runner, so it is polled until
 /// it appears or the timeout elapses.
+///
+/// The manager is scheduled with the current run loop and that run loop is
+/// pumped while waiting: `IOHIDManagerCopyDevices` only reflects devices the
+/// manager has been notified about, and those hotplug notifications are
+/// delivered through the run loop.  The virtual keyboard appears *after* the
+/// monitor's manager is created (the daemon starts later), so without pumping
+/// the run loop the manager would never learn about it.
 fn wait_for_virtual_keyboard(manager: &HidDeviceManager) -> HidDevice {
     let deadline = Instant::now() + VIRTUAL_KEYBOARD_WAIT_TIMEOUT;
 
+    manager.schedule_with_runloop();
+
+    let mut last_log = Instant::now();
     loop {
         if let Some(device) = manager.find_karabiner_virtual_keyboard() {
             return device;
@@ -105,7 +116,21 @@ fn wait_for_virtual_keyboard(manager: &HidDeviceManager) -> HidDevice {
             );
         }
 
-        thread::sleep(VIRTUAL_KEYBOARD_POLL_INTERVAL);
+        // Pump the run loop so hotplug notifications are processed; a short
+        // timeout keeps the deadline check responsive.
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.1, true);
+
+        // Log progress once per second so a stuck wait is diagnosable: the
+        // count includes the virtual keyboard, so it should rise by one when
+        // the device appears.
+        if last_log.elapsed() >= Duration::from_secs(1) {
+            last_log = Instant::now();
+            eprintln!(
+                "monitor: still waiting for the Karabiner virtual keyboard; \
+                 {} device(s) currently matched",
+                manager.matched_device_count()
+            );
+        }
     }
 }
 

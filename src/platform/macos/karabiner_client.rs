@@ -104,15 +104,31 @@ const KEYBOARD_REPORT_SIZE: usize = 67;
 /// Maximum number of simultaneous keys in a `keyboard_input` report.
 const KEYBOARD_MAX_KEYS: usize = 32;
 
-/// Size of the packed `consumer_input` report: report ID (1), press usage
-/// (2, little-endian), release usage (2, little-endian).
-const CONSUMER_REPORT_SIZE: usize = 5;
+/// Size of the packed `consumer_input` report: report ID (1) and 32 ×
+/// 2-byte little-endian usage slots (the same `keys` array as the keyboard
+/// report).  The driver validates this exact size, so a shorter buffer is
+/// rejected with a "buffer size error".
+const CONSUMER_REPORT_SIZE: usize = 65;
 
 /// Report ID of the `keyboard_input` report.
 const KEYBOARD_REPORT_ID: u8 = 1;
 
 /// Report ID of the `consumer_input` report.
 const CONSUMER_REPORT_ID: u8 = 2;
+
+/// HID vendor ID of the Karabiner DriverKit virtual keyboard.
+const KARABINER_KEYBOARD_VENDOR_ID: u64 = 0x16c0;
+
+/// HID product ID of the Karabiner DriverKit virtual keyboard.
+const KARABINER_KEYBOARD_PRODUCT_ID: u64 = 0x27db;
+
+/// HID country code of the Karabiner DriverKit virtual keyboard
+/// (`not_supported`).
+const KARABINER_KEYBOARD_COUNTRY_CODE: u64 = 0;
+
+/// Size of the `virtual_hid_keyboard_parameters` struct: three 8-byte
+/// little-endian fields (vendor ID, product ID, country code).
+const KEYBOARD_PARAMETERS_SIZE: usize = 24;
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -216,6 +232,23 @@ fn build_request_payload(request_type: u8, report: &[u8]) -> Vec<u8> {
     payload
 }
 
+/// Build the 24-byte `virtual_hid_keyboard_parameters` payload required by
+/// the `virtual_hid_keyboard_initialize` request.
+///
+/// Layout: `[vendor_id: u64 LE][product_id: u64 LE][country_code: u64 LE]`.
+/// The daemon rejects the request with a "buffer size error" unless this
+/// payload is exactly `KEYBOARD_PARAMETERS_SIZE` bytes, so the virtual
+/// keyboard never becomes ready without it.
+fn build_keyboard_parameters() -> [u8; KEYBOARD_PARAMETERS_SIZE] {
+    let mut params = [0u8; KEYBOARD_PARAMETERS_SIZE];
+    params[0..8].copy_from_slice(&KARABINER_KEYBOARD_VENDOR_ID.to_le_bytes());
+    params[8..16]
+        .copy_from_slice(&KARABINER_KEYBOARD_PRODUCT_ID.to_le_bytes());
+    params[16..24]
+        .copy_from_slice(&KARABINER_KEYBOARD_COUNTRY_CODE.to_le_bytes());
+    params
+}
+
 // ---------------------------------------------------------------------------
 // Report construction
 // ---------------------------------------------------------------------------
@@ -239,8 +272,8 @@ fn build_keyboard_input_report(
     report
 }
 
-/// Build a 5-byte `consumer_input` report with the given Consumer Page
-/// usage in the press field.
+/// Build a `consumer_input` report with the given Consumer Page usage in
+/// the first slot of the keys array (the press field).
 fn build_consumer_input_report(usage: u16) -> [u8; CONSUMER_REPORT_SIZE] {
     let mut report = [0u8; CONSUMER_REPORT_SIZE];
     report[0] = CONSUMER_REPORT_ID;
@@ -251,7 +284,9 @@ fn build_consumer_input_report(usage: u16) -> [u8; CONSUMER_REPORT_SIZE] {
 /// Build an all-clear `consumer_input` report that releases any held
 /// consumer key.
 fn build_consumer_release_report() -> [u8; CONSUMER_REPORT_SIZE] {
-    [CONSUMER_REPORT_ID, 0, 0, 0, 0]
+    let mut report = [0u8; CONSUMER_REPORT_SIZE];
+    report[0] = CONSUMER_REPORT_ID;
+    report
 }
 
 // ---------------------------------------------------------------------------
@@ -438,7 +473,7 @@ fn run_connection(
         &mut stream,
         &mut next_request_id,
         REQ_KEYBOARD_INITIALIZE,
-        &[],
+        &build_keyboard_parameters(),
     )?;
 
     let mut last_heartbeat = Instant::now();
@@ -605,14 +640,23 @@ mod tests {
 
     use super::*;
 
-    /// The exact `virtual_hid_keyboard_initialize` frame captured on the
-    /// wire in Phase 0 (`.sketches/phase0-spike/build/wire-capture-1.log`).
-    const CAPTURED_INITIALIZE_FRAME: [u8; 16] = [
-        0x00, 0x00, 0x00, 0x0c, // body size = 12
+    /// The expected `virtual_hid_keyboard_initialize` frame.  The Phase-0
+    /// wire capture omitted the 24-byte `virtual_hid_keyboard_parameters`
+    /// payload, which service 8.2.0 rejects with a "buffer size error"; this
+    /// is the corrected layout with vendor ID `0x16c0`, product ID `0x27db`,
+    /// and country code `0`.
+    const EXPECTED_INITIALIZE_FRAME: [u8; 40] = [
+        0x00, 0x00, 0x00, 0x24, // body size = 36
         0x04, // request
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // request ID = 1
         0x07, 0x00, // protocol version 7 (LE)
         0x00, // virtual_hid_keyboard_initialize
+        0xc0, 0x16, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // vendor ID 0x16c0 (LE)
+        0xdb, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // product ID 0x27db (LE)
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // country code 0 (LE)
     ];
 
     /// The exact `post_keyboard_input_report` frame captured on the wire in
@@ -653,12 +697,22 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_initialize_frame_matches_capture() {
-        let payload = build_request_payload(REQ_KEYBOARD_INITIALIZE, &[]);
+    fn test_encode_initialize_frame_matches_expected() {
+        let payload = build_request_payload(
+            REQ_KEYBOARD_INITIALIZE,
+            &build_keyboard_parameters(),
+        );
         assert_eq!(
             encode_id_frame(MSG_REQUEST, 1, &payload),
-            CAPTURED_INITIALIZE_FRAME
+            EXPECTED_INITIALIZE_FRAME
         );
+    }
+
+    #[test]
+    fn test_keyboard_parameters_size() {
+        // The daemon requires exactly 24 bytes after the protocol version
+        // and request type, or it rejects the initialize request.
+        assert_eq!(build_keyboard_parameters().len(), 24);
     }
 
     #[test]
@@ -746,23 +800,25 @@ mod tests {
 
     #[test]
     fn test_build_consumer_input_report() {
-        assert_eq!(
-            build_consumer_input_report(0xCD),
-            [2, 0xCD, 0x00, 0x00, 0x00]
-        );
+        let mut expected = [0u8; CONSUMER_REPORT_SIZE];
+        expected[0] = CONSUMER_REPORT_ID;
+        expected[1..3].copy_from_slice(&0xCDu16.to_le_bytes());
+        assert_eq!(build_consumer_input_report(0xCD), expected);
     }
 
     #[test]
     fn test_build_consumer_input_report_high_usage() {
-        assert_eq!(
-            build_consumer_input_report(0x1234),
-            [2, 0x34, 0x12, 0x00, 0x00]
-        );
+        let mut expected = [0u8; CONSUMER_REPORT_SIZE];
+        expected[0] = CONSUMER_REPORT_ID;
+        expected[1..3].copy_from_slice(&0x1234u16.to_le_bytes());
+        assert_eq!(build_consumer_input_report(0x1234), expected);
     }
 
     #[test]
     fn test_build_consumer_release_report() {
-        assert_eq!(build_consumer_release_report(), [2, 0, 0, 0, 0]);
+        let mut expected = [0u8; CONSUMER_REPORT_SIZE];
+        expected[0] = CONSUMER_REPORT_ID;
+        assert_eq!(build_consumer_release_report(), expected);
     }
 
     /// Run the connection loop against a mock daemon on the other end of a
@@ -833,7 +889,8 @@ mod tests {
         assert_eq!(report[1], 0x02); // left shift
         assert_eq!(&report[3..5], &[0x0E, 0x00]); // 'e' in the first slot
 
-        // 4. A consumer press is framed with the 5-byte consumer_input report.
+        // 4. A consumer press is framed with the 65-byte consumer_input report
+        //    (report ID + 32 usage slots).
         tx.send(ClientCommand::ConsumerPress { usage: 0xCD })
             .unwrap();
 
@@ -845,10 +902,11 @@ mod tests {
             &payload[..3],
             &[0x07, 0x00, REQ_POST_CONSUMER_INPUT_REPORT]
         );
-        assert_eq!(
-            &payload[3..],
-            &[CONSUMER_REPORT_ID, 0xCD, 0x00, 0x00, 0x00]
-        );
+        let report = &payload[3..];
+        assert_eq!(report.len(), CONSUMER_REPORT_SIZE);
+        assert_eq!(report[0], CONSUMER_REPORT_ID);
+        assert_eq!(&report[1..3], &0xCDu16.to_le_bytes());
+        assert!(report[3..].iter().all(|&b| b == 0));
 
         // 5. Closing the daemon end terminates the connection loop.
         drop(daemon_stream);

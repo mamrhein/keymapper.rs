@@ -30,8 +30,12 @@ use std::{
 };
 
 use objc2_core_foundation::{
-    CFIndex, CFRunLoop, CFString, CFStringBuiltInEncodings,
-    kCFRunLoopDefaultMode,
+    CFIndex, CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, CFString,
+    CFStringBuiltInEncodings, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+};
+use objc2_core_graphics::{
+    CGEvent, CGEventField, CGEventTapLocation, CGEventTapOptions,
+    CGEventTapPlacement, CGEventType, CGKeyCode,
 };
 
 use crate::common::hid_usage::{HidUsage, PAGE_CONSUMER};
@@ -285,13 +289,14 @@ type FnIOHIDQueueRegisterValueAvailableCallback = unsafe extern "C" fn(
     Option<
         unsafe extern "C" fn(
             *mut c_void,
-            *mut IOHIDQueue,
-            u32,
-            *mut c_void, // CFArrayRef of IOHIDValueRef
+            i32,             // IOReturn
+            *mut IOHIDQueue, // sender: the queue itself
         ),
     >,
     *mut c_void,
 );
+type FnIOHIDQueueCopyNextValue =
+    unsafe extern "C" fn(*mut IOHIDQueue) -> *mut IOHIDValue;
 type FnIOHIDQueueScheduleWithRunLoop = unsafe extern "C" fn(
     *mut IOHIDQueue,
     *mut c_void, // CFRunLoopRef
@@ -350,6 +355,7 @@ struct IoKitFunctions {
     queue_stop: FnIOHIDQueueStop,
     queue_register_callback: FnIOHIDQueueRegisterValueAvailableCallback,
     queue_schedule_with_runloop: FnIOHIDQueueScheduleWithRunLoop,
+    queue_copy_next_value: FnIOHIDQueueCopyNextValue,
     value_get_integer_value: FnIOHIDValueGetIntegerValue,
     value_get_element: FnIOHIDValueGetElement,
     element_get_usage_page: FnIOHIDElementGetUsagePage,
@@ -491,6 +497,11 @@ impl IoKitFunctions {
                 handle,
                 b"IOHIDQueueScheduleWithRunLoop\0",
                 FnIOHIDQueueScheduleWithRunLoop
+            )?,
+            queue_copy_next_value: resolve_sym!(
+                handle,
+                b"IOHIDQueueCopyNextValue\0",
+                FnIOHIDQueueCopyNextValue
             )?,
             value_get_integer_value: resolve_sym!(
                 handle,
@@ -668,9 +679,8 @@ unsafe fn IOHIDQueueRegisterValueAvailableCallback(
     callout: Option<
         unsafe extern "C" fn(
             *mut c_void,
-            *mut IOHIDQueue,
-            u32,
-            *mut c_void, // CFArrayRef of IOHIDValueRef
+            i32,             // IOReturn
+            *mut IOHIDQueue, // sender: the queue itself
         ),
     >,
     context: *mut c_void,
@@ -692,6 +702,14 @@ unsafe fn IOHIDQueueScheduleWithRunLoop(
             queue, run_loop, mode,
         )
     }
+}
+
+unsafe fn IOHIDQueueCopyNextValue(
+    queue: *mut IOHIDQueue,
+) -> Option<*mut IOHIDValue> {
+    let value =
+        unsafe { (IoKitFunctions::get().queue_copy_next_value)(queue) };
+    (!value.is_null()).then_some(value)
 }
 
 unsafe fn IOHIDQueueStart(queue: *mut IOHIDQueue) {
@@ -1034,11 +1052,15 @@ pub struct HidQueue {
 }
 
 /// Signature of an `IOHIDQueue` value-available callback.
+///
+/// Matches the C `IOHIDCallback` type: `(void *context, IOReturn result,
+/// void *sender)`, where `sender` is the queue itself.  The values are not
+/// passed in; the callback must drain the queue via `IOHIDQueueCopyNextValue`
+/// (non-blocking) until it returns NULL.
 pub type HidValueCallback = unsafe extern "C" fn(
     user_info: *mut c_void,
+    result: i32,
     queue: *mut IOHIDQueue,
-    unused: u32,
-    values: *mut c_void, // CFArrayRef of IOHIDValueRef
 );
 
 impl HidQueue {
@@ -1088,10 +1110,13 @@ impl HidQueue {
         let mode_ref = unsafe { kCFRunLoopDefaultMode }
             .expect("kCFRunLoopDefaultMode is always available");
 
+        // `CFRetained` is a smart pointer; the FFI call needs the underlying
+        // CF object pointer, not the address of the wrapper.  Passing the
+        // wrapper's address makes `CFRunLoopAddSource` fail its PAC check.
         unsafe {
             IOHIDQueueScheduleWithRunLoop(
                 self.queue,
-                &run_loop as *const _ as *mut c_void,
+                &*run_loop as *const _ as *mut c_void,
                 mode_ref as *const _ as *mut c_void,
             );
         }
@@ -1105,189 +1130,206 @@ impl HidQueue {
     }
 }
 
-/// FFI callback invoked by IOHIDQueue for every HID value event.
+/// FFI callback invoked by IOHIDQueue when values are available.
 ///
-/// Each `values` argument is a CFArray of `IOHIDValueRef` pointers.  We
-/// iterate the array and extract usage page, usage code, and value from
-/// each element.  Only key-down events are processed for remapping;
-/// key-up and unmapped keys pass through naturally via the seized device.
+/// Matches the C `IOHIDCallback` signature: `(void *context, IOReturn
+/// result, void *sender)`, where `sender` is the queue.  The values are not
+/// passed in; they must be drained from the queue with
+/// `IOHIDQueueCopyNextValue` (non-blocking) until it returns NULL.  Each
+/// returned value is a retained copy and must be released after processing.
 unsafe extern "C" fn hid_queue_value_callback(
     user_info: *mut c_void,
-    _queue: *mut IOHIDQueue,
-    _unused: u32,
-    values: *mut c_void, // CFArrayRef of IOHIDValueRef
+    _result: i32,
+    queue: *mut IOHIDQueue,
 ) {
-    if user_info.is_null() || values.is_null() {
+    if user_info.is_null() || queue.is_null() {
         return;
     }
 
     let context = unsafe { &mut *(user_info as *mut HidQueueContext) };
 
-    // Iterate the CFArray of values.
-    let count = unsafe { CFArrayGetCount(values as *const c_void) };
-
-    for i in 0..count {
-        let value_ref = unsafe {
-            CFArrayGetValueAtIndex(values as *const c_void, i)
-                as *mut IOHIDValue
-        };
-
-        if value_ref.is_null() {
-            continue;
-        }
-
-        // Get the element that produced this value.
-        let element = unsafe { IOHIDValueGetElement(value_ref) };
-        if element.is_null() {
-            continue;
-        }
-
-        // Extract usage page and usage code.
-        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
-        let usage = unsafe { IOHIDElementGetUsage(element) } as u16;
-
-        // Skip non-keyboard/consumer events.
-        if usage_page != HID_USAGE_PAGE_KEYBOARD
-            && usage_page != HID_USAGE_PAGE_CONSUMER
-        {
-            continue;
-        }
-
-        // Get the value (0 = up, non-zero = down).
-        let raw_value = unsafe { IOHIDValueGetIntegerValue(value_ref) };
-        let is_down = raw_value != 0;
-
-        // Construct HidUsage from raw HID page/id.  Use this for all
-        // modifier tracking, deduplication, and key identification.
-        let Some(hid_usage) =
-            HidUsage::from_code(usage_page << 16 | (usage as u32))
-        else {
-            // Unknown usage — let it pass through.
-            continue;
-        };
-
-        // Track pressed keys for deduplication.  Use the raw HID usage id
-        // (page-specific, unambiguous).
-        let key_id = hid_usage.id();
-
-        if is_down {
-            // Key-down.  Ignore auto-repeat (the key is already tracked).
-            if !context.pressed_keys.insert(key_id) {
-                continue;
-            }
-
-            // Get the device ID for keyboard filtering.
-            let device_id = Some(context.device_id.as_str());
-
-            // Track modifier state using HidUsage directly.  The lookup uses
-            // the state captured before this key's own bit is set, so a bare
-            // modifier trigger does not match itself.
-            let lookup_modifiers = context.modifier_state;
-            if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
-                context.modifier_state |= 1 << bit;
-            }
-
-            // Perform the lookup.  Compiled rules store the trigger as a
-            // `HidUsage`, so the lookup is keyed by the full page-specific
-            // usage.
-            let guard = context.lookup.read();
-            let active_outputs = guard
-                .for_app(
-                    &guard.active_app(),
-                    hid_usage,
-                    lookup_modifiers,
-                    device_id,
-                )
-                .or_else(|| {
-                    guard.global(hid_usage, lookup_modifiers, device_id)
-                })
-                .map(|v| v.to_vec());
-            drop(guard);
-
-            if let Some(outputs) = active_outputs {
-                // Mapped: emit the mapped outputs via the virtual HID
-                // keyboard.  In capture mode, remember the key was mapped so
-                // its release is swallowed.
-                for native_key in &outputs {
-                    emit_hid_report(
-                        &context.conn,
-                        native_key,
-                        &context.forwarded_keys,
-                        context.forwarded_modifiers,
-                    );
-                }
-                if capture_enabled() {
-                    context.mapped_keys.insert(hid_usage.code());
-                }
-            } else if capture_enabled() {
-                // Unmapped (capture mode): forward the key through the
-                // virtual keyboard so the monitor can see it.
-                forward_key_down(context, hid_usage);
-            }
-        } else if capture_enabled() {
-            // Key-up (capture mode only).  Ignore releases for keys that were
-            // never tracked as down.
-            if !context.pressed_keys.remove(&key_id) {
-                continue;
-            }
-
-            // Clear the modifier bit so subsequent forwarded reports carry the
-            // correct modifier state.
-            if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
-                context.modifier_state &= !(1 << bit);
-            }
-
-            // A mapped key's release is swallowed; a forwarded key's release
-            // is forwarded.
-            if !context.mapped_keys.remove(&hid_usage.code()) {
-                forward_key_up(context, hid_usage);
-            }
-        } else {
-            // Non-capture key-up: drop it (existing behaviour).
-            context.pressed_keys.remove(&key_id);
-        }
+    // Drain the queue; each value is a retained copy that must be released.
+    while let Some(value_ref) = unsafe { IOHIDQueueCopyNextValue(queue) } {
+        process_hid_value(context, value_ref);
+        unsafe { CFRelease(value_ref as *const _) };
     }
 }
 
-/// Iterate the values in a CFArray of `IOHIDValueRef` and invoke `f` for each
-/// recognized keyboard/consumer key event, passing the combined HID usage code
-/// (`(page << 16) | id`) and whether the key is down.
+/// Process a single `IOHIDValue` from the seized device's queue.
 ///
-/// Non-keyboard/consumer values are skipped.  Used by the e2e monitor's
-/// logging callback to extract key events from the seized virtual keyboard.
-pub fn for_each_hid_value(values: *mut c_void, mut f: impl FnMut(u32, bool)) {
-    if values.is_null() {
+/// Extracts usage page, usage code, and value from the element that produced
+/// the value, then dispatches to [`process_key_event`].  Only keyboard and
+/// consumer page values are processed; all other values are ignored.
+fn process_hid_value(
+    context: &mut HidQueueContext,
+    value_ref: *mut IOHIDValue,
+) {
+    // Get the element that produced this value.
+    let element = unsafe { IOHIDValueGetElement(value_ref) };
+    if element.is_null() {
         return;
     }
 
-    let count = unsafe { CFArrayGetCount(values as *const c_void) };
+    // Extract usage page and usage code.
+    let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
+    let usage = unsafe { IOHIDElementGetUsage(element) } as u16;
 
-    for i in 0..count {
-        let value_ref = unsafe {
-            CFArrayGetValueAtIndex(values as *const c_void, i)
-                as *mut IOHIDValue
-        };
+    // Skip non-keyboard/consumer events.
+    if usage_page != HID_USAGE_PAGE_KEYBOARD
+        && usage_page != HID_USAGE_PAGE_CONSUMER
+    {
+        return;
+    }
 
-        if value_ref.is_null() {
-            continue;
+    // Get the value (0 = up, non-zero = down).
+    let raw_value = unsafe { IOHIDValueGetIntegerValue(value_ref) };
+    let is_down = raw_value != 0;
+
+    // Construct HidUsage from raw HID page/id.  Use this for all
+    // modifier tracking, deduplication, and key identification.
+    let Some(hid_usage) =
+        HidUsage::from_code(usage_page << 16 | (usage as u32))
+    else {
+        // Unknown usage — let it pass through.
+        return;
+    };
+
+    process_key_event(context, hid_usage, is_down);
+}
+
+/// Process a single key event (down or up) identified by its `HidUsage`.
+///
+/// This is the shared core of the capture logic, invoked both by the IOKit
+/// queue callback (for seized physical keyboards) and by the CGEventTap
+/// callback (for injected events observed in capture mode).  It performs
+/// deduplication, modifier tracking, rule lookup, and emission/forwarding.
+fn process_key_event(
+    context: &mut HidQueueContext,
+    hid_usage: HidUsage,
+    is_down: bool,
+) {
+    // Track pressed keys for deduplication.  Use the raw HID usage id
+    // (page-specific, unambiguous).
+    let key_id = hid_usage.id();
+
+    if is_down {
+        // Key-down.  Ignore auto-repeat (the key is already tracked).
+        if !context.pressed_keys.insert(key_id) {
+            return;
         }
 
+        // Get the device ID for keyboard filtering.
+        let device_id = Some(context.device_id.as_str());
+
+        // Track modifier state using HidUsage directly.  The lookup uses
+        // the state captured before this key's own bit is set, so a bare
+        // modifier trigger does not match itself.
+        let lookup_modifiers = context.modifier_state;
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
+            context.modifier_state |= 1 << bit;
+        }
+
+        // Perform the lookup.  Compiled rules store the trigger as a
+        // `HidUsage`, so the lookup is keyed by the full page-specific
+        // usage.
+        let guard = context.lookup.read();
+        let active_outputs = guard
+            .for_app(
+                &guard.active_app(),
+                hid_usage,
+                lookup_modifiers,
+                device_id,
+            )
+            .or_else(|| guard.global(hid_usage, lookup_modifiers, device_id))
+            .map(|v| v.to_vec());
+        drop(guard);
+
+        if let Some(outputs) = active_outputs {
+            // Mapped: emit the mapped outputs via the virtual HID
+            // keyboard.  In capture mode, remember the key was mapped so
+            // its release is swallowed.
+            for native_key in &outputs {
+                emit_hid_report(
+                    &context.conn,
+                    native_key,
+                    &context.forwarded_keys,
+                    context.forwarded_modifiers,
+                );
+            }
+            if capture_enabled() {
+                context.mapped_keys.insert(hid_usage.code());
+            }
+        } else if capture_enabled() {
+            // Unmapped (capture mode): forward the key through the
+            // virtual keyboard so the monitor can see it.
+            forward_key_down(context, hid_usage);
+        }
+    } else if capture_enabled() {
+        // Key-up (capture mode only).  Ignore releases for keys that were
+        // never tracked as down.
+        if !context.pressed_keys.remove(&key_id) {
+            return;
+        }
+
+        // Clear the modifier bit so subsequent forwarded reports carry the
+        // correct modifier state.
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
+            context.modifier_state &= !(1 << bit);
+        }
+
+        // A mapped key's release is swallowed; a forwarded key's release
+        // is forwarded.
+        if !context.mapped_keys.remove(&hid_usage.code()) {
+            forward_key_up(context, hid_usage);
+        }
+    } else {
+        // Non-capture key-up: drop it (existing behaviour).
+        context.pressed_keys.remove(&key_id);
+    }
+}
+
+/// Drain a queue of `IOHIDValueRef` and invoke `f` for each recognized
+/// keyboard/consumer key event, passing the combined HID usage code
+/// (`(page << 16) | id`) and whether the key is down.
+///
+/// Values are pulled from the queue with `IOHIDQueueCopyNextValue`
+/// (non-blocking) until it returns NULL; each returned value is a retained
+/// copy and is released after processing.  Non-keyboard/consumer values are
+/// skipped.  Used by the e2e monitor's logging callback to extract key
+/// events from the seized virtual keyboard.
+///
+/// # Safety
+///
+/// `queue` must be a valid, open `IOHIDQueue` that outlives the call, and
+/// the callback `f` must not panic (a panic would leak the retained value
+/// currently being processed).
+pub unsafe fn for_each_hid_value(
+    queue: *mut IOHIDQueue,
+    mut f: impl FnMut(u32, bool),
+) {
+    if queue.is_null() {
+        return;
+    }
+
+    while let Some(value_ref) = unsafe { IOHIDQueueCopyNextValue(queue) } {
         let element = unsafe { IOHIDValueGetElement(value_ref) };
-        if element.is_null() {
-            continue;
+
+        if !element.is_null() {
+            let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
+
+            if usage_page == HID_USAGE_PAGE_KEYBOARD
+                || usage_page == HID_USAGE_PAGE_CONSUMER
+            {
+                let usage = unsafe { IOHIDElementGetUsage(element) };
+                let raw_value =
+                    unsafe { IOHIDValueGetIntegerValue(value_ref) };
+
+                f((usage_page << 16) | usage, raw_value != 0);
+            }
         }
 
-        let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
-        if usage_page != HID_USAGE_PAGE_KEYBOARD
-            && usage_page != HID_USAGE_PAGE_CONSUMER
-        {
-            continue;
-        }
-
-        let usage = unsafe { IOHIDElementGetUsage(element) };
-        let raw_value = unsafe { IOHIDValueGetIntegerValue(value_ref) };
-
-        f((usage_page << 16) | usage, raw_value != 0);
+        // Each value is a retained copy; release it after processing.
+        unsafe { CFRelease(value_ref as *const _) };
     }
 }
 
@@ -1540,6 +1582,27 @@ impl HidDeviceManager {
         devices
     }
 
+    /// Return the number of devices currently matched by this manager,
+    /// including the Karabiner DriverKit virtual keyboard (unlike
+    /// [`Self::scan_devices`], which skips it).
+    ///
+    /// Used by the e2e monitor to log progress while waiting for the
+    /// virtual keyboard to appear.
+    pub fn matched_device_count(&self) -> usize {
+        let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
+
+        if device_set.is_null() {
+            return 0;
+        }
+
+        let count = unsafe { CFSetGetCount(device_set) };
+
+        // Release the CFSet.
+        unsafe { CFRelease(device_set as *const _) };
+
+        count
+    }
+
     /// Find the Karabiner DriverKit virtual keyboard among the matched
     /// devices, if it is currently connected.
     ///
@@ -1578,10 +1641,13 @@ impl HidDeviceManager {
         let mode_ref = unsafe { kCFRunLoopDefaultMode }
             .expect("kCFRunLoopDefaultMode is always available");
 
+        // `CFRetained` is a smart pointer; the FFI call needs the underlying
+        // CF object pointer, not the address of the wrapper.  Passing the
+        // wrapper's address makes `CFRunLoopAddSource` fail its PAC check.
         unsafe {
             IOHIDManagerScheduleWithRunLoop(
                 self.manager,
-                &run_loop as *const _ as *mut c_void,
+                &*run_loop as *const _ as *mut c_void,
                 mode_ref as *const _ as *mut c_void,
             );
         }
@@ -1774,6 +1840,157 @@ pub fn start_iohid_seizure_mapping(
         _manager: manager,
         _devices: devices,
         _queue_handles: queue_handles,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// CGEventTap capture (capture mode only)
+// ---------------------------------------------------------------------------
+//
+// In capture mode the daemon also observes injected events via a CGEventTap.
+// The e2e injector posts keys with `CGEventPost` at the HID event tap, which
+// enters the CoreGraphics event stream but never reaches the IOKit HID queues
+// of the seized physical keyboards.  This tap closes that gap: it sees the
+// injected events and feeds them through the same [`process_key_event`] logic
+// as the IOKit path, so they are re-emitted through the virtual keyboard.
+
+/// Handle that keeps a capture CGEventTap, its run loop source, and its
+/// context alive, and cleans up on drop.
+pub struct CgEventTapHandle {
+    tap: CFRetained<CFMachPort>,
+    _run_loop_source: CFRetained<CFRunLoopSource>,
+    context_ptr: *mut HidQueueContext,
+}
+
+impl Drop for CgEventTapHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CGEvent::tap_enable(&self.tap, false);
+            if !self.context_ptr.is_null() {
+                drop(Box::from_raw(self.context_ptr));
+            }
+        }
+    }
+}
+
+/// FFI callback for the capture CGEventTap.
+///
+/// Maps each key down/up event's `CGKeyCode` to a `HidUsage` and feeds it
+/// through [`process_key_event`].  Events are passed through (not consumed)
+// so they still reach the normal event stream.
+unsafe extern "C-unwind" fn cgeventtap_callback(
+    _proxy: objc2_core_graphics::CGEventTapProxy,
+    event_type: CGEventType,
+    event: core::ptr::NonNull<CGEvent>,
+    user_info: *mut c_void,
+) -> *mut CGEvent {
+    if user_info.is_null() {
+        return event.as_ptr();
+    }
+
+    let context = unsafe { &mut *(user_info as *mut HidQueueContext) };
+
+    // Only key down/up events carry a keycode we can map to a HID usage.
+    let is_down = event_type == CGEventType::KeyDown;
+    if !is_down && event_type != CGEventType::KeyUp {
+        return event.as_ptr();
+    }
+
+    let keycode: CGKeyCode = unsafe {
+        CGEvent::integer_value_field(
+            Some(event.as_ref()),
+            CGEventField::KeyboardEventKeycode,
+        )
+    } as CGKeyCode;
+
+    if let Some(hid_usage) =
+        super::keycode::cg_keycode_to_hid_usage_full(keycode)
+    {
+        eprintln!(
+            "CGEventTap: {} {}",
+            if is_down { "down" } else { "up" },
+            hid_usage.as_str()
+        );
+        process_key_event(context, hid_usage, is_down);
+    }
+
+    // Pass the event through (do not consume it).
+    event.as_ptr()
+}
+
+/// Start a CGEventTap-based capture (capture mode only).
+///
+/// Creates a tap at the HID event tap location for key down/up events, feeds
+/// each event through [`process_key_event`], and schedules the tap on the
+/// current run loop.  Returns a handle that keeps the tap alive; drop it to
+/// disable and release the tap.
+pub fn start_cgeventtap_capture(
+    lookup: std::sync::Arc<
+        parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
+    >,
+    conn: std::sync::Arc<super::karabiner_client::KarabinerClient>,
+) -> Result<CgEventTapHandle, String> {
+    let mask: u64 =
+        (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::KeyUp.0);
+
+    // Build the shared context up front so its pointer can be passed as the
+    // tap's user info.  The context outlives the tap (freed in Drop after the
+    // tap is disabled).
+    let context = Box::new(HidQueueContext {
+        lookup,
+        conn,
+        modifier_state: 0,
+        pressed_keys: HashSet::new(),
+        device_id: String::from("cgeventtap"),
+        forwarded_keys: HashSet::new(),
+        mapped_keys: HashSet::new(),
+        forwarded_modifiers: 0,
+    });
+    let context_ptr = Box::into_raw(context);
+
+    let tap = unsafe {
+        CGEvent::tap_create(
+            CGEventTapLocation::HIDEventTap,
+            CGEventTapPlacement::HeadInsertEventTap,
+            CGEventTapOptions::Default,
+            mask,
+            Some(cgeventtap_callback),
+            context_ptr as *mut c_void,
+        )
+    };
+
+    let Some(tap) = tap else {
+        unsafe { drop(Box::from_raw(context_ptr)) };
+        return Err("failed to create CGEventTap; verify \
+                    Accessibility/Input Monitoring permissions"
+            .to_string());
+    };
+
+    let Some(run_loop_source) =
+        CFMachPort::new_run_loop_source(None, Some(&tap), 0)
+    else {
+        unsafe { drop(Box::from_raw(context_ptr)) };
+        return Err(
+            "failed to create run loop source for CGEventTap".to_string()
+        );
+    };
+
+    let Some(run_loop) = CFRunLoop::current() else {
+        unsafe { drop(Box::from_raw(context_ptr)) };
+        return Err("no current run loop for CGEventTap".to_string());
+    };
+
+    run_loop
+        .add_source(Some(&run_loop_source), unsafe { kCFRunLoopCommonModes });
+
+    CGEvent::tap_enable(&tap, true);
+
+    eprintln!("macOS: capture CGEventTap enabled (KEYMAPPER_CAPTURE).");
+
+    Ok(CgEventTapHandle {
+        tap,
+        _run_loop_source: run_loop_source,
+        context_ptr,
     })
 }
 

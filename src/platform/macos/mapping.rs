@@ -83,7 +83,9 @@ pub fn start_mapping(
     // mapped output, unmapped keys forwarded), so the monitor can seize the
     // virtual keyboard and capture the daemon's output without depending on a
     // focused window.  Production behaviour is left untouched.
-    if std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty()) {
+    let capture =
+        std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty());
+    if capture {
         super::iokit_hid::set_capture_mode(true);
         eprintln!("macOS: capture mode enabled (KEYMAPPER_CAPTURE).");
     }
@@ -92,33 +94,53 @@ pub fn start_mapping(
     // flags), so it can be shared with the queue callbacks.  In practice it
     // is used only on the main thread (CFRunLoop), where the queue callbacks
     // emit reports.
+    let client = Arc::new(client);
+
     let handle = super::iokit_hid::start_iohid_seizure_mapping(
-        lookup,
-        Arc::new(client),
+        lookup.clone(),
+        client.clone(),
     )
     .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
+
+    // In capture mode, also observe injected events via a CGEventTap.  The
+    // e2e injector posts keys with `CGEventPost` at the HID event tap, which
+    // enters the CoreGraphics event stream but never reaches the IOKit HID
+    // queues of the seized physical keyboards.  The tap closes that gap: it
+    // sees the injected events and re-emits them through the virtual keyboard.
+    // Physical keyboards are already seized (their events do not reach the CG
+    // stream), so there is no double-processing.
+    let cgeventtap = if capture {
+        Some(
+            super::iokit_hid::start_cgeventtap_capture(lookup, client)
+                .map_err(|e| format!("CGEventTap capture failed: {e}"))?,
+        )
+    } else {
+        None
+    };
 
     // The seizure mapping is live, so the daemon can now process events.
     // Signal readiness for the e2e harness.
     crate::daemon::signal_ready();
 
-    run_event_loop(handle, shutdown)
+    run_event_loop(handle, cgeventtap, shutdown)
 }
 
 /// Poll the CFRunLoop until the shutdown flag is set.
 fn run_event_loop(
     handle: super::iokit_hid::SeizureHandle,
+    cgeventtap: Option<super::iokit_hid::CgEventTapHandle>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `kCFRunLoopCommonModes` is a pseudo-mode that cannot be passed to
     // CFRunLoopRunInMode; `kCFRunLoopDefaultMode` is a member of the common
-    // modes set and receives the queue callbacks.
+    // modes set and receives the queue callbacks and the CGEventTap events.
     while !shutdown.load(Ordering::Acquire) {
         CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
     }
 
     println!("Shutdown signal received. Cleaning up...");
     drop(handle);
+    drop(cgeventtap);
 
     Ok(())
 }

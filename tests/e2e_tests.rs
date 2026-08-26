@@ -1062,6 +1062,13 @@ fn e2e_comprehensive_config() {
     eprintln!("captured {} events from log", actual.len());
 
     if actual.is_empty() {
+        // The temp dir (and thus the daemon log) is removed when the test
+        // fails, so print it now while it is still available.
+        eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
+        let debug_log = env::temp_dir().join("keymapper_capture_debug.log");
+        if let Ok(contents) = std::fs::read_to_string(&debug_log) {
+            eprintln!("capture debug log:\n{contents}");
+        }
         panic!(
             "monitor captured no events at all — the capture path is not \
              live (check the monitor and daemon logs)"
@@ -1315,6 +1322,13 @@ fn e2e_config_hot_reload() {
     eprintln!("captured {} events from log", actual.len());
 
     if actual.is_empty() {
+        // The temp dir (and thus the daemon log) is removed when the test
+        // fails, so print it now while it is still available.
+        eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
+        let debug_log = env::temp_dir().join("keymapper_capture_debug.log");
+        if let Ok(contents) = std::fs::read_to_string(&debug_log) {
+            eprintln!("capture debug log:\n{contents}");
+        }
         panic!(
             "monitor captured no events at all — the capture path is not \
              live (check the monitor and daemon logs)"
