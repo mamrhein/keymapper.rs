@@ -848,7 +848,9 @@ mod tests {
         assert_eq!(frame.msg_type, MSG_REQUEST);
         let (request_id, payload) = split_id_body(&frame.body).unwrap();
         assert_eq!(request_id, 1);
-        assert_eq!(payload, [0x07, 0x00, REQ_KEYBOARD_INITIALIZE]);
+        // The payload carries the protocol version, the request type, and
+        // the 24-byte keyboard parameters (see EXPECTED_INITIALIZE_FRAME).
+        assert_eq!(payload, &EXPECTED_INITIALIZE_FRAME[13..]);
 
         // 2. The daemon pushes a state update (keyboard ready) as a request
         //    frame; the client must answer with an empty response.
