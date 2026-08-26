@@ -105,7 +105,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // On Linux, pass the filtered keyboard pairs for device-level capture.
-    // On macOS and Windows, all keyboards are captured globally.
+    // On macOS, pass the global filter so only matching keyboards are seized.
+    // On Windows, all keyboards are captured globally.
     #[cfg(target_os = "linux")]
     {
         // Select the already-opened devices that match the grab list.
@@ -126,6 +127,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    return keymapper::platform::start_mapping(platform_state, global_filter);
+
+    #[cfg(target_os = "windows")]
     keymapper::platform::start_mapping(platform_state)
 }

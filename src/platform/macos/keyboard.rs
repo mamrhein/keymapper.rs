@@ -22,7 +22,7 @@ use crate::common::keyboard::KeyboardInfo;
 // ---------------------------------------------------------------------------
 
 /// Map a USB vendor ID to a human-readable vendor name.
-fn vendor_id_to_name(vendor_id: u32) -> String {
+pub(crate) fn vendor_id_to_name(vendor_id: u32) -> String {
     match vendor_id {
         0x05ac => "Apple".to_string(),
         0x046d => "Logitech".to_string(),

@@ -19,15 +19,7 @@
 //! permission in System Settings.
 #![allow(dead_code, non_snake_case)]
 
-use std::{
-    collections::HashSet,
-    ffi::c_void,
-    ptr,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{collections::HashSet, ffi::c_void, ptr, sync::Arc};
 
 use objc2_core_foundation::{
     CFIndex, CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, CFString,
@@ -832,43 +824,31 @@ pub struct HidQueueContext {
     pub pressed_keys: std::collections::HashSet<u16>,
     // Device location ID string for keyboard filtering.
     pub device_id: String,
-    // Capture mode only: usage ids of non-modifier keys that were forwarded
-    // (unmapped) and are still held.  The virtual keyboard report is a state
-    // snapshot, so every forwarded report must include all of these.
+    // Usage ids of non-modifier keys that were forwarded (unmapped) and are
+    // still held.  The virtual keyboard report is a state snapshot, so every
+    // forwarded report must include all of these.
     pub forwarded_keys: HashSet<u16>,
-    // Capture mode only: full usage codes of keys whose key-down was mapped,
-    // so their key-up is swallowed rather than forwarded.
+    // Full usage codes of keys whose key-down was mapped, so their key-up is
+    // swallowed rather than forwarded.
     pub mapped_keys: HashSet<u32>,
-    // Capture mode only: bitmask of modifier keys that were forwarded
-    // (unmapped) and are still held.  Mapped modifiers are excluded so their
-    // self-contained output taps do not leak into forwarded reports.
+    // Bitmask of modifier keys that were forwarded (unmapped) and are still
+    // held.  Mapped modifiers are excluded so their self-contained output
+    // taps do not leak into forwarded reports.
     pub forwarded_modifiers: u8,
 }
 
 // ---------------------------------------------------------------------------
-// Capture mode
+// Event forwarding
 // ---------------------------------------------------------------------------
 //
-// Capture mode makes the daemon re-emit every key through the virtual
-// keyboard (mapped keys as their mapped output, unmapped keys forwarded), so
-// the e2e monitor can seize the virtual keyboard and capture the daemon's
-// output without depending on a focused window.  It is gated on the
-// `KEYMAPPER_CAPTURE` environment variable so production behaviour (unmapped
-// keys dropped, key-ups ignored) is left untouched.
-
-/// Set once from `start_mapping` to record whether capture mode is active.
-static CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
-
-/// Whether capture mode is active (all keys re-emitted through the virtual
-/// keyboard).
-pub fn capture_enabled() -> bool {
-    CAPTURE_MODE.load(Ordering::Relaxed)
-}
-
-/// Record the capture-mode flag determined at startup.
-pub fn set_capture_mode(enabled: bool) {
-    CAPTURE_MODE.store(enabled, Ordering::Relaxed);
-}
+// Every key is re-emitted through the virtual keyboard: mapped keys as their
+// mapped output, unmapped keys forwarded unchanged.  A seized keyboard is
+// invisible to the OS, so anything not re-emitted would be lost; forwarding
+// unmapped keys keeps the seized keyboards usable for normal typing.
+//
+// Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`) additionally observes
+// injected events via a CGEventTap, because those never reach the IOKit HID
+// queues of the seized physical keyboards.  See `start_cgeventtap_capture`.
 
 // ---------------------------------------------------------------------------
 // HidDevice — represents a discovered HID keyboard device
@@ -1003,6 +983,36 @@ impl HidDevice {
         Some(String::from_utf8_lossy(&buffer[..len]).into_owned())
     }
 
+    // Returns a numeric (CFNumber) property of this device as `u32`, or
+    // `None` if the property is absent or not a number.
+    fn number_property(&self, key: &str) -> Option<u32> {
+        let key_cf = create_cf_string(key);
+        let value = unsafe { IOHIDDeviceGetProperty(self.device, key_cf) };
+        unsafe { CFRelease(key_cf as *const _) };
+
+        if value.is_null() {
+            return None;
+        }
+
+        let mut num: u32 = 0;
+        // `CFNumberGetValue` converts from the stored CFNumber type, so
+        // requesting an unsigned 32-bit value works for any integer type.
+        let ok = unsafe {
+            CFNumberGetValue(
+                value as CFNumberRef,
+                kCFNumberUIntType,
+                &mut num as *mut u32 as *mut c_void,
+            )
+        };
+
+        // The value is a borrowed reference (the "Get" function does not
+        // transfer ownership), so it must not be released.
+        if !ok {
+            return None;
+        }
+        Some(num)
+    }
+
     /// Returns true if this device is the Karabiner DriverKit virtual
     /// keyboard (our own output device).
     ///
@@ -1018,6 +1028,34 @@ impl HidDevice {
             serial.as_deref(),
             product.as_deref(),
         )
+    }
+
+    /// Build a platform-agnostic [`KeyboardInfo`] from this device's IOKit
+    /// properties, using the same field derivation as the `ioreg`-based
+    /// enumeration so that keyboard filters match consistently.
+    pub fn keyboard_info(&self) -> crate::common::keyboard::KeyboardInfo {
+        use crate::common::keyboard::KeyboardInfo;
+
+        let name = self
+            .string_property(kIOHIDProductKey)
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let vendor_id = self.number_property(kIOHIDMapKeyVendorID);
+        let product_id = self.number_property(kIOHIDMapKeyProductID);
+
+        let vendor = vendor_id
+            .map(super::keyboard::vendor_id_to_name)
+            .unwrap_or_else(|| "<unknown>".to_string());
+
+        let model = match (vendor_id, product_id) {
+            (Some(vid), Some(pid)) => format!("0x{:04x}:0x{:04x}", vid, pid),
+            (Some(vid), None) => format!("0x{:04x}", vid),
+            _ => "<unknown>".to_string(),
+        };
+
+        let port = self.string_property("Transport");
+
+        KeyboardInfo::new(name, vendor, model, self.location_id_string(), port)
     }
 
     // Returns the raw device reference.
@@ -1245,9 +1283,9 @@ fn process_key_event(
         drop(guard);
 
         if let Some(outputs) = active_outputs {
-            // Mapped: emit the mapped outputs via the virtual HID
-            // keyboard.  In capture mode, remember the key was mapped so
-            // its release is swallowed.
+            // Mapped: emit the mapped outputs via the virtual HID keyboard.
+            // Remember the key was mapped so its release is swallowed rather
+            // than forwarded.
             for native_key in &outputs {
                 emit_hid_report(
                     &context.conn,
@@ -1256,17 +1294,14 @@ fn process_key_event(
                     context.forwarded_modifiers,
                 );
             }
-            if capture_enabled() {
-                context.mapped_keys.insert(hid_usage.code());
-            }
-        } else if capture_enabled() {
-            // Unmapped (capture mode): forward the key through the
-            // virtual keyboard so the monitor can see it.
+            context.mapped_keys.insert(hid_usage.code());
+        } else {
+            // Unmapped: forward the key through the virtual keyboard so it
+            // reaches the OS unchanged.
             forward_key_down(context, hid_usage);
         }
-    } else if capture_enabled() {
-        // Key-up (capture mode only).  Ignore releases for keys that were
-        // never tracked as down.
+    } else {
+        // Key-up.  Ignore releases for keys that were never tracked as down.
         if !context.pressed_keys.remove(&key_id) {
             return;
         }
@@ -1282,9 +1317,6 @@ fn process_key_event(
         if !context.mapped_keys.remove(&hid_usage.code()) {
             forward_key_up(context, hid_usage);
         }
-    } else {
-        // Non-capture key-up: drop it (existing behaviour).
-        context.pressed_keys.remove(&key_id);
     }
 }
 
@@ -1374,7 +1406,7 @@ fn emit_hid_report(
     }
 }
 
-/// Forward an unmapped key-down through the virtual keyboard (capture mode).
+/// Forward an unmapped key-down through the virtual keyboard.
 ///
 /// Keyboard-page keys are added to the held set and the full state snapshot
 /// is posted; consumer-page keys are pressed directly.
@@ -1398,7 +1430,7 @@ fn forward_key_down(context: &mut HidQueueContext, hid_usage: HidUsage) {
     );
 }
 
-/// Forward an unmapped key-up through the virtual keyboard (capture mode).
+/// Forward an unmapped key-up through the virtual keyboard.
 fn forward_key_up(context: &mut HidQueueContext, hid_usage: HidUsage) {
     if hid_usage.page() == PAGE_CONSUMER {
         let _ = context.conn.send_consumer_release();
@@ -1763,30 +1795,68 @@ pub struct SeizureHandle {
 // Entry point — IOKit device seizure with queue-based capture
 // ---------------------------------------------------------------------------
 
+/// Whether a device passes the global keyboard filter.
+///
+/// Returns `true` when the filter is unset or empty (all keyboards pass), or
+/// when the device matches at least one specifier.
+fn device_matches_filter(
+    device: &HidDevice,
+    filter: Option<&[crate::common::keyboard::KeyboardSpecifier]>,
+) -> bool {
+    let Some(specs) = filter else {
+        return true;
+    };
+    if specs.is_empty() {
+        return true;
+    }
+    let info = device.keyboard_info();
+    specs.iter().any(|spec| spec.matches(&info))
+}
+
 /// Start keyboard input capture by seizing physical devices.
 ///
 /// Discovers keyboards via `HidDeviceManager`, opens each with
 /// `kIOHIDOptionsTypeSeizeDevice`, and creates an `IOHIDQueue` for event
-/// delivery.  Mapped output is emitted through the shared `KarabinerClient`
-/// (the Karabiner DriverKit virtual keyboard).
+/// delivery.  Every key is re-emitted through the shared `KarabinerClient`
+/// (the Karabiner DriverKit virtual keyboard): mapped keys as their mapped
+/// output, unmapped keys forwarded unchanged.
 pub fn start_iohid_seizure_mapping(
     lookup: std::sync::Arc<
         parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
     >,
     conn: std::sync::Arc<super::karabiner_client::KarabinerClient>,
+    keyboard_filter: Option<&[crate::common::keyboard::KeyboardSpecifier]>,
 ) -> Result<SeizureHandle, IoKitError> {
     // Discover physical keyboards.
     let manager = HidDeviceManager::new_keyboard_matcher()?;
-    let devices = manager.scan_devices();
+    let discovered = manager.scan_devices();
 
-    if devices.is_empty() {
+    if discovered.is_empty() {
         return Err(IoKitError::IoReturn(
             0,
             "No keyboard devices found via IOHIDManager".into(),
         ));
     }
 
-    println!("IOKit HID: discovered {} keyboard device(s)", devices.len(),);
+    println!(
+        "IOKit HID: discovered {} keyboard device(s)",
+        discovered.len(),
+    );
+
+    // Apply the global keyboard filter: only seize keyboards the user wants
+    // to remap.  Non-matching keyboards are left alone so they keep working
+    // normally (a seized keyboard is invisible to the OS).
+    let devices: Vec<_> = discovered
+        .into_iter()
+        .filter(|device| device_matches_filter(device, keyboard_filter))
+        .collect();
+
+    if devices.is_empty() {
+        eprintln!(
+            "IOKit HID: no keyboards match the global filter; nothing to \
+             seize"
+        );
+    }
 
     // Open and seize each device, creating queues.
     let mut queue_handles = Vec::new();

@@ -9,9 +9,10 @@
 
 //! Keyboard input capture via IOKit device seizure on macOS.
 //!
-//! Each physical keyboard is opened with `kIOHIDOptionsTypeSeizeDevice` so
-//! only this process receives its events.  Mapped output is emitted through
-//! the DriverKit virtual HID keyboard.
+//! Each physical keyboard matching the global filter is opened with
+//! `kIOHIDOptionsTypeSeizeDevice` so only this process receives its events.
+//! Every key is re-emitted through the DriverKit virtual HID keyboard: mapped
+//! keys as their mapped output, unmapped keys forwarded unchanged.
 
 use std::{
     sync::{
@@ -32,12 +33,15 @@ use super::karabiner_client::KarabinerClient;
 
 /// Start keyboard input capture via IOKit device seizure.
 ///
-/// Discovers physical keyboards, seizes each one, and creates per-device
-/// `IOHIDQueue` instances for event delivery.  Mapped output is emitted
-/// through the DriverKit virtual HID keyboard.  The CFRunLoop is polled
-/// until a shutdown signal (SIGINT or SIGTERM) is received.
+/// Discovers physical keyboards, seizes those matching the global keyboard
+/// filter (or all of them when no filter is set), and creates per-device
+/// `IOHIDQueue` instances for event delivery.  Every key is re-emitted through
+/// the DriverKit virtual HID keyboard: mapped keys as their mapped output,
+/// unmapped keys forwarded unchanged.  The CFRunLoop is polled until a
+/// shutdown signal (SIGINT or SIGTERM) is received.
 pub fn start_mapping(
     lookup: Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
+    keyboard_filter: Option<Vec<crate::common::keyboard::KeyboardSpecifier>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Register signal handlers for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -79,14 +83,14 @@ pub fn start_mapping(
     }
 
     // Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`): the daemon
-    // re-emits every key through the virtual keyboard (mapped keys as their
-    // mapped output, unmapped keys forwarded), so the monitor can seize the
-    // virtual keyboard and capture the daemon's output without depending on a
-    // focused window.  Production behaviour is left untouched.
+    // already re-emits every key through the virtual keyboard in all modes,
+    // so capture mode only adds a CGEventTap to observe injected events, which
+    // never reach the seized physical keyboards.  This lets the e2e monitor
+    // capture the daemon's output without depending on a focused window.
+    // Production behaviour is left untouched.
     let capture =
         std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty());
     if capture {
-        super::iokit_hid::set_capture_mode(true);
         eprintln!("macOS: capture mode enabled (KEYMAPPER_CAPTURE).");
     }
 
@@ -99,6 +103,7 @@ pub fn start_mapping(
     let handle = super::iokit_hid::start_iohid_seizure_mapping(
         lookup.clone(),
         client.clone(),
+        keyboard_filter.as_deref(),
     )
     .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
 

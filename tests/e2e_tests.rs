@@ -750,12 +750,14 @@ fn start_daemon(config_dir: &Path) -> DaemonGuard {
         .arg(config_dir)
         .env("KEYMAPPER_ACTIVE_APP", MONITOR_APP_NAME)
         .env("KEYMAPPER_READY_FILE", &ready_file)
-        // On Windows and macOS, run the daemon in capture mode so it re-emits
-        // every key (mapped and unmapped) through the virtual keyboard, for
-        // the monitor to capture (tagged hook on Windows, IOKit seizure of
-        // the virtual keyboard on macOS).  Without this the monitor would
-        // depend on keyboard focus, which is brittle.  The Linux daemon
-        // always re-emits every key and ignores the variable.
+        // On Windows and macOS, run the daemon in capture mode so it observes
+        // injected events (tagged hook on Windows, CGEventTap on macOS) and
+        // re-emits them through the virtual keyboard for the monitor to
+        // capture.  Injected events never reach the seized physical keyboards,
+        // so without this the monitor would miss them.  (The daemon re-emits
+        // every key, mapped and unmapped, through the virtual keyboard in all
+        // modes; capture mode only adds the observation of injected events.)
+        // The Linux daemon always re-emits every key and ignores the variable.
         .env("KEYMAPPER_CAPTURE", "1")
         .status()
         .expect("failed to run keymapper daemon start");
