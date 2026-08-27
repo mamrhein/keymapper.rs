@@ -63,11 +63,12 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         25 => 0x26, // 9
         29 => 0x27, // 0
         // Edit keys
-        36 => 0x28, // Return
-        51 => 0x2A, // Backspace
-        53 => 0x29, // Escape
-        48 => 0x2B, // Tab
-        49 => 0x2C, // Space
+        36 => 0x28,  // Return
+        51 => 0x2A,  // Backspace
+        117 => 0x4C, // Delete (forward delete)
+        53 => 0x29,  // Escape
+        48 => 0x2B,  // Tab
+        49 => 0x2C,  // Space
         // Modifiers
         59 => 0xE0, // LeftControl
         62 => 0xE1, // RightControl
@@ -122,4 +123,38 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
 /// with no keyboard-page HID equivalent.
 pub fn cg_keycode_to_hid_usage_full(code: u16) -> Option<HidUsage> {
     cg_keycode_to_hid_usage(code).and_then(HidUsage::keyboard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_edit_keys() {
+        assert_eq!(cg_keycode_to_hid_usage(36), Some(0x28)); // Return
+        assert_eq!(cg_keycode_to_hid_usage(51), Some(0x2A)); // Backspace
+        assert_eq!(cg_keycode_to_hid_usage(117), Some(0x4C)); // Delete
+        assert_eq!(cg_keycode_to_hid_usage(53), Some(0x29)); // Escape
+        assert_eq!(cg_keycode_to_hid_usage(48), Some(0x2B)); // Tab
+        assert_eq!(cg_keycode_to_hid_usage(49), Some(0x2C)); // Space
+    }
+
+    #[test]
+    fn maps_letters_and_modifiers() {
+        assert_eq!(cg_keycode_to_hid_usage(0), Some(0x04)); // A
+        assert_eq!(cg_keycode_to_hid_usage(12), Some(0x14)); // Q
+        assert_eq!(cg_keycode_to_hid_usage(59), Some(0xE0)); // LeftControl
+        assert_eq!(cg_keycode_to_hid_usage(55), Some(0xE6)); // LeftCommand
+        assert_eq!(cg_keycode_to_hid_usage(57), Some(0x39)); // CapsLock
+    }
+
+    #[test]
+    fn unknown_code_returns_none() {
+        assert_eq!(cg_keycode_to_hid_usage(0xFFFF), None);
+    }
+
+    #[test]
+    fn full_resolves_delete() {
+        assert_eq!(cg_keycode_to_hid_usage_full(117), Some(HidUsage::Delete));
+    }
 }
