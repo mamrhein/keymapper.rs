@@ -19,7 +19,7 @@ use crate::common::hid_usage::HidUsage;
 /// Convert a macOS CGKeyCode to its USB HID Keyboard/Keypad usage id.
 ///
 /// Returns `None` for codes with no keyboard-page HID equivalent (e.g. the
-/// consumer-page media keys, which have no `kVK_*` constant).
+/// consumer-page media keys, F13–F20, and JIS-specific keys).
 pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
     Some(match code {
         // Letters
@@ -33,7 +33,7 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         7 => 0x1B,  // X
         8 => 0x06,  // C
         9 => 0x19,  // V
-        10 => 0x63, // IsoExtra
+        10 => 0x64, // IsoExtra (ISO Section)
         11 => 0x05, // B
         12 => 0x14, // Q
         13 => 0x1A, // W
@@ -50,7 +50,7 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         40 => 0x0E, // K
         41 => 0x33, // Semicolon
         45 => 0x11, // N
-        46 => 0x10, // M,
+        46 => 0x10, // M
         // Numbers
         18 => 0x1E, // 1
         19 => 0x1F, // 2
@@ -81,13 +81,13 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         57 => 0x39, // CapsLock
         // Navigation
         115 => 0x4A, // Home
+        116 => 0x4B, // PageUp
         119 => 0x4D, // End
-        116 => 0x4E, // PageUp
-        121 => 0x4F, // PageDown
+        121 => 0x4E, // PageDown
         126 => 0x52, // UpArrow
         125 => 0x51, // DownArrow
         123 => 0x50, // LeftArrow
-        124 => 0x4B, // RightArrow
+        124 => 0x4F, // RightArrow
         // Function keys
         122 => 0x3A, // F1
         120 => 0x3B, // F2
@@ -103,15 +103,34 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         111 => 0x45, // F12
         // Punctuation
         27 => 0x2D, // Minus
-        24 => 0x2F, // Equal
-        33 => 0x31, // BracketLeft
-        30 => 0x32, // BracketRight
-        42 => 0x31, // Backslash
+        24 => 0x2E, // Equal
+        33 => 0x2F, // BracketLeft
+        30 => 0x31, // BracketRight
+        42 => 0x30, // Backslash
         39 => 0x34, // Quote
         50 => 0x35, // Grave
         43 => 0x36, // Comma
         47 => 0x38, // Period
         44 => 0x37, // Slash
+        // Numpad
+        65 => 0x63, // NumpadDecimal
+        67 => 0x55, // NumpadMultiply
+        69 => 0x57, // NumpadPlus
+        71 => 0x65, // NumpadClear
+        75 => 0x54, // NumpadDivide
+        76 => 0x58, // NumpadEnter
+        78 => 0x56, // NumpadMinus
+        81 => 0x67, // NumpadEqual
+        82 => 0x62, // Numpad0
+        83 => 0x59, // Numpad1
+        84 => 0x5A, // Numpad2
+        85 => 0x5B, // Numpad3
+        86 => 0x5C, // Numpad4
+        87 => 0x5D, // Numpad5
+        88 => 0x5E, // Numpad6
+        89 => 0x5F, // Numpad7
+        91 => 0x60, // Numpad8
+        92 => 0x61, // Numpad9
         _ => return None,
     })
 }
@@ -154,7 +173,69 @@ mod tests {
     }
 
     #[test]
+    fn maps_numpad_keys() {
+        assert_eq!(cg_keycode_to_hid_usage(65), Some(0x63)); // NumpadDecimal
+        assert_eq!(cg_keycode_to_hid_usage(67), Some(0x55)); // NumpadMultiply
+        assert_eq!(cg_keycode_to_hid_usage(69), Some(0x57)); // NumpadPlus
+        assert_eq!(cg_keycode_to_hid_usage(71), Some(0x65)); // NumpadClear
+        assert_eq!(cg_keycode_to_hid_usage(75), Some(0x54)); // NumpadDivide
+        assert_eq!(cg_keycode_to_hid_usage(76), Some(0x58)); // NumpadEnter
+        assert_eq!(cg_keycode_to_hid_usage(78), Some(0x56)); // NumpadMinus
+        assert_eq!(cg_keycode_to_hid_usage(81), Some(0x67)); // NumpadEqual
+        assert_eq!(cg_keycode_to_hid_usage(82), Some(0x62)); // Numpad0
+        assert_eq!(cg_keycode_to_hid_usage(83), Some(0x59)); // Numpad1
+        assert_eq!(cg_keycode_to_hid_usage(84), Some(0x5A)); // Numpad2
+        assert_eq!(cg_keycode_to_hid_usage(85), Some(0x5B)); // Numpad3
+        assert_eq!(cg_keycode_to_hid_usage(86), Some(0x5C)); // Numpad4
+        assert_eq!(cg_keycode_to_hid_usage(87), Some(0x5D)); // Numpad5
+        assert_eq!(cg_keycode_to_hid_usage(88), Some(0x5E)); // Numpad6
+        assert_eq!(cg_keycode_to_hid_usage(89), Some(0x5F)); // Numpad7
+        assert_eq!(cg_keycode_to_hid_usage(91), Some(0x60)); // Numpad8
+        assert_eq!(cg_keycode_to_hid_usage(92), Some(0x61)); // Numpad9
+    }
+
+    #[test]
+    fn maps_navigation_keys() {
+        assert_eq!(cg_keycode_to_hid_usage(115), Some(0x4A)); // Home
+        assert_eq!(cg_keycode_to_hid_usage(116), Some(0x4B)); // PageUp
+        assert_eq!(cg_keycode_to_hid_usage(119), Some(0x4D)); // End
+        assert_eq!(cg_keycode_to_hid_usage(121), Some(0x4E)); // PageDown
+        assert_eq!(cg_keycode_to_hid_usage(126), Some(0x52)); // UpArrow
+        assert_eq!(cg_keycode_to_hid_usage(125), Some(0x51)); // DownArrow
+        assert_eq!(cg_keycode_to_hid_usage(123), Some(0x50)); // LeftArrow
+        assert_eq!(cg_keycode_to_hid_usage(124), Some(0x4F)); // RightArrow
+    }
+
+    #[test]
+    fn maps_punctuation_keys() {
+        assert_eq!(cg_keycode_to_hid_usage(27), Some(0x2D)); // Minus
+        assert_eq!(cg_keycode_to_hid_usage(24), Some(0x2E)); // Equal
+        assert_eq!(cg_keycode_to_hid_usage(33), Some(0x2F)); // BracketLeft
+        assert_eq!(cg_keycode_to_hid_usage(30), Some(0x31)); // BracketRight
+        assert_eq!(cg_keycode_to_hid_usage(42), Some(0x30)); // Backslash
+        assert_eq!(cg_keycode_to_hid_usage(39), Some(0x34)); // Quote
+        assert_eq!(cg_keycode_to_hid_usage(50), Some(0x35)); // Grave
+        assert_eq!(cg_keycode_to_hid_usage(43), Some(0x36)); // Comma
+        assert_eq!(cg_keycode_to_hid_usage(47), Some(0x38)); // Period
+        assert_eq!(cg_keycode_to_hid_usage(44), Some(0x37)); // Slash
+    }
+
+    #[test]
+    fn maps_iso_extra() {
+        assert_eq!(cg_keycode_to_hid_usage(10), Some(0x64)); // IsoExtra
+    }
+
+    #[test]
     fn full_resolves_delete() {
         assert_eq!(cg_keycode_to_hid_usage_full(117), Some(HidUsage::Delete));
+    }
+
+    #[test]
+    fn full_resolves_numpad() {
+        assert_eq!(
+            cg_keycode_to_hid_usage_full(76),
+            Some(HidUsage::NumpadEnter)
+        );
+        assert_eq!(cg_keycode_to_hid_usage_full(82), Some(HidUsage::Numpad0));
     }
 }
