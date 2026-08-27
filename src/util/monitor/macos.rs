@@ -9,7 +9,7 @@
 
 //! macOS IOKit-seizure backend for the keyboard monitor.
 //!
-//! Instead of a focused egui window — whose capture depends on the window
+//! Instead of a focused GUI window — whose capture depends on the window
 //! server keeping keyboard focus on it, and which is therefore brittle and
 //! steals focus from the user on an interactive session — the macOS monitor
 //! seizes the daemon's own Karabiner DriverKit virtual keyboard and logs the

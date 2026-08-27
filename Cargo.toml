@@ -27,14 +27,6 @@ path = "src/keymapper_monitor.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"]}
 dirs = "6" # platform config directory resolution
-eframe = { version = "0.36", default-features = false, features = [
-    "default_fonts",
-    "glow",
-    "persistence",
-    "wayland",
-    "x11",
-] } # cross-platform GUI for the monitor binary
-egui = "0.36" # UI library used by eframe
 fs-err = "3"
 indexmap = { version = "2", features = ["serde"] }
 notify = "8" # cross-platform file watching

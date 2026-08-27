@@ -9,7 +9,7 @@
 
 //! Windows hook-capture backend for the keyboard monitor.
 //!
-//! Instead of a focused egui window — whose capture depends on the window
+//! Instead of a focused GUI window — whose capture depends on the window
 //! manager keeping keyboard focus on it, and which is therefore brittle and
 //! steals focus from the user on an interactive session — the Windows
 //! monitor installs a `WH_KEYBOARD_LL` hook and captures only the keys the
