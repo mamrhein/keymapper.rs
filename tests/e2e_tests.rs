@@ -220,6 +220,7 @@ fn build_test_sequences(config_path: Option<&Path>) -> TestSequences {
     // them, so they cannot be part of a cross-platform injection sequence.
     let passthrough_keys: Vec<HidUsage> = HidUsage::all()
         .iter()
+        .skip(9) // skip modifier keys and CapsLock
         .copied()
         .filter(|k| k.page() != PAGE_CONSUMER)
         .filter(|k| !used_keys.contains(k))
