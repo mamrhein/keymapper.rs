@@ -160,22 +160,31 @@ impl CollectedRule<'_> {
     }
 }
 
-/// Parse the config file at *config_path* and build test sequences.
+/// Build test sequences for one config phase.
 ///
-/// Collects all trigger rules from every group (keeping app scope) and adds
-/// passthrough keys that no rule uses.  The injection sequence interleaves
-/// triggers with passthrough keys to exercise both remapping and transparent
-/// forwarding.  The expected sequence simulates the daemon's per-event
-/// behaviour (see [`rule_expected_events`]) and the monitor's reporting
-/// semantics (see [`monitor_key_name`]).
-fn build_test_sequences(config_path: &Path) -> TestSequences {
-    let content = std::fs::read_to_string(config_path).unwrap_or_else(|e| {
-        panic!("failed to read config fixture {config_path:?}: {e}")
-    });
-
-    let app_config = AppConfig::load_from_str(&content).unwrap_or_else(|e| {
-        panic!("failed to parse config fixture {config_path:?}: {e}")
-    });
+/// When *config_path* is `Some`, the fixture at that path is parsed and all
+/// trigger rules are collected (keeping app scope).  When it is `None`, an
+/// empty config is used, so the sequence contains only passthrough keys.
+///
+/// Passthrough keys that no rule uses are interleaved with the triggers to
+/// exercise both remapping and transparent forwarding.  The expected sequence
+/// simulates the daemon's per-event behaviour (see [`rule_expected_events`])
+/// and the monitor's reporting semantics (see [`monitor_key_name`]).
+fn build_test_sequences(config_path: Option<&Path>) -> TestSequences {
+    let app_config = match config_path {
+        Some(path) => {
+            let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+                panic!("failed to read config fixture {path:?}: {e}")
+            });
+            AppConfig::load_from_str(&content).unwrap_or_else(|e| {
+                panic!("failed to parse config fixture {path:?}: {e}")
+            })
+        }
+        // No user config: parse an empty config so the sequence contains only
+        // passthrough keys.
+        None => AppConfig::load_from_str("groups: []")
+            .expect("empty config must parse"),
+    };
 
     // Collect all rules from every group, keeping app scope so firing
     // expectations can account for the active app.
@@ -963,12 +972,36 @@ fn read_daemon_log(config_dir: &Path) -> String {
 // Integration tests
 // ---------------------------------------------------------------------------
 
-/// Run the full e2e test against the comprehensive config fixture.
+/// Write the config for one phase to *config_out*.
 ///
-/// Parses the config to derive injection and expected sequences, then
-/// validates that the daemon remaps keys correctly.
-#[test]
-fn e2e_comprehensive_config() {
+/// A `Some` fixture is copied verbatim.  A `None` phase writes an empty
+/// config (`groups: []`) so the daemon starts with no rules, i.e. every key
+/// passes through unchanged.  The daemon requires a config file to exist in
+/// order to start, so even the "no config" mode writes one.
+fn write_phase_config(config_out: &Path, phase: Option<&Path>) {
+    match phase {
+        Some(fixture) => {
+            std::fs::copy(fixture, config_out)
+                .expect("failed to copy config fixture");
+        }
+        None => {
+            std::fs::write(config_out, "groups: []\n")
+                .expect("failed to write empty config");
+        }
+    }
+}
+
+/// Run the full e2e test against a list of config fixtures.
+///
+/// An empty list runs a single passthrough-only phase (an empty config is
+/// written so the daemon starts with no rules).  A single fixture runs one
+/// phase.  Multiple fixtures run one phase each, with every fixture after the
+/// first overwriting the previous one to provoke a hot-reload.
+///
+/// The daemon, monitor, and injector are started once and shared across all
+/// phases; the combined expected sequence is the canary plus each phase's
+/// expectations in order.
+fn run_e2e(configs: &[&str], label: &str) {
     if !can_run_e2e() {
         eprintln!(
             "skipping e2e test: injector not available in this environment. \
@@ -977,7 +1010,7 @@ fn e2e_comprehensive_config() {
         return;
     }
 
-    // Serialize with the other e2e test (system-wide input stack access).
+    // Serialize with the other e2e tests (system-wide input stack access).
     let _e2e_lock = E2eLock::acquire();
 
     // a. Create temp directory.  The guard removes it on drop, even when
@@ -994,58 +1027,84 @@ fn e2e_comprehensive_config() {
         env::temp_dir().join("keymapper_capture_debug.log"),
     );
 
-    // b. Copy fixture config into temp directory.
-    let config_in = Path::new(CONFIG_COMPREHENSIVE);
-    let config_out = temp_dir.join("config.yaml");
-    std::fs::copy(config_in, &config_out)
-        .expect("failed to copy config fixture");
+    // b. Resolve the phases.  Each phase is an optional fixture path; `None`
+    //    means "no user config" (an empty config is written instead).
+    let phases: Vec<Option<&Path>> = if configs.is_empty() {
+        vec![None]
+    } else {
+        configs.iter().map(|&c| Some(Path::new(c))).collect()
+    };
 
-    // c. Create events log path.
+    // c. Write the first phase's config into the temp directory.
+    let config_out = temp_dir.join("config.yaml");
+    write_phase_config(&config_out, phases[0]);
+
+    // d. Create events log path.
     let events_log = temp_dir.join("events.log");
 
-    // Parse the config to build injection and expected sequences.
-    let sequences = build_test_sequences(&config_out);
-    eprintln!(
-        "injection steps: {}, expected events: {}",
-        sequences.steps.len(),
-        sequences.expected.len()
-    );
-
-    // d. Start the monitor.
+    // e. Start the monitor.
     let mut monitor = start_monitor(&events_log);
 
-    // e. Create and setup the injector.
+    // f. Create and setup the injector.
     let mut injector = create_injector()
         .expect("failed to create injector")
         .expect("injector not available on this platform");
     injector.setup().expect("failed to setup injector");
 
-    // e2. Wait until udev has tagged the injector device as a keyboard, so
+    // f2. Wait until udev has tagged the injector device as a keyboard, so
     //     the daemon's startup discovery sees it deterministically.
     wait_for_injector_device(&*injector);
 
-    // f. Start the daemon.  The guard stops it on drop, even when the test
+    // g. Start the daemon.  The guard stops it on drop, even when the test
     //    fails.
     let mut daemon = start_daemon(&temp_dir);
 
-    // f2. Verify the daemon survived initialisation.
-
+    // g2. Verify the daemon survived initialisation.
     if !daemon_alive(&temp_dir) {
         eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
         panic!("daemon exited after startup");
     }
 
-    // g. Inject a canary key first to verify the full capture path
+    // h. Inject a canary key first to verify the full capture path
     //    (injector -> daemon -> virtual keyboard -> monitor) is live before
     //    running the real sequence.
     eprintln!("injecting canary key (Space)...");
     inject_step(&*injector, &single_key_injection_step(HidUsage::Space));
 
-    // g2. Inject keys from the test sequence.
-    eprintln!("injecting {} steps...", sequences.steps.len());
-    for (i, step) in sequences.steps.iter().enumerate() {
-        eprintln!("  step {}: {:?} / {:?}", i, step.keys_down, step.keys_up);
-        inject_step(&*injector, step);
+    // i. Run each phase: inject its sequence and accumulate the expected
+    //    events.  Phases after the first overwrite the config to provoke a
+    //    hot-reload before injecting.
+    let mut expected_combined = passthrough_expected(HidUsage::Space);
+    for (i, phase) in phases.iter().enumerate() {
+        if i > 0 {
+            eprintln!(
+                "hot-reloading config (phase {} of {})...",
+                i + 1,
+                phases.len()
+            );
+            write_phase_config(&config_out, *phase);
+            // Wait for the daemon's reload debounce plus compilation time.
+            thread::sleep(Duration::from_secs(2));
+        }
+
+        let sequences = build_test_sequences(*phase);
+        eprintln!(
+            "phase {}: injection steps: {}, expected events: {}",
+            i + 1,
+            sequences.steps.len(),
+            sequences.expected.len()
+        );
+        for (j, step) in sequences.steps.iter().enumerate() {
+            eprintln!(
+                "  phase {} step {}: {:?} / {:?}",
+                i + 1,
+                j,
+                step.keys_down,
+                step.keys_up
+            );
+            inject_step(&*injector, step);
+        }
+        expected_combined.extend(sequences.expected.iter().cloned());
     }
 
     // j. Stop the daemon.
@@ -1077,10 +1136,8 @@ fn e2e_comprehensive_config() {
         );
     }
 
-    // n. Assert the event log matches the expected sequence (canary + main
-    //    sequence).
-    let mut expected_combined = passthrough_expected(HidUsage::Space);
-    expected_combined.extend(sequences.expected);
+    // n. Assert the event log matches the combined expected sequence (canary
+    //    + all phases).
     if actual != expected_combined {
         // The temp dir (and thus the daemon log) is removed when the test
         // fails, so print both logs now while they are still available.
@@ -1099,157 +1156,33 @@ fn e2e_comprehensive_config() {
     // o. Clean up.
     dir_guard.remove();
 
-    eprintln!("e2e_comprehensive_config PASSED");
+    eprintln!("{label} PASSED");
+}
+
+/// Run the full e2e test against the comprehensive config fixture.
+///
+/// Parses the config to derive injection and expected sequences, then
+/// validates that the daemon remaps keys correctly.
+#[test]
+fn e2e_comprehensive_config() {
+    run_e2e(&[CONFIG_COMPREHENSIVE], "e2e_comprehensive_config");
 }
 
 /// Run the full e2e test with a hot-reload of the config.
 ///
-/// 1. Starts with `config_comprehensive.yaml` and injects keys.
-/// 2. Hot-reloads to `config_reloaded.yaml`.
-/// 3. Injects keys again and validates the new mappings.
+/// Starts with `config_comprehensive.yaml`, then hot-reloads to
+/// `config_reloaded.yaml` and validates the new mappings.
 #[test]
 fn e2e_config_hot_reload() {
-    if !can_run_e2e() {
-        eprintln!(
-            "skipping e2e test: injector not available in this environment. \
-             Set CI=1 and ensure required permissions are granted."
-        );
-        return;
-    }
-
-    // Serialize with the other e2e test (system-wide input stack access).
-    let _e2e_lock = E2eLock::acquire();
-
-    // a. Create temp directory.  The guard removes it on drop, even when
-    //    the test fails.  Declared first so it drops last: the daemon's
-    //    PID file (needed to stop it) lives in this directory.
-    let temp_dir = create_test_dir();
-    let mut dir_guard = TempDirGuard::new(temp_dir.clone());
-    eprintln!("test dir: {:?}", temp_dir);
-
-    // b. Copy initial fixture config into temp directory.
-    let config_in = Path::new(CONFIG_COMPREHENSIVE);
-    let config_out = temp_dir.join("config.yaml");
-    std::fs::copy(config_in, &config_out)
-        .expect("failed to copy config fixture");
-
-    // c. Create events log path.
-    let events_log = temp_dir.join("events.log");
-
-    // Parse the initial config to build injection and expected sequences.
-    let sequences_phase1 = build_test_sequences(&config_out);
-    eprintln!(
-        "phase 1: injection steps: {}, expected events: {}",
-        sequences_phase1.steps.len(),
-        sequences_phase1.expected.len()
+    run_e2e(
+        &[CONFIG_COMPREHENSIVE, CONFIG_RELOADED],
+        "e2e_config_hot_reload",
     );
+}
 
-    // d. Start the monitor.
-    let mut monitor = start_monitor(&events_log);
-
-    // e. Create and setup the injector.
-    let mut injector = create_injector()
-        .expect("failed to create injector")
-        .expect("injector not available on this platform");
-    injector.setup().expect("failed to setup injector");
-
-    // e2. Wait until udev has tagged the injector device as a keyboard, so
-    //     the daemon's startup discovery sees it deterministically.
-    wait_for_injector_device(&*injector);
-
-    // f. Start the daemon.  The guard stops it on drop, even when the test
-    //    fails.
-    let mut daemon = start_daemon(&temp_dir);
-
-    // f2. Verify the daemon survived initialisation.
-
-    if !daemon_alive(&temp_dir) {
-        eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
-        panic!("daemon exited after startup");
-    }
-
-    // g. Inject a canary key first to verify the full capture path is live.
-    eprintln!("injecting canary key (Space)...");
-    inject_step(&*injector, &single_key_injection_step(HidUsage::Space));
-
-    // g2. Inject keys from phase 1 sequence.
-    eprintln!(
-        "phase 1: injecting {} steps...",
-        sequences_phase1.steps.len()
-    );
-    for step in &sequences_phase1.steps {
-        inject_step(&*injector, step);
-    }
-
-    // h. Hot-reload: copy the reloaded config into the temp directory.
-    eprintln!("hot-reloading config...");
-    let reload_config = Path::new(CONFIG_RELOADED);
-    std::fs::copy(reload_config, &config_out)
-        .expect("failed to copy reloaded config");
-
-    // Wait for the daemon's reload debounce plus compilation time.
-    thread::sleep(Duration::from_secs(2));
-
-    // Parse the reloaded config to build phase 2 sequences.
-    let sequences_phase2 = build_test_sequences(&config_out);
-    eprintln!(
-        "phase 2: injection steps: {}, expected events: {}",
-        sequences_phase2.steps.len(),
-        sequences_phase2.expected.len()
-    );
-
-    // i. Inject keys from phase 2 sequence (under new config).
-    eprintln!(
-        "phase 2: injecting {} steps...",
-        sequences_phase2.steps.len()
-    );
-    for step in &sequences_phase2.steps {
-        inject_step(&*injector, step);
-    }
-
-    // j. Stop the daemon.
-    daemon.stop();
-
-    // k. Stop the monitor.
-    monitor.kill();
-
-    // l. Teardown the injector.
-    injector.teardown();
-
-    // m. Parse the event log.
-    let actual = event_log::parse(&events_log).unwrap_or_else(|e| {
-        panic!("failed to parse event log {:?}: {e}", events_log)
-    });
-    eprintln!("captured {} events from log", actual.len());
-
-    if actual.is_empty() {
-        // The temp dir (and thus the daemon log) is removed when the test
-        // fails, so print it now while it is still available.
-        eprintln!("daemon log:\n{}", read_daemon_log(&temp_dir));
-        let debug_log = env::temp_dir().join("keymapper_capture_debug.log");
-        if let Ok(contents) = std::fs::read_to_string(&debug_log) {
-            eprintln!("capture debug log:\n{contents}");
-        }
-        panic!(
-            "monitor captured no events at all — the capture path is not \
-             live (check the monitor and daemon logs)"
-        );
-    }
-
-    // n. Build the combined expected sequence: canary + phase 1 + phase 2.
-    let mut expected_combined = passthrough_expected(HidUsage::Space);
-    expected_combined.extend(sequences_phase1.expected.iter().cloned());
-    expected_combined.extend(sequences_phase2.expected.iter().cloned());
-
-    assert_events_match(
-        &actual,
-        &expected_combined,
-        "event log does not match combined expected sequence (phase 1 + \
-         phase 2 after hot-reload)",
-    );
-
-    // o. Clean up.
-    dir_guard.remove();
-
-    eprintln!("e2e_config_hot_reload PASSED");
+/// Run the e2e test with no user config: an empty config is written so the
+/// daemon starts with no rules, and only passthrough keys are exercised.
+#[test]
+fn e2e_no_config() {
+    run_e2e(&[], "e2e_no_config");
 }
