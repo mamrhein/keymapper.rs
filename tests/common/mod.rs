@@ -12,8 +12,10 @@
 //! Each integration test is its own crate, so helpers used by more than one
 //! test crate live here and are pulled in via `mod common;`.
 
+use std::env;
+#[cfg(windows)]
 use std::{
-    env, thread,
+    thread,
     time::{Duration, Instant},
 };
 
