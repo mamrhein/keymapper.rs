@@ -935,9 +935,6 @@ fn wait_for_injector_device(injector: &dyn KeyInjector) {
     );
 }
 
-#[cfg(not(target_os = "linux"))]
-fn wait_for_injector_device(_injector: &dyn KeyInjector) {}
-
 /// Check whether the daemon recorded in the config directory's PID file is
 /// still alive.
 #[cfg(unix)]
@@ -1051,8 +1048,9 @@ fn run_e2e(configs: &[&str], label: &str) {
         .expect("injector not available on this platform");
     injector.setup().expect("failed to setup injector");
 
-    // f2. Wait until udev has tagged the injector device as a keyboard, so
-    //     the daemon's startup discovery sees it deterministically.
+    // f2. Wait until the injector device is fully registered, so the
+    //     daemon's startup discovery sees it deterministically.
+    #[cfg(target_os = "linux")]
     wait_for_injector_device(&*injector);
 
     // g. Start the daemon.  The guard stops it on drop, even when the test
