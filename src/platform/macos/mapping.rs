@@ -29,7 +29,7 @@ use signal_hook::{
     flag::register,
 };
 
-use super::karabiner_client::KarabinerClient;
+use super::karabiner_client::{KarabinerClient, OUTPUT_KEYBOARD_IDENTITY};
 
 /// Start keyboard input capture via IOKit device seizure.
 ///
@@ -52,13 +52,17 @@ pub fn start_mapping(
 
     // Connect to the Karabiner DriverKit VirtualHIDDevice daemon.  The
     // client spawns a background thread that retries the connection until
-    // the daemon is reachable, so this returns immediately.
-    let client = KarabinerClient::connect().map_err(|e| {
-        format!(
-            "Karabiner client failed to start ({e}). Install and activate \
-             the Karabiner DriverKit package."
-        )
-    })?;
+    // the daemon is reachable, so this returns immediately.  The output
+    // keyboard identity keeps production behavior unchanged; the e2e
+    // injection keyboard uses a distinct identity (see
+    // `INJECTION_KEYBOARD_IDENTITY`).
+    let client =
+        KarabinerClient::connect(OUTPUT_KEYBOARD_IDENTITY).map_err(|e| {
+            format!(
+                "Karabiner client failed to start ({e}). Install and \
+                 activate the Karabiner DriverKit package."
+            )
+        })?;
 
     // Wait for the virtual keyboard to become ready so that the first
     // injected events are not dropped, but stay responsive to shutdown.  The
@@ -82,18 +86,6 @@ pub fn start_mapping(
         );
     }
 
-    // Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`): the daemon
-    // already re-emits every key through the virtual keyboard in all modes,
-    // so capture mode only adds a CGEventTap to observe injected events, which
-    // never reach the seized physical keyboards.  This lets the e2e monitor
-    // capture the daemon's output without depending on a focused window.
-    // Production behaviour is left untouched.
-    let capture =
-        std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty());
-    if capture {
-        eprintln!("macOS: capture mode enabled (KEYMAPPER_CAPTURE).");
-    }
-
     // KarabinerClient is Send + Sync (it holds an mpsc sender and atomic
     // flags), so it can be shared with the queue callbacks.  In practice it
     // is used only on the main thread (CFRunLoop), where the queue callbacks
@@ -107,45 +99,27 @@ pub fn start_mapping(
     )
     .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
 
-    // In capture mode, also observe injected events via a CGEventTap.  The
-    // e2e injector posts keys with `CGEventPost` at the HID event tap, which
-    // enters the CoreGraphics event stream but never reaches the IOKit HID
-    // queues of the seized physical keyboards.  The tap closes that gap: it
-    // sees the injected events and re-emits them through the virtual keyboard.
-    // Physical keyboards are already seized (their events do not reach the CG
-    // stream), so there is no double-processing.
-    let cgeventtap = if capture {
-        Some(
-            super::iokit_hid::start_cgeventtap_capture(lookup, client)
-                .map_err(|e| format!("CGEventTap capture failed: {e}"))?,
-        )
-    } else {
-        None
-    };
-
     // The seizure mapping is live, so the daemon can now process events.
     // Signal readiness for the e2e harness.
     crate::daemon::signal_ready();
 
-    run_event_loop(handle, cgeventtap, shutdown)
+    run_event_loop(handle, shutdown)
 }
 
 /// Poll the CFRunLoop until the shutdown flag is set.
 fn run_event_loop(
     handle: super::iokit_hid::SeizureHandle,
-    cgeventtap: Option<super::iokit_hid::CgEventTapHandle>,
     shutdown: Arc<AtomicBool>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // `kCFRunLoopCommonModes` is a pseudo-mode that cannot be passed to
     // CFRunLoopRunInMode; `kCFRunLoopDefaultMode` is a member of the common
-    // modes set and receives the queue callbacks and the CGEventTap events.
+    // modes set and receives the queue callbacks.
     while !shutdown.load(Ordering::Acquire) {
         CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
     }
 
     println!("Shutdown signal received. Cleaning up...");
     drop(handle);
-    drop(cgeventtap);
 
     Ok(())
 }

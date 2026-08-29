@@ -7,111 +7,151 @@
 // $Source$
 // $Revision$
 
-//! macOS keyboard injector using CGEvent for event injection.
+//! macOS keyboard injector using a second Karabiner virtual keyboard.
 //!
-//! Injected events are posted at HIDEventTap so they reach the session
-//! level and are visible to both the daemon's capture and external
-//! observers.
+//! The injector opens its own connection to the Karabiner DriverKit daemon
+//! and registers a virtual keyboard with the injection identity
+//! ([`INJECTION_KEYBOARD_IDENTITY`]).  The daemon under test seizes that
+//! keyboard through the same IOKit path it uses for physical keyboards, so
+//! injected keystrokes flow through the regular capture pipeline — no
+//! CGEventTap, and no feedback loop from the daemon's own output keyboard.
 
-use std::{thread, time::Duration};
-
-use objc2_core_graphics::{
-    CGEvent, CGEventSource, CGEventSourceStateID, CGEventTapLocation,
-    CGEventTapPlacement, CGEventType,
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
 };
 
 use super::{InjectorError, KeyInjector};
+use crate::{
+    HidUsage,
+    platform::{
+        INJECTION_KEYBOARD_IDENTITY, KarabinerClient,
+        cg_keycode_to_hid_usage_full,
+    },
+};
+
+/// How long `setup()` waits for the injection keyboard to become ready.
+const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Inter-event pacing, matching the previous CGEvent-based injector.
+const EVENT_PACING: Duration = Duration::from_millis(5);
 
 /// macOS keyboard injector for end-to-end tests.
+///
+/// Owns a [`KarabinerClient`] connection that registers the injection
+/// keyboard.  Held keys are tracked so that every report is a complete
+/// snapshot of the keyboard state: HID keyboard reports are not deltas, so
+/// a report must carry every key that is currently down.
 pub struct MacOSInjector {
-    /// Flag indicating whether `setup()` has been called successfully.
-    is_setup: bool,
+    /// The client that owns the injection keyboard.  `None` until
+    /// `setup()` succeeds and after `teardown()`.
+    client: Option<Arc<KarabinerClient>>,
+
+    /// The usages currently held down.
+    held: Mutex<HashSet<HidUsage>>,
 }
 
 impl MacOSInjector {
-    /// Check if the current process has the permissions needed to create
-    /// an event tap.
-    fn check_permissions() -> Result<(), InjectorError> {
-        let mask =
-            (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::KeyUp.0);
-
-        // IMPORTANT: `tap_create` with a nil transformer returns a *listing*
-        // of existing taps, not a new tap. On a fresh system where no apps
-        // have Accessibility permissions, that list is empty and the call
-        // returns `None` regardless of whether *we* could create a tap.
-        // To actually probe our own permission, we must pass a real callback
-        // so the function creates a temporary probe tap.
-        let probe = unsafe {
-            CGEvent::tap_create(
-                CGEventTapLocation::HIDEventTap,
-                CGEventTapPlacement::HeadInsertEventTap,
-                objc2_core_graphics::CGEventTapOptions::Default,
-                mask,
-                Some(probe_callback),
-                std::ptr::null_mut(),
-            )
-        };
-
-        if probe.is_some() {
-            Ok(())
-        } else {
-            Err(InjectorError::PermissionDenied(
-                "Accessibility permission required. Grant it in System \
-                 Settings > Privacy & Security > Accessibility."
-                    .to_string(),
-            ))
+    /// Build the report state for a set of held keys: the modifier byte and
+    /// the sorted non-modifier usage ids.
+    ///
+    /// Modifier keys travel in the report's modifier byte rather than the
+    /// usage slots — the same convention the daemon's output path uses.
+    fn report_for(held: &HashSet<HidUsage>) -> (u8, Vec<u16>) {
+        let mut modifiers = 0u8;
+        let mut usages: Vec<u16> = Vec::new();
+        for usage in held {
+            if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(*usage) {
+                modifiers |= 1 << bit;
+            } else {
+                usages.push(usage.id());
+            }
         }
+        usages.sort_unstable();
+        (modifiers, usages)
     }
 
-    /// Inject a keyboard event using a freshly created event source.
-    fn inject_key(
-        &self,
-        code: u16,
-        is_down: bool,
-    ) -> Result<(), InjectorError> {
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-            .ok_or_else(|| {
-                InjectorError::InjectionFailed(
-                    "failed to create CGEventSource for injection".to_string(),
-                )
-            })?;
+    /// Translate a CGKeyCode, update the held set, and send the new state.
+    fn inject(&self, code: u16, is_down: bool) -> Result<(), InjectorError> {
+        let usage = cg_keycode_to_hid_usage_full(code).ok_or_else(|| {
+            InjectorError::InjectionFailed(format!(
+                "no keyboard-page HID usage for key code {code}"
+            ))
+        })?;
 
-        let Some(event) =
-            CGEvent::new_keyboard_event(Some(&source), code, is_down)
-        else {
-            return Err(InjectorError::InjectionFailed(format!(
-                "failed to create keyboard event for code {code}"
-            )));
+        let (modifiers, usages) = {
+            let mut held = self.held.lock().unwrap();
+            if is_down {
+                held.insert(usage);
+            } else {
+                held.remove(&usage);
+            }
+            Self::report_for(&held)
         };
 
-        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
-        thread::sleep(Duration::from_millis(5));
+        let client = self.client.as_ref().ok_or_else(|| {
+            InjectorError::InjectionFailed(
+                "the injector is not set up".to_string(),
+            )
+        })?;
+
+        client
+            .send_keyboard_report(modifiers, &usages)
+            .map_err(|e| InjectorError::InjectionFailed(e.to_string()))?;
+        thread::sleep(EVENT_PACING);
         Ok(())
     }
 }
 
 impl KeyInjector for MacOSInjector {
     fn new() -> Result<Option<Self>, InjectorError> {
-        Self::check_permissions()?;
+        // The prerequisite is root access to the Karabiner service socket,
+        // not Accessibility: the injection keyboard is a DriverKit device,
+        // and only root may talk to the daemon that owns it.
+        KarabinerClient::probe_socket().map_err(|e| {
+            InjectorError::PermissionDenied(format!(
+                "cannot reach the Karabiner service socket ({e}); is the \
+                 Karabiner-VirtualHIDDevice-Daemon running, and is this \
+                 process running as root?"
+            ))
+        })?;
 
-        Ok(Some(Self { is_setup: false }))
+        Ok(Some(Self {
+            client: None,
+            held: Mutex::new(HashSet::new()),
+        }))
     }
 
     fn setup(&mut self) -> Result<(), InjectorError> {
-        self.is_setup = true;
+        let client = KarabinerClient::connect(INJECTION_KEYBOARD_IDENTITY)
+            .map_err(|e| InjectorError::DeviceCreationFailed(e.to_string()))?;
+
+        if !client.wait_ready(SETUP_TIMEOUT) {
+            return Err(InjectorError::DeviceCreationFailed(format!(
+                "the injection keyboard did not become ready within {} s",
+                SETUP_TIMEOUT.as_secs()
+            )));
+        }
+
+        self.client = Some(Arc::new(client));
         Ok(())
     }
 
     fn inject_key_down(&self, code: u16) -> Result<(), InjectorError> {
-        self.inject_key(code, true)
+        self.inject(code, true)
     }
 
     fn inject_key_up(&self, code: u16) -> Result<(), InjectorError> {
-        self.inject_key(code, false)
+        self.inject(code, false)
     }
 
     fn teardown(&mut self) {
-        self.is_setup = false;
+        // Dropping the client closes the socket; the daemon destroys the
+        // injection keyboard node when the connection goes away.
+        self.client = None;
+        self.held.lock().unwrap().clear();
     }
 }
 
@@ -119,21 +159,6 @@ impl Drop for MacOSInjector {
     fn drop(&mut self) {
         self.teardown();
     }
-}
-
-// ---------------------------------------------------------------------------
-// FFI callback used only for the permission probe tap
-// ---------------------------------------------------------------------------
-
-/// Minimal callback that just passes events through.  Only used during
-/// permission probing — the probe tap is dropped immediately after creation.
-unsafe extern "C-unwind" fn probe_callback(
-    _proxy: objc2_core_graphics::CGEventTapProxy,
-    _event_type: CGEventType,
-    event: core::ptr::NonNull<objc2_core_graphics::CGEvent>,
-    _user_info: *mut std::ffi::c_void,
-) -> *mut objc2_core_graphics::CGEvent {
-    event.as_ptr()
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +181,37 @@ mod tests {
             "Injector::new() returned {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn report_for_empty() {
+        let held: HashSet<HidUsage> = HashSet::new();
+        let (modifiers, usages) = MacOSInjector::report_for(&held);
+        assert_eq!(modifiers, 0);
+        assert!(usages.is_empty());
+    }
+
+    #[test]
+    fn report_for_splits_modifiers_and_usages() {
+        let mut held: HashSet<HidUsage> = HashSet::new();
+        held.insert(HidUsage::LeftShift);
+        held.insert(HidUsage::B);
+
+        let (modifiers, usages) = MacOSInjector::report_for(&held);
+        // LeftShift is modifier bit 1; B is usage 0x05.
+        assert_eq!(modifiers, 1 << 1);
+        assert_eq!(usages, vec![0x05]);
+    }
+
+    #[test]
+    fn report_for_sorts_usages() {
+        let mut held: HashSet<HidUsage> = HashSet::new();
+        held.insert(HidUsage::Z); // 0x1D
+        held.insert(HidUsage::A); // 0x04
+
+        let (modifiers, usages) = MacOSInjector::report_for(&held);
+        assert_eq!(modifiers, 0);
+        assert_eq!(usages, vec![0x04, 0x1D]);
     }
 
     #[test]

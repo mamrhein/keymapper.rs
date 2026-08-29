@@ -22,14 +22,13 @@
 use std::{collections::HashSet, ffi::c_void, ptr, sync::Arc};
 
 use objc2_core_foundation::{
-    CFIndex, CFMachPort, CFRetained, CFRunLoop, CFRunLoopSource, CFString,
-    CFStringBuiltInEncodings, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
-};
-use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventTapLocation, CGEventTapOptions,
-    CGEventTapPlacement, CGEventType, CGKeyCode,
+    CFIndex, CFRunLoop, CFString, CFStringBuiltInEncodings,
+    kCFRunLoopDefaultMode,
 };
 
+use super::{
+    INJECTION_KEYBOARD_IDENTITY, KeyboardIdentity, OUTPUT_KEYBOARD_IDENTITY,
+};
 use crate::common::hid_usage::{HidUsage, PAGE_CONSUMER};
 
 // ---------------------------------------------------------------------------
@@ -90,13 +89,15 @@ type CFStringRef = *const c_void;
 #[allow(non_upper_case_globals)]
 const kCFAllocatorDefault: CFAllocatorRef = ptr::null_mut();
 
-/// `kCFNumberUIntType` — unsigned 32-bit integer CFNumber type.
+/// `kCFNumberSInt32Type` — signed 32-bit integer CFNumber type.
+///
+/// The CF API has no unsigned 32-bit number type; signed 32-bit is the
+/// correct choice for reading 16-bit VID/PID values. (An earlier revision
+/// used the value `1` under a "UInt" name, but `1` is actually
+/// `kCFNumberSInt8Type`, which silently truncated every numeric property
+/// read to 8 bits.)
 #[allow(non_upper_case_globals)]
-const kCFNumberUIntType: u32 = 1;
-
-/// `kCFNumberInt32Type` — signed 32-bit integer CFNumber type.
-#[allow(non_upper_case_globals)]
-const kCFNumberInt32Type: u32 = 3;
+const kCFNumberSInt32Type: u32 = 3;
 
 /// `kIOHIDOptionsTypeNone`.
 #[allow(non_upper_case_globals)]
@@ -129,22 +130,6 @@ const kIOHIDSerialNumberKey: &str = "Serial Number";
 /// `kIOHIDProductKey`.
 #[allow(non_upper_case_globals)]
 const kIOHIDProductKey: &str = "Product";
-
-/// Serial number of the Karabiner DriverKit virtual keyboard.
-///
-/// Hardcoded in the pqrs driver, so it is stable across versions.  This is
-/// the primary marker used to exclude our own output device from seizure —
-/// seizing it would create an infinite remap loop (feedback loop).
-const KARABINER_VIRTUAL_KEYBOARD_SERIAL: &str =
-    "pqrs.org:Karabiner-DriverKit-VirtualHIDKeyboard";
-
-/// Product-name prefix of the Karabiner DriverKit virtual keyboard.
-///
-/// The full product string is `Karabiner DriverKit VirtualHIDKeyboard
-/// <driver-version>`, so only a prefix match is possible.  Used as a
-/// secondary check when the serial number property is unavailable.
-const KARABINER_VIRTUAL_KEYBOARD_PRODUCT_PREFIX: &str =
-    "Karabiner DriverKit VirtualHIDKeyboard";
 
 /// USB HID usage page for Keyboard/Keypad.
 const HID_USAGE_PAGE_KEYBOARD: u32 = 0x07;
@@ -835,6 +820,10 @@ pub struct HidQueueContext {
     // held.  Mapped modifiers are excluded so their self-contained output
     // taps do not leak into forwarded reports.
     pub forwarded_modifiers: u8,
+    // Bitmask of modifier keys that were part of a fired trigger and have
+    // already been released on the virtual keyboard.  Their physical release
+    // is swallowed so it is not forwarded a second time.
+    pub consumed_modifiers: u8,
 }
 
 // ---------------------------------------------------------------------------
@@ -845,10 +834,6 @@ pub struct HidQueueContext {
 // mapped output, unmapped keys forwarded unchanged.  A seized keyboard is
 // invisible to the OS, so anything not re-emitted would be lost; forwarding
 // unmapped keys keeps the seized keyboards usable for normal typing.
-//
-// Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`) additionally observes
-// injected events via a CGEventTap, because those never reach the IOKit HID
-// queues of the seized physical keyboards.  See `start_cgeventtap_capture`.
 
 // ---------------------------------------------------------------------------
 // HidDevice — represents a discovered HID keyboard device
@@ -1000,7 +985,7 @@ impl HidDevice {
         let ok = unsafe {
             CFNumberGetValue(
                 value as CFNumberRef,
-                kCFNumberUIntType,
+                kCFNumberSInt32Type,
                 &mut num as *mut u32 as *mut c_void,
             )
         };
@@ -1013,21 +998,40 @@ impl HidDevice {
         Some(num)
     }
 
-    /// Returns true if this device is the Karabiner DriverKit virtual
-    /// keyboard (our own output device).
+    /// Returns the device's (vendor ID, product ID) pair, or `None` if
+    /// either property is absent.
     ///
-    /// The virtual keyboard matches the generic keyboard matcher (usage
-    /// page 0x01, usage 0x06), so it must be excluded from seizure to
-    /// prevent a feedback loop.  Identified by the driver's hardcoded
-    /// serial number, with a product-name prefix match as a secondary
-    /// check.
-    pub fn is_karabiner_virtual_keyboard(&self) -> bool {
-        let serial = self.string_property(kIOHIDSerialNumberKey);
-        let product = self.string_property(kIOHIDProductKey);
-        matches_karabiner_virtual_keyboard(
-            serial.as_deref(),
-            product.as_deref(),
-        )
+    /// The pqrs DriverKit driver registers the no-space keys `VendorID` /
+    /// `ProductID`, while on macOS 26 the standard `kIOHIDMapKeyVendorID` /
+    /// `kIOHIDMapKeyProductID` keys ("Vendor ID" / "Product ID") return
+    /// null for every device.  Each key is tried in turn, so the lookup
+    /// works for both real and virtual keyboards across OS versions.
+    pub fn vendor_product_id(&self) -> Option<(u32, u32)> {
+        let vendor_id = self
+            .number_property(kIOHIDMapKeyVendorID)
+            .or_else(|| self.number_property("VendorID"))?;
+        let product_id = self
+            .number_property(kIOHIDMapKeyProductID)
+            .or_else(|| self.number_property("ProductID"))?;
+        Some((vendor_id, product_id))
+    }
+
+    /// Returns true if this device is the daemon's output keyboard.
+    ///
+    /// The output keyboard matches the generic keyboard matcher, so it must
+    /// be excluded from seizure to prevent a feedback loop.  Identified by
+    /// its VID/PID, which the driver takes from the initialize request.
+    pub fn is_output_keyboard(&self) -> bool {
+        identity_matches(self.vendor_product_id(), OUTPUT_KEYBOARD_IDENTITY)
+    }
+
+    /// Returns true if this device is the e2e injection keyboard.
+    ///
+    /// The test harness creates a second virtual keyboard with this
+    /// identity; the daemon seizes it like any other physical keyboard so
+    /// injected keys flow through the normal remap path.
+    pub fn is_injection_keyboard(&self) -> bool {
+        identity_matches(self.vendor_product_id(), INJECTION_KEYBOARD_IDENTITY)
     }
 
     /// Build a platform-agnostic [`KeyboardInfo`] from this device's IOKit
@@ -1064,20 +1068,15 @@ impl HidDevice {
     }
 }
 
-/// Returns true if the given device properties identify the Karabiner
-/// DriverKit virtual keyboard.
-///
-/// The serial number is the primary marker (exact match); the product name
-/// is a secondary check (prefix match, because the suffix is the driver
-/// version).
-fn matches_karabiner_virtual_keyboard(
-    serial: Option<&str>,
-    product: Option<&str>,
+/// Returns true if the given (vendor ID, product ID) pair matches the
+/// keyboard identity.
+fn identity_matches(
+    vid_pid: Option<(u32, u32)>,
+    identity: KeyboardIdentity,
 ) -> bool {
-    serial.is_some_and(|s| s == KARABINER_VIRTUAL_KEYBOARD_SERIAL)
-        || product.is_some_and(|p| {
-            p.starts_with(KARABINER_VIRTUAL_KEYBOARD_PRODUCT_PREFIX)
-        })
+    vid_pid.is_some_and(|(vid, pid)| {
+        vid == identity.vendor_id as u32 && pid == identity.product_id as u32
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,10 +1236,10 @@ fn process_hid_value(
 
 /// Process a single key event (down or up) identified by its `HidUsage`.
 ///
-/// This is the shared core of the capture logic, invoked both by the IOKit
-/// queue callback (for seized physical keyboards) and by the CGEventTap
-/// callback (for injected events observed in capture mode).  It performs
-/// deduplication, modifier tracking, rule lookup, and emission/forwarding.
+/// This is the core of the capture logic, invoked by the IOKit queue
+/// callback for every seized keyboard (physical keyboards and the e2e
+/// injection keyboard alike).  It performs deduplication, modifier tracking,
+/// rule lookup, and emission/forwarding.
 fn process_key_event(
     context: &mut HidQueueContext,
     hid_usage: HidUsage,
@@ -1283,6 +1282,22 @@ fn process_key_event(
         drop(guard);
 
         if let Some(outputs) = active_outputs {
+            // The trigger's modifiers were forwarded when pressed.  Release
+            // them now so the output is emitted as a clean tap: holding them
+            // would produce an unintended control sequence (e.g. the rule
+            // Ctrl+Semicolon -> C would emit Ctrl+C, i.e. SIGINT).  Mark them
+            // consumed so their physical release is swallowed below.
+            let consumed = lookup_modifiers & context.forwarded_modifiers;
+            if consumed != 0 {
+                context.forwarded_modifiers &= !consumed;
+                context.consumed_modifiers |= consumed;
+                post_forwarded_state(
+                    &context.conn,
+                    &context.forwarded_keys,
+                    context.forwarded_modifiers,
+                );
+            }
+
             // Mapped: emit the mapped outputs via the virtual HID keyboard.
             // Remember the key was mapped so its release is swallowed rather
             // than forwarded.
@@ -1310,6 +1325,15 @@ fn process_key_event(
         // correct modifier state.
         if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage) {
             context.modifier_state &= !(1 << bit);
+        }
+
+        // A consumed modifier (part of a fired trigger) was already released
+        // on the virtual keyboard when the trigger fired; swallow its release.
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(hid_usage)
+            && context.consumed_modifiers & (1 << bit) != 0
+        {
+            context.consumed_modifiers &= !(1 << bit);
+            return;
         }
 
         // A mapped key's release is swallowed; a forwarded key's release
@@ -1367,10 +1391,16 @@ pub unsafe fn for_each_hid_value(
 
 /// Emit a single `NativeKey` through the Karabiner virtual keyboard.
 ///
-/// Posts a report with the modifier and base key pressed, followed by a
-/// release report.  Because the virtual keyboard report is a shared state
-/// snapshot, both reports also carry the currently-held forwarded keys and
-/// modifier byte so that emitting a mapped output does not clear them.
+/// Emits the output as a sequence of state-snapshot reports so that every key
+/// transition is its own report: each output modifier down (ascending bit
+/// order), the base key down, the base key up, then each output modifier up
+/// (descending bit order).  Posting one transition per report makes the
+/// captured event order deterministic — a single report carrying both a
+/// modifier and the base key would let IOKit deliver the two values in an
+/// unspecified order.  Because each report is a full state snapshot, it also
+/// carries the currently-held forwarded keys and modifier byte so that
+/// emitting a mapped output does not clear them (already-held keys are
+/// repeats the monitor suppresses).
 /// Dispatches on the output usage's page:
 /// - Keyboard page (0x07): a 67-byte `keyboard_input` report (32 × 16-bit
 ///   usages).
@@ -1384,21 +1414,44 @@ fn emit_hid_report(
     use crate::common::hid_usage::PAGE_KEYBOARD;
 
     if native_key.usage.page() == PAGE_KEYBOARD {
-        // Keyboard page: post the base usage together with every held
-        // forwarded key, then a release report that keeps the forwarded keys
-        // but drops the base.
-        let mut usages: Vec<u16> = forwarded_keys.iter().copied().collect();
-        usages.push(native_key.usage.id());
-        usages.sort_unstable();
+        let base_usage = native_key.usage.id();
+        let output_modifiers = native_key.modifiers;
 
-        let modifiers = native_key.modifiers | forwarded_modifiers;
-        let _ = conn.send_keyboard_report(modifiers, &usages);
-
-        // Release: the forwarded keys stay held; only the base is dropped.
-        let release_usages: Vec<u16> =
+        // State snapshots with and without the base key.  Sorted for a
+        // deterministic report layout (slot order is irrelevant to the
+        // virtual keyboard's state tracking, but determinism aids debugging).
+        let mut usages_with_base: Vec<u16> =
             forwarded_keys.iter().copied().collect();
-        let _ =
-            conn.send_keyboard_report(forwarded_modifiers, &release_usages);
+        usages_with_base.push(base_usage);
+        usages_with_base.sort_unstable();
+
+        let mut usages_without_base: Vec<u16> =
+            forwarded_keys.iter().copied().collect();
+        usages_without_base.sort_unstable();
+
+        // Press each output modifier, one at a time in ascending bit order,
+        // so the captured event order is deterministic.
+        let mut modifiers = forwarded_modifiers;
+        for bit in 0..8 {
+            if (output_modifiers >> bit) & 1 == 1 {
+                modifiers |= 1 << bit;
+                let _ =
+                    conn.send_keyboard_report(modifiers, &usages_without_base);
+            }
+        }
+
+        // Press the base key with all output modifiers held, then release it.
+        let _ = conn.send_keyboard_report(modifiers, &usages_with_base);
+        let _ = conn.send_keyboard_report(modifiers, &usages_without_base);
+
+        // Release each output modifier, one at a time in descending bit order.
+        for bit in (0..8).rev() {
+            if (output_modifiers >> bit) & 1 == 1 {
+                modifiers &= !(1 << bit);
+                let _ =
+                    conn.send_keyboard_report(modifiers, &usages_without_base);
+            }
+        }
     } else {
         // Consumer page: post the usage, then an all-clear report to release.
         let _ = conn.send_consumer_report(native_key.usage.id());
@@ -1529,7 +1582,7 @@ impl HidDeviceManager {
         let usage_page_number = unsafe {
             CFNumberCreate(
                 kCFAllocatorDefault,
-                kCFNumberUIntType,
+                kCFNumberSInt32Type,
                 &0x01u32 as *const _ as *const _,
             )
         };
@@ -1547,7 +1600,7 @@ impl HidDeviceManager {
         let usage_number = unsafe {
             CFNumberCreate(
                 kCFAllocatorDefault,
-                kCFNumberUIntType,
+                kCFNumberSInt32Type,
                 &0x06u32 as *const _ as *const _,
             )
         };
@@ -1615,8 +1668,8 @@ impl HidDeviceManager {
     }
 
     /// Return the number of devices currently matched by this manager,
-    /// including the Karabiner DriverKit virtual keyboard (unlike
-    /// [`Self::scan_devices`], which skips it).
+    /// including both Karabiner DriverKit virtual keyboards (unlike
+    /// [`Self::scan_devices`], which skips the output keyboard).
     ///
     /// Used by the e2e monitor to log progress while waiting for the
     /// virtual keyboard to appear.
@@ -1635,12 +1688,14 @@ impl HidDeviceManager {
         count
     }
 
-    /// Find the Karabiner DriverKit virtual keyboard among the matched
-    /// devices, if it is currently connected.
+    /// Find the daemon's output keyboard among the matched devices, if it
+    /// is currently connected.
     ///
-    /// Unlike [`Self::scan_devices`], which skips the virtual keyboard (to
-    /// prevent a remap feedback loop), this returns it — the e2e monitor
-    /// seizes it to capture the daemon's output.
+    /// Matches on the output keyboard's VID/PID, so the e2e injection
+    /// keyboard (a distinct identity) is never returned.  Unlike
+    /// [`Self::scan_devices`], which skips the output keyboard (to prevent
+    /// a remap feedback loop), this returns it — the e2e monitor seizes it
+    /// to capture the daemon's output.
     pub fn find_karabiner_virtual_keyboard(&self) -> Option<HidDevice> {
         let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
 
@@ -1704,9 +1759,10 @@ impl Drop for HidDeviceManager {
 /// `CFSetApplyFunction` applier for [`HidDeviceManager::scan_devices`].
 ///
 /// Collects every matched device into the `Vec<HidDevice>` passed as the
-/// context, skipping the Karabiner DriverKit virtual keyboard: it matches
-/// the generic keyboard matcher, and seizing our own output device would
-/// create an infinite remap loop.
+/// context, skipping only the daemon's output keyboard: it matches the
+/// generic keyboard matcher, and seizing our own output device would
+/// create an infinite remap loop.  The e2e injection keyboard is included
+/// on purpose — the daemon seizes it like any other physical keyboard.
 unsafe extern "C" fn scan_devices_applier(
     value: *const c_void,
     info: *mut c_void,
@@ -1716,9 +1772,9 @@ unsafe extern "C" fn scan_devices_applier(
 
     let hid_device = HidDevice { device };
 
-    if hid_device.is_karabiner_virtual_keyboard() {
+    if hid_device.is_output_keyboard() {
         println!(
-            "IOKit HID: skipping Karabiner virtual keyboard at location {}",
+            "IOKit HID: skipping the output keyboard at location {}",
             hid_device.location_id_string()
         );
         return;
@@ -1730,8 +1786,9 @@ unsafe extern "C" fn scan_devices_applier(
 /// `CFSetApplyFunction` applier for
 /// [`HidDeviceManager::find_karabiner_virtual_keyboard`].
 ///
-/// Records the first device that identifies as the Karabiner DriverKit
-/// virtual keyboard in the `Option<HidDevice>` passed as the context.
+/// Records the first device that identifies as the daemon's output keyboard
+/// in the `Option<HidDevice>` passed as the context.  The e2e injection
+/// keyboard has a distinct identity and is never matched.
 unsafe extern "C" fn find_karabiner_applier(
     value: *const c_void,
     info: *mut c_void,
@@ -1746,7 +1803,7 @@ unsafe extern "C" fn find_karabiner_applier(
     let device = value as *mut IOHIDDevice;
     let hid_device = HidDevice { device };
 
-    if hid_device.is_karabiner_virtual_keyboard() {
+    if hid_device.is_output_keyboard() {
         *result = Some(hid_device);
     }
 }
@@ -1887,6 +1944,7 @@ pub fn start_iohid_seizure_mapping(
             forwarded_keys: HashSet::new(),
             mapped_keys: HashSet::new(),
             forwarded_modifiers: 0,
+            consumed_modifiers: 0,
         };
 
         let handle = queue.register_value_callback(ctx);
@@ -1910,157 +1968,6 @@ pub fn start_iohid_seizure_mapping(
         _manager: manager,
         _devices: devices,
         _queue_handles: queue_handles,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// CGEventTap capture (capture mode only)
-// ---------------------------------------------------------------------------
-//
-// In capture mode the daemon also observes injected events via a CGEventTap.
-// The e2e injector posts keys with `CGEventPost` at the HID event tap, which
-// enters the CoreGraphics event stream but never reaches the IOKit HID queues
-// of the seized physical keyboards.  This tap closes that gap: it sees the
-// injected events and feeds them through the same [`process_key_event`] logic
-// as the IOKit path, so they are re-emitted through the virtual keyboard.
-
-/// Handle that keeps a capture CGEventTap, its run loop source, and its
-/// context alive, and cleans up on drop.
-pub struct CgEventTapHandle {
-    tap: CFRetained<CFMachPort>,
-    _run_loop_source: CFRetained<CFRunLoopSource>,
-    context_ptr: *mut HidQueueContext,
-}
-
-impl Drop for CgEventTapHandle {
-    fn drop(&mut self) {
-        unsafe {
-            CGEvent::tap_enable(&self.tap, false);
-            if !self.context_ptr.is_null() {
-                drop(Box::from_raw(self.context_ptr));
-            }
-        }
-    }
-}
-
-/// FFI callback for the capture CGEventTap.
-///
-/// Maps each key down/up event's `CGKeyCode` to a `HidUsage` and feeds it
-/// through [`process_key_event`].  Events are passed through (not consumed)
-// so they still reach the normal event stream.
-unsafe extern "C-unwind" fn cgeventtap_callback(
-    _proxy: objc2_core_graphics::CGEventTapProxy,
-    event_type: CGEventType,
-    event: core::ptr::NonNull<CGEvent>,
-    user_info: *mut c_void,
-) -> *mut CGEvent {
-    if user_info.is_null() {
-        return event.as_ptr();
-    }
-
-    let context = unsafe { &mut *(user_info as *mut HidQueueContext) };
-
-    // Only key down/up events carry a keycode we can map to a HID usage.
-    let is_down = event_type == CGEventType::KeyDown;
-    if !is_down && event_type != CGEventType::KeyUp {
-        return event.as_ptr();
-    }
-
-    let keycode: CGKeyCode = unsafe {
-        CGEvent::integer_value_field(
-            Some(event.as_ref()),
-            CGEventField::KeyboardEventKeycode,
-        )
-    } as CGKeyCode;
-
-    if let Some(hid_usage) =
-        super::keycode::cg_keycode_to_hid_usage_full(keycode)
-    {
-        eprintln!(
-            "CGEventTap: {} {}",
-            if is_down { "down" } else { "up" },
-            hid_usage.as_str()
-        );
-        process_key_event(context, hid_usage, is_down);
-    }
-
-    // Pass the event through (do not consume it).
-    event.as_ptr()
-}
-
-/// Start a CGEventTap-based capture (capture mode only).
-///
-/// Creates a tap at the HID event tap location for key down/up events, feeds
-/// each event through [`process_key_event`], and schedules the tap on the
-/// current run loop.  Returns a handle that keeps the tap alive; drop it to
-/// disable and release the tap.
-pub fn start_cgeventtap_capture(
-    lookup: std::sync::Arc<
-        parking_lot::RwLock<dyn crate::daemon::state::Lookup>,
-    >,
-    conn: std::sync::Arc<super::karabiner_client::KarabinerClient>,
-) -> Result<CgEventTapHandle, String> {
-    let mask: u64 =
-        (1u64 << CGEventType::KeyDown.0) | (1u64 << CGEventType::KeyUp.0);
-
-    // Build the shared context up front so its pointer can be passed as the
-    // tap's user info.  The context outlives the tap (freed in Drop after the
-    // tap is disabled).
-    let context = Box::new(HidQueueContext {
-        lookup,
-        conn,
-        modifier_state: 0,
-        pressed_keys: HashSet::new(),
-        device_id: String::from("cgeventtap"),
-        forwarded_keys: HashSet::new(),
-        mapped_keys: HashSet::new(),
-        forwarded_modifiers: 0,
-    });
-    let context_ptr = Box::into_raw(context);
-
-    let tap = unsafe {
-        CGEvent::tap_create(
-            CGEventTapLocation::HIDEventTap,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            mask,
-            Some(cgeventtap_callback),
-            context_ptr as *mut c_void,
-        )
-    };
-
-    let Some(tap) = tap else {
-        unsafe { drop(Box::from_raw(context_ptr)) };
-        return Err("failed to create CGEventTap; verify \
-                    Accessibility/Input Monitoring permissions"
-            .to_string());
-    };
-
-    let Some(run_loop_source) =
-        CFMachPort::new_run_loop_source(None, Some(&tap), 0)
-    else {
-        unsafe { drop(Box::from_raw(context_ptr)) };
-        return Err(
-            "failed to create run loop source for CGEventTap".to_string()
-        );
-    };
-
-    let Some(run_loop) = CFRunLoop::current() else {
-        unsafe { drop(Box::from_raw(context_ptr)) };
-        return Err("no current run loop for CGEventTap".to_string());
-    };
-
-    run_loop
-        .add_source(Some(&run_loop_source), unsafe { kCFRunLoopCommonModes });
-
-    CGEvent::tap_enable(&tap, true);
-
-    eprintln!("macOS: capture CGEventTap enabled (KEYMAPPER_CAPTURE).");
-
-    Ok(CgEventTapHandle {
-        tap,
-        _run_loop_source: run_loop_source,
-        context_ptr,
     })
 }
 
@@ -2114,63 +2021,746 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Karabiner virtual keyboard marker matching (feedback-loop filter)
+    // Keyboard identity matching (feedback-loop filter)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn karabiner_marker_matches_by_serial_number() {
-        assert!(matches_karabiner_virtual_keyboard(
-            Some(KARABINER_VIRTUAL_KEYBOARD_SERIAL),
-            None,
+    fn identity_matches_output_keyboard() {
+        assert!(identity_matches(
+            Some((0x16c0, 0x27db)),
+            OUTPUT_KEYBOARD_IDENTITY
         ));
     }
 
     #[test]
-    fn karabiner_marker_matches_by_product_prefix() {
-        // The product string carries the driver version as a suffix.
-        assert!(matches_karabiner_virtual_keyboard(
-            None,
-            Some("Karabiner DriverKit VirtualHIDKeyboard 1.8.0"),
+    fn identity_matches_injection_keyboard() {
+        assert!(identity_matches(
+            Some((0x16c0, 0x27dc)),
+            INJECTION_KEYBOARD_IDENTITY
         ));
     }
 
     #[test]
-    fn karabiner_marker_matches_when_both_present() {
-        assert!(matches_karabiner_virtual_keyboard(
-            Some(KARABINER_VIRTUAL_KEYBOARD_SERIAL),
-            Some("Karabiner DriverKit VirtualHIDKeyboard 1.8.0"),
+    fn identity_rejects_cross_match() {
+        // The output keyboard must not match the injection identity and
+        // vice versa; that distinction is what breaks the feedback loop.
+        assert!(!identity_matches(
+            Some((0x16c0, 0x27db)),
+            INJECTION_KEYBOARD_IDENTITY
+        ));
+        assert!(!identity_matches(
+            Some((0x16c0, 0x27dc)),
+            OUTPUT_KEYBOARD_IDENTITY
         ));
     }
 
     #[test]
-    fn karabiner_marker_rejects_physical_keyboard() {
-        assert!(!matches_karabiner_virtual_keyboard(
-            Some("ABC123"),
-            Some("Magic Keyboard"),
+    fn identity_rejects_physical_keyboard() {
+        assert!(!identity_matches(
+            Some((0x046d, 0x0037)),
+            OUTPUT_KEYBOARD_IDENTITY
+        ));
+        assert!(!identity_matches(
+            Some((0x046d, 0x0037)),
+            INJECTION_KEYBOARD_IDENTITY
         ));
     }
 
     #[test]
-    fn karabiner_marker_rejects_missing_properties() {
-        assert!(!matches_karabiner_virtual_keyboard(None, None));
+    fn identity_rejects_missing_properties() {
+        assert!(!identity_matches(None, OUTPUT_KEYBOARD_IDENTITY));
+        assert!(!identity_matches(None, INJECTION_KEYBOARD_IDENTITY));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Throwaway PoC: two concurrent Karabiner virtual keyboards
+// ---------------------------------------------------------------------------
+//
+// Verification gate for the second-keyboard injector design (see
+// `.sketches/Injector revised.md`).  This module proves or refutes two
+// assumptions about the upstream pqrs driver:
+//
+// 1. The daemon hosts two concurrent client connections, each creating its own
+//    virtual keyboard device node.
+// 2. Each device's IOKit `Vendor ID` / `Product ID` properties reflect the
+//    identity it was initialized with, while both share the driver's hardcoded
+//    serial number (so VID/PID, not the serial, is the usable discriminator).
+//
+// The module is throwaway: delete it once the gate has been evaluated.
+// It is skipped unless `KEYMAPPER_POC_TWO_KEYBOARDS=1` is set.  Running it
+// requires root (the daemon socket lives in a root-only directory) and a
+// live Karabiner DriverKit extension.  Stop `keymapperd` first so its
+// output keyboard does not muddy the enumeration:
+//
+// ```sh
+// sudo -E PATH="$PATH" env KEYMAPPER_POC_TWO_KEYBOARDS=1 \
+//     $(which cargo) nextest run --no-capture poc_two_concurrent_keyboards
+// ```
+
+#[cfg(test)]
+mod poc {
+    use std::{
+        io::{ErrorKind, Read, Write},
+        os::unix::net::UnixStream,
+        process::Command,
+        sync::atomic::{AtomicBool, Ordering},
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use super::*;
+
+    /// Path of the Karabiner daemon's UNIX stream socket (mirrors
+    /// `karabiner_client::SOCKET_PATH`).
+    const SOCKET_PATH: &str = "/Library/Application \
+                               Support/org.pqrs/tmp/rootonly/\
+                               karabiner_virtual_hid_device_service.sock";
+
+    // Minimal protocol constants (mirrors `karabiner_client`).
+    const PROTOCOL_VERSION: u16 = 7;
+    const MSG_HEARTBEAT: u8 = 0;
+    const MSG_REQUEST: u8 = 4;
+    const MSG_RESPONSE: u8 = 5;
+    const REQ_KEYBOARD_INITIALIZE: u8 = 0;
+    const RESP_VIRTUAL_HID_KEYBOARD_READY: u8 = 4;
+
+    /// A decoded frame from the daemon.
+    struct PocFrame {
+        msg_type: u8,
+        body: Vec<u8>,
+    }
+
+    impl PocFrame {
+        /// The 8-byte big-endian request ID, if the body carries one.
+        fn request_id(&self) -> Option<u64> {
+            self.body
+                .get(..8)
+                .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+        }
+
+        /// The payload after the request ID (a sequence of state pairs).
+        fn payload(&self) -> &[u8] {
+            self.body.get(8..).unwrap_or(&[])
+        }
+
+        /// Whether the frame reports the virtual keyboard as ready.
+        fn is_ready(&self) -> bool {
+            matches!(self.msg_type, MSG_REQUEST | MSG_RESPONSE)
+                && self.payload().as_chunks::<2>().0.iter().any(|pair| {
+                    pair[0] == RESP_VIRTUAL_HID_KEYBOARD_READY && pair[1] == 1
+                })
+        }
+    }
+
+    /// Encode a frame: `[4-byte BE u32 body_size][1-byte msg_type][body]`,
+    /// where `body_size = 1 + len(body)`.
+    fn encode_frame(msg_type: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(5 + body.len());
+        frame.extend_from_slice(&(1u32 + body.len() as u32).to_be_bytes());
+        frame.push(msg_type);
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// Encode a request/response frame whose body is an 8-byte big-endian
+    /// request ID followed by a payload.
+    fn encode_id_frame(
+        msg_type: u8,
+        request_id: u64,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut body = Vec::with_capacity(8 + payload.len());
+        body.extend_from_slice(&request_id.to_be_bytes());
+        body.extend_from_slice(payload);
+        encode_frame(msg_type, &body)
+    }
+
+    /// A frame reader that tolerates read timeouts mid-frame.
+    ///
+    /// `read_exact` on a stream with a read timeout can return
+    /// `WouldBlock` after consuming part of a frame; the partial bytes
+    /// must be retained for the next call, so they are buffered here.
+    struct FrameReader {
+        stream: UnixStream,
+        pending: Vec<u8>,
+    }
+
+    impl FrameReader {
+        fn new(stream: UnixStream) -> Self {
+            Self {
+                stream,
+                pending: Vec::new(),
+            }
+        }
+
+        fn set_read_timeout(
+            &self,
+            timeout: Option<Duration>,
+        ) -> std::io::Result<()> {
+            self.stream.set_read_timeout(timeout)
+        }
+
+        fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            self.stream.write_all(bytes)
+        }
+
+        /// Read one complete frame, or `None` if no data arrived within
+        /// the read timeout.
+        fn read_frame(&mut self) -> std::io::Result<Option<PocFrame>> {
+            loop {
+                // A complete frame needs at least 5 bytes (4 length + 1
+                // type).
+                if self.pending.len() >= 5 {
+                    let body_size = u32::from_be_bytes(
+                        self.pending[0..4].try_into().unwrap(),
+                    ) as usize;
+                    if !(1..=65_536).contains(&body_size) {
+                        return Err(std::io::Error::new(
+                            ErrorKind::InvalidData,
+                            format!("invalid frame body size {body_size}"),
+                        ));
+                    }
+                    if self.pending.len() >= 4 + body_size {
+                        let frame = PocFrame {
+                            msg_type: self.pending[4],
+                            body: self.pending[5..4 + body_size].to_vec(),
+                        };
+                        self.pending.drain(..4 + body_size);
+                        return Ok(Some(frame));
+                    }
+                }
+
+                let mut buf = [0u8; 4096];
+                match self.stream.read(&mut buf) {
+                    Ok(0) => {
+                        return Err(std::io::Error::new(
+                            ErrorKind::ConnectionAborted,
+                            "connection closed",
+                        ));
+                    }
+                    Ok(n) => {
+                        self.pending.extend_from_slice(&buf[..n]);
+                        continue;
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+    }
+
+    /// Build the 24-byte `virtual_hid_keyboard_parameters` payload:
+    /// `[vendor_id: u64 LE][product_id: u64 LE][country_code: u64 LE]`.
+    fn keyboard_parameters(vendor_id: u64, product_id: u64) -> [u8; 24] {
+        let mut params = [0u8; 24];
+        params[0..8].copy_from_slice(&vendor_id.to_le_bytes());
+        params[8..16].copy_from_slice(&product_id.to_le_bytes());
+        // Country code `not_supported` (zero) is left as-is.
+        params
+    }
+
+    /// Build the `REQ_KEYBOARD_INITIALIZE` request frame for the given
+    /// identity.
+    fn initialize_frame(vendor_id: u64, product_id: u64) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(3 + 24);
+        payload.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        payload.push(REQ_KEYBOARD_INITIALIZE);
+        payload.extend_from_slice(&keyboard_parameters(vendor_id, product_id));
+        encode_id_frame(MSG_REQUEST, 1, &payload)
+    }
+
+    /// Build an empty response frame for the given request ID.
+    fn response_frame(request_id: u64) -> Vec<u8> {
+        encode_id_frame(MSG_RESPONSE, request_id, &[])
+    }
+
+    /// A virtual keyboard held open by a single daemon connection.
+    ///
+    /// Dropping it closes the connection, which destroys the device node.
+    struct PocKeyboard {
+        shutdown: Arc<AtomicBool>,
+        reader: Option<thread::JoinHandle<()>>,
+    }
+
+    impl PocKeyboard {
+        /// Connect to the daemon and initialize a virtual keyboard with the
+        /// given identity, blocking until the daemon reports it as ready.
+        fn new(vendor_id: u64, product_id: u64) -> Result<Self, String> {
+            let stream = UnixStream::connect(SOCKET_PATH).map_err(|e| {
+                format!("cannot connect to the Karabiner daemon: {e}")
+            })?;
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .map_err(|e| e.to_string())?;
+
+            let mut frames = FrameReader::new(stream);
+
+            frames
+                .write_all(&initialize_frame(vendor_id, product_id))
+                .map_err(|e| e.to_string())?;
+
+            // Read frames until the keyboard is ready, answering each state
+            // update (the daemon stalls its reporting otherwise).
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                match frames.read_frame() {
+                    Ok(Some(frame)) => {
+                        // Answer before checking readiness: the ready frame
+                        // itself may be a state update that must be answered.
+                        if frame.msg_type == MSG_REQUEST
+                            && let Some(id) = frame.request_id()
+                        {
+                            frames
+                                .write_all(&response_frame(id))
+                                .map_err(|e| e.to_string())?;
+                        }
+                        if frame.is_ready() {
+                            break;
+                        }
+                    }
+                    Ok(None) => {
+                        if Instant::now() >= deadline {
+                            return Err("timed out waiting for the virtual \
+                                        keyboard to become ready"
+                                .into());
+                        }
+                    }
+                    Err(e) => return Err(format!("socket read failed: {e}")),
+                }
+            }
+
+            // Hand the connection to a keepalive thread that answers state
+            // updates and sends heartbeats for as long as the keyboard is
+            // held.
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let reader_shutdown = Arc::clone(&shutdown);
+            let reader = thread::Builder::new()
+                .name("poc-karabiner-keepalive".into())
+                .spawn(move || keepalive(frames, &reader_shutdown))
+                .map_err(|e| e.to_string())?;
+
+            Ok(Self {
+                shutdown,
+                reader: Some(reader),
+            })
+        }
+    }
+
+    impl Drop for PocKeyboard {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::Release);
+            if let Some(handle) = self.reader.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Keep a connection alive: answer state updates and send heartbeats.
+    ///
+    /// The daemon destroys the virtual keyboard when the connection closes,
+    /// so this must outlive any read timeout: `Ok(None)` (no data within
+    /// the timeout) is the normal outcome and must not end the loop.
+    fn keepalive(mut frames: FrameReader, shutdown: &AtomicBool) {
+        // A short timeout keeps the loop responsive to shutdown.
+        let _ = frames.set_read_timeout(Some(Duration::from_millis(200)));
+
+        let mut last_heartbeat = Instant::now();
+        loop {
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+
+            let now = Instant::now();
+            if now.duration_since(last_heartbeat) >= Duration::from_secs(3) {
+                if frames.write_all(&encode_frame(MSG_HEARTBEAT, &[])).is_err()
+                {
+                    return;
+                }
+                last_heartbeat = now;
+            }
+
+            match frames.read_frame() {
+                Ok(Some(frame)) => {
+                    // Answer state updates; responses need no action.
+                    if frame.msg_type == MSG_REQUEST
+                        && let Some(id) = frame.request_id()
+                        && frames.write_all(&response_frame(id)).is_err()
+                    {
+                        return;
+                    }
+                }
+                // No data within the read timeout is normal; keep waiting.
+                Ok(None) => {}
+                // The connection is gone; nothing left to do.
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// A keyboard device as seen by the PoC. Vendor and product IDs are
+    /// read via both the standard HID keys ("Vendor ID", "Product ID") and
+    /// the driver's no-space registry keys ("VendorID", "ProductID"), since
+    /// the standard keys return null on this OS.
+    struct PocDevice {
+        name: String,
+        serial: Option<String>,
+        vid_std: Option<u32>,
+        pid_std: Option<u32>,
+        vid_nospace: Option<u32>,
+        pid_nospace: Option<u32>,
+    }
+
+    /// Enumerate every keyboard device matched by the given manager,
+    /// including the Karabiner virtual keyboards (unlike `scan_devices`,
+    /// which skips them).
+    fn enumerate_all(manager: &HidDeviceManager) -> Vec<PocDevice> {
+        let device_set = unsafe { IOHIDManagerCopyDevices(manager.manager) };
+        if device_set.is_null() {
+            return Vec::new();
+        }
+
+        let mut devices = Vec::new();
+        unsafe {
+            CFSetApplyFunction(
+                device_set,
+                collect_applier,
+                &mut devices as *mut Vec<PocDevice> as *mut c_void,
+            );
+        }
+        unsafe { CFRelease(device_set as *const _) };
+
+        devices
+    }
+
+    /// Print every matched device with its identity properties.
+    fn print_devices(devices: &[PocDevice]) {
+        println!(
+            "poc: {} keyboard device(s) visible to IOHIDManager:",
+            devices.len()
+        );
+        for d in devices {
+            println!(
+                "  - product={:?} serial={:?} std_vid={:?} std_pid={:?} \
+                 nospace_vid={:?} nospace_pid={:?}",
+                d.name,
+                d.serial,
+                d.vid_std,
+                d.pid_std,
+                d.vid_nospace,
+                d.pid_nospace
+            );
+        }
+    }
+
+    /// Run `ioreg` with the given arguments and return its stdout.
+    fn run_ioreg(args: &[&str]) -> String {
+        let Ok(output) = Command::new("ioreg").args(args).output() else {
+            return "poc: failed to run ioreg".into();
+        };
+        if !output.status.success() {
+            return format!("poc: ioreg exited with {}", output.status);
+        }
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    /// Keep only the lines of a full registry dump that mention the
+    /// Karabiner driver (case-insensitive), with enough context around each
+    /// match to include the node's header and property dictionary.
+    fn filter_karabiner_lines(dump: &str) -> String {
+        const CONTEXT: usize = 60;
+        let lines: Vec<&str> = dump.lines().collect();
+        let mut keep = vec![false; lines.len()];
+        for (i, line) in lines.iter().enumerate() {
+            let lower = line.to_ascii_lowercase();
+            if lower.contains("karabiner") || lower.contains("virtualhid") {
+                let start = i.saturating_sub(CONTEXT);
+                let end = (i + CONTEXT).min(lines.len().saturating_sub(1));
+                for kept in &mut keep[start..=end] {
+                    *kept = true;
+                }
+            }
+        }
+
+        let mut out = String::new();
+        for (line, &kept) in lines.iter().zip(&keep) {
+            if kept {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Capture the IORegistry state while the connections are still alive.
+    /// `IOHIDDeviceGetProperty` does not return VID/PID/serial on this OS,
+    /// so the registry is the source of truth. The targeted
+    /// `AppleUserHIDDevice` class query returns nothing here, so also take
+    /// a full dump and keep only the Karabiner-related lines (with context)
+    /// to find the nodes' actual class and properties. The result is only
+    /// written to the diagnostics file — a full dump overflows the console.
+    fn capture_ioreg() -> String {
+        let targeted = run_ioreg(&[
+            "-p",
+            "IOService",
+            "-r",
+            "-c",
+            "AppleUserHIDDevice",
+            "-l",
+            "-w",
+            "0",
+        ]);
+        let full = run_ioreg(&["-l", "-w", "0"]);
+        let filtered = filter_karabiner_lines(&full);
+
+        format!(
+            "=== ioreg -c AppleUserHIDDevice (targeted) \
+             ===\n{targeted}\n\n=== ioreg full dump, karabiner/virtualhid \
+             lines with context ===\n{filtered}"
+        )
+    }
+
+    /// Write the full diagnostic detail to a file so it can be inspected
+    /// without overflowing the console: the baseline and live device lists,
+    /// plus the registry dump.
+    fn write_diagnostics(
+        baseline: &[PocDevice],
+        devices: &[PocDevice],
+        ioreg: &str,
+    ) {
+        let path = "/tmp/keymapper_poc_diag.txt";
+        let Ok(mut file) = std::fs::File::create(path) else {
+            eprintln!("poc: cannot write diagnostics to {path}");
+            return;
+        };
+
+        let _ = writeln!(
+            file,
+            "=== baseline devices (no virtual keyboards): {} ===",
+            baseline.len()
+        );
+        for d in baseline {
+            let _ = writeln!(
+                file,
+                "  product={:?} vid_std={:?} pid_std={:?} nospace_vid={:?} \
+                 nospace_pid={:?} serial={:?}",
+                d.name,
+                d.vid_std,
+                d.pid_std,
+                d.vid_nospace,
+                d.pid_nospace,
+                d.serial
+            );
+        }
+        let _ = writeln!(
+            file,
+            "\n=== devices with virtual keyboards alive: {} ===",
+            devices.len()
+        );
+        for d in devices {
+            let _ = writeln!(
+                file,
+                "  product={:?} vid_std={:?} pid_std={:?} nospace_vid={:?} \
+                 nospace_pid={:?} serial={:?}",
+                d.name,
+                d.vid_std,
+                d.pid_std,
+                d.vid_nospace,
+                d.pid_nospace,
+                d.serial
+            );
+        }
+        let _ = writeln!(file, "\n=== ioreg capture ===\n{ioreg}");
+
+        eprintln!("poc: diagnostics written to {path}");
+    }
+
+    /// `CFSetApplyFunction` applier that records every matched device.
+    unsafe extern "C" fn collect_applier(
+        value: *const c_void,
+        info: *mut c_void,
+    ) {
+        let devices = unsafe { &mut *(info as *mut Vec<PocDevice>) };
+        let device = value as *mut IOHIDDevice;
+        let hid = HidDevice { device };
+        devices.push(PocDevice {
+            name: hid.string_property(kIOHIDProductKey).unwrap_or_default(),
+            serial: hid.string_property(kIOHIDSerialNumberKey),
+            vid_std: hid.number_property(kIOHIDMapKeyVendorID),
+            pid_std: hid.number_property(kIOHIDMapKeyProductID),
+            vid_nospace: hid.number_property("VendorID"),
+            pid_nospace: hid.number_property("ProductID"),
+        });
     }
 
     #[test]
-    fn karabiner_marker_rejects_similar_serial() {
-        // A different serial must not match, even with a similar prefix.
-        assert!(!matches_karabiner_virtual_keyboard(
-            Some("pqrs.org:Karabiner-DriverKit-VirtualHIDKeyboard-clone"),
-            None,
-        ));
-    }
+    fn poc_two_concurrent_keyboards() {
+        if std::env::var("KEYMAPPER_POC_TWO_KEYBOARDS").is_err() {
+            eprintln!(
+                "poc: skipped (set KEYMAPPER_POC_TWO_KEYBOARDS=1 to run)"
+            );
+            return;
+        }
 
-    #[test]
-    fn karabiner_marker_rejects_similar_product() {
-        // The prefix match must not fire on unrelated product names that
-        // merely share a word.
-        assert!(!matches_karabiner_virtual_keyboard(
-            None,
-            Some("My Karabiner DriverKit VirtualHIDKeyboard Clone"),
-        ));
+        const OUTPUT_ID: (u32, u32) = (0x16c0, 0x27db);
+        const INJECTION_ID: (u32, u32) = (0x16c0, 0x27dc);
+        // The driver's hardcoded serial; both keyboards share it, which is
+        // why the production code matches on VID/PID instead.
+        const SHARED_SERIAL: &str =
+            "pqrs.org:Karabiner-DriverKit-VirtualHIDKeyboard";
+
+        println!("poc: initializing keyboard A with {OUTPUT_ID:?}");
+        let kb_a = PocKeyboard::new(OUTPUT_ID.0 as u64, OUTPUT_ID.1 as u64)
+            .expect("keyboard A (output identity) failed to initialize");
+
+        println!("poc: initializing keyboard B with {INJECTION_ID:?}");
+        let kb_b =
+            PocKeyboard::new(INJECTION_ID.0 as u64, INJECTION_ID.1 as u64)
+                .expect(
+                    "keyboard B (injection identity) failed to initialize",
+                );
+
+        // Create the manager once and schedule it with the current run
+        // loop. `IOHIDManagerCopyDevices` only reflects devices the manager
+        // has been notified about, and those notifications are delivered
+        // through the run loop (the same reason the monitor pumps while
+        // waiting for the virtual keyboard).
+        let manager = HidDeviceManager::new_keyboard_matcher()
+            .expect("failed to create the IOHIDManager");
+        manager.schedule_with_runloop();
+
+        // Let the run loop register the existing (non-virtual) devices so
+        // we have a stable baseline to compare against.
+        for _ in 0..20 {
+            CFRunLoop::run_in_mode(
+                unsafe { kCFRunLoopDefaultMode },
+                0.1,
+                true,
+            );
+        }
+        let baseline = enumerate_all(&manager);
+
+        // Poll until the deadline, pumping the run loop so hotplug
+        // notifications are processed.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut last_log = Instant::now();
+        let mut devices = enumerate_all(&manager);
+        loop {
+            if Instant::now() >= deadline {
+                break;
+            }
+
+            // Pump the run loop so hotplug notifications are processed; a
+            // short timeout keeps the deadline check responsive.
+            CFRunLoop::run_in_mode(
+                unsafe { kCFRunLoopDefaultMode },
+                0.1,
+                true,
+            );
+
+            // Log progress once per second so a stuck wait is diagnosable.
+            if last_log.elapsed() >= Duration::from_secs(1) {
+                last_log = Instant::now();
+                eprintln!(
+                    "poc: waiting; {} device(s) matched (baseline {})",
+                    devices.len(),
+                    baseline.len()
+                );
+            }
+
+            devices = enumerate_all(&manager);
+        }
+
+        print_devices(&devices);
+
+        // The standard HID keys ("Vendor ID", "Product ID") return null on
+        // this OS; the registry stores the driver's no-space keys instead.
+        // Report which devices expose them through IOHIDDeviceGetProperty —
+        // if the two virtual keyboards do, Phase 2 can read VID/PID with no
+        // registry correlation.
+        let exposed: Vec<&PocDevice> = devices
+            .iter()
+            .filter(|d| d.vid_nospace.is_some() || d.pid_nospace.is_some())
+            .collect();
+        println!(
+            "poc: no-space key probe — {} device(s) exposed VendorID/ \
+             ProductID via GetProperty:",
+            exposed.len()
+        );
+        for d in &exposed {
+            println!(
+                "  - product={:?} vendor_id={:?} product_id={:?}",
+                d.name, d.vid_nospace, d.pid_nospace
+            );
+        }
+
+        // Capture the registry state while the connections are still alive,
+        // and write the full detail to a file (the dump is too large for
+        // the console).
+        let ioreg = capture_ioreg();
+        write_diagnostics(&baseline, &devices, &ioreg);
+
+        let delta = devices.len().saturating_sub(baseline.len());
+        println!(
+            "poc: baseline {} device(s) -> {} with keyboards alive (delta \
+             +{})",
+            baseline.len(),
+            devices.len(),
+            delta
+        );
+
+        // The capture is too large for the console; it is only in the
+        // diagnostics file.
+        let ioreg_lines = ioreg.lines().count();
+        println!(
+            "poc: ioreg capture has {ioreg_lines} lines; see \
+             /tmp/keymapper_poc_diag.txt"
+        );
+
+        // The gate: two distinct virtual keyboards, each with its own
+        // VID/PID, both sharing the driver's hardcoded serial.
+        // `IOHIDDeviceGetProperty` does not return these under the standard
+        // HID keys on this OS, so verify against the registry, where the
+        // driver stores them under the no-space key "ProductID" (decimal or
+        // hex PID forms). Checking only "ProductID" lines keeps unrelated
+        // hex addresses from causing a false positive.
+        let pid_lines: Vec<&str> = ioreg
+            .lines()
+            .filter(|line| line.contains("ProductID"))
+            .collect();
+        let has_output = pid_lines.iter().any(|line| {
+            line.contains(&OUTPUT_ID.1.to_string())
+                || line.contains(&format!("{:x}", OUTPUT_ID.1))
+        });
+        let has_injection = pid_lines.iter().any(|line| {
+            line.contains(&INJECTION_ID.1.to_string())
+                || line.contains(&format!("{:x}", INJECTION_ID.1))
+        });
+        let serial_count = ioreg.matches(SHARED_SERIAL).count();
+
+        println!(
+            "poc: registry check — {} \"ProductID\" line(s), output pid \
+             present: {has_output}, injection pid present: {has_injection}, \
+             serial occurrences: {serial_count}",
+            pid_lines.len()
+        );
+
+        if has_output && has_injection && serial_count >= 2 {
+            println!(
+                "poc: PASS — two concurrent virtual keyboards with distinct \
+                 VID/PIDs and a shared serial"
+            );
+        } else {
+            println!(
+                "poc: FAIL — expected both PIDs and a shared serial in the \
+                 registry; see /tmp/keymapper_poc_diag.txt"
+            );
+        }
+
+        // Drop the keyboards (closes the connections, destroys the nodes).
+        drop(kb_b);
+        drop(kb_a);
     }
 }

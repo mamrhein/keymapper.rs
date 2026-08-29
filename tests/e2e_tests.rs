@@ -403,7 +403,17 @@ fn rule_expected_events<'a>(
     }
 
     if rule.fires_for_monitor() {
-        // Base press fires the rule; the base release is swallowed.
+        // Base press fires the rule.  The trigger's modifiers were forwarded
+        // when pressed; the daemon releases them on the virtual keyboard
+        // before emitting the outputs, so expect their up events here.  The
+        // base release is swallowed.
+        for mod_key in trigger.modifiers.iter().rev() {
+            if find_bare_modifier_rule(*mod_key, rules).is_none()
+                && let Some(name) = monitor_key_name(*mod_key)
+            {
+                events.push(event_str(name, false));
+            }
+        }
         for output in &rule.outputs {
             events.extend(output_tap_events(std::slice::from_ref(output)));
         }
@@ -411,17 +421,18 @@ fn rule_expected_events<'a>(
         // Rule does not apply (scoped to another app): the whole step
         // passes through unchanged.
         events.extend(passthrough_expected(trigger.base));
-    }
 
-    // Modifier releases are processed after the base key, in reverse order.
-    for mod_key in trigger.modifiers.iter().rev() {
-        if find_bare_modifier_rule(*mod_key, rules).is_none()
-            && let Some(name) = monitor_key_name(*mod_key)
-        {
-            events.push(event_str(name, false));
+        // Modifier releases are processed after the base key, in reverse
+        // order.
+        for mod_key in trigger.modifiers.iter().rev() {
+            if find_bare_modifier_rule(*mod_key, rules).is_none()
+                && let Some(name) = monitor_key_name(*mod_key)
+            {
+                events.push(event_str(name, false));
+            }
+            // A bare-modifier trigger swallows the release (no emission on
+            // key-up), so nothing is expected for it here.
         }
-        // A bare-modifier trigger swallows the release (no emission on
-        // key-up), so nothing is expected for it here.
     }
 
     events
@@ -657,6 +668,40 @@ impl Drop for ProcessGuard {
     }
 }
 
+/// Kill any `keymapperd` processes orphaned by a previous, interrupted run.
+///
+/// The daemon runs in its own session (see `spawn_daemon`), so it survives
+/// the death of the test process that started it: a Ctrl-C or nextest
+/// cancellation kills the test before `DaemonGuard` can stop the daemon.
+/// The orphan keeps holding the keyboard grab, and because each run uses a
+/// fresh temp directory (and thus a fresh PID file), the next run cannot
+/// see it.  Callers must hold the e2e lock, so no live e2e daemon can be
+/// mistaken for a stale one.
+#[cfg(unix)]
+fn kill_stale_daemons() {
+    let Ok(output) =
+        Command::new("pgrep").arg("-x").arg("keymapperd").output()
+    else {
+        return;
+    };
+    // pgrep exits non-zero when nothing matches.
+    if !output.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Ok(pid) = line.trim().parse::<i32>() {
+            eprintln!(
+                "killing stale keymapperd (pid {pid}) from a previous run"
+            );
+            // Safety: kill(2) with a pid read from pgrep's output.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+    }
+    // Give the kernel a moment to release the seized devices.
+    thread::sleep(Duration::from_millis(500));
+}
+
 /// RAII guard that stops the daemon on `Drop`.
 ///
 /// The daemon runs detached from the test process, so a panic in the test
@@ -760,14 +805,12 @@ fn start_daemon(config_dir: &Path) -> DaemonGuard {
         .arg(config_dir)
         .env("KEYMAPPER_ACTIVE_APP", MONITOR_APP_NAME)
         .env("KEYMAPPER_READY_FILE", &ready_file)
-        // On Windows and macOS, run the daemon in capture mode so it observes
-        // injected events (tagged hook on Windows, CGEventTap on macOS) and
-        // re-emits them through the virtual keyboard for the monitor to
-        // capture.  Injected events never reach the seized physical keyboards,
-        // so without this the monitor would miss them.  (The daemon re-emits
-        // every key, mapped and unmapped, through the virtual keyboard in all
-        // modes; capture mode only adds the observation of injected events.)
-        // The Linux daemon always re-emits every key and ignores the variable.
+        // On Windows, run the daemon in capture mode so it re-emits every
+        // key through the virtual keyboard tagged for the monitor's hook.
+        // On macOS and Linux the variable is ignored: the macOS daemon
+        // seizes the injection keyboard like any other physical keyboard and
+        // sees injected keys directly, and the Linux daemon always re-emits
+        // every key.
         .env("KEYMAPPER_CAPTURE", "1")
         .status()
         .expect("failed to run keymapper daemon start");
@@ -936,6 +979,45 @@ fn wait_for_injector_device(injector: &dyn KeyInjector) {
     );
 }
 
+/// Wait until the injector's virtual keyboard appears in IOKit.
+///
+/// The daemon's startup discovery snapshots the connected keyboards, so the
+/// injection keyboard (created by `injector.setup()`) must be registered in
+/// IOKit before the daemon starts.  The manager is scheduled with the run
+/// loop and pumped while waiting, because `IOHIDManagerCopyDevices` only
+/// reflects devices the manager has been notified about.
+#[cfg(target_os = "macos")]
+fn wait_for_injector_device(_injector: &dyn KeyInjector) {
+    use keymapper::platform::HidDeviceManager;
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+
+    let manager = HidDeviceManager::new_keyboard_matcher()
+        .expect("failed to create IOHIDManager");
+    manager.schedule_with_runloop();
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let found = manager
+            .scan_devices()
+            .iter()
+            .any(|device| device.is_injection_keyboard());
+        if found {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            panic!(
+                "the injection keyboard did not appear in IOKit within 15 s; \
+                 is the DriverKit driver loaded?"
+            );
+        }
+
+        // Pump the run loop so hotplug notifications are processed; a short
+        // timeout keeps the deadline check responsive.
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.1, true);
+    }
+}
+
 /// Check whether the daemon recorded in the config directory's PID file is
 /// still alive.
 #[cfg(unix)]
@@ -1011,6 +1093,12 @@ fn run_e2e(configs: &[&str], label: &str) {
     // Serialize with the other e2e tests (system-wide input stack access).
     let _e2e_lock = E2eLock::acquire();
 
+    // Kill any daemon orphaned by a previous, interrupted run (see
+    // `kill_stale_daemons`).  Safe because we hold the e2e lock: no other
+    // e2e test can be running, so any keymapperd we find is stale.
+    #[cfg(unix)]
+    kill_stale_daemons();
+
     // a. Create temp directory.  The guard removes it on drop, even when
     //    the test fails.  Declared first so it drops last: the daemon's
     //    PID file (needed to stop it) lives in this directory.
@@ -1052,6 +1140,8 @@ fn run_e2e(configs: &[&str], label: &str) {
     // f2. Wait until the injector device is fully registered, so the
     //     daemon's startup discovery sees it deterministically.
     #[cfg(target_os = "linux")]
+    wait_for_injector_device(&*injector);
+    #[cfg(target_os = "macos")]
     wait_for_injector_device(&*injector);
 
     // g. Start the daemon.  The guard stops it on drop, even when the test

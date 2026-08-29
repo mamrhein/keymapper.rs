@@ -116,15 +116,40 @@ const KEYBOARD_REPORT_ID: u8 = 1;
 /// Report ID of the `consumer_input` report.
 const CONSUMER_REPORT_ID: u8 = 2;
 
-/// HID vendor ID of the Karabiner DriverKit virtual keyboard.
-const KARABINER_KEYBOARD_VENDOR_ID: u64 = 0x16c0;
+/// The identity of a Karabiner DriverKit virtual keyboard as registered
+/// with the daemon via `virtual_hid_keyboard_initialize`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyboardIdentity {
+    /// HID vendor ID.
+    pub vendor_id: u64,
+    /// HID product ID.
+    pub product_id: u64,
+    /// HID country code.
+    pub country_code: u64,
+}
 
-/// HID product ID of the Karabiner DriverKit virtual keyboard.
-const KARABINER_KEYBOARD_PRODUCT_ID: u64 = 0x27db;
+/// The identity of the daemon's output keyboard.
+///
+/// This is the virtual keyboard the daemon creates to re-emit captured
+/// keys.  It must be excluded from capture (see `iokit_hid`).
+pub const OUTPUT_KEYBOARD_IDENTITY: KeyboardIdentity = KeyboardIdentity {
+    vendor_id: 0x16c0,
+    product_id: 0x27db,
+    country_code: 0, // `not_supported`
+};
 
-/// HID country code of the Karabiner DriverKit virtual keyboard
-/// (`not_supported`).
-const KARABINER_KEYBOARD_COUNTRY_CODE: u64 = 0;
+/// The identity of the e2e injection keyboard.
+///
+/// The test harness creates a second virtual keyboard with this identity to
+/// inject keystrokes; the daemon seizes it like any other physical keyboard.
+/// The product ID is the next value after the output keyboard's `0x27db`;
+/// the two-keyboard PoC verified that no other device in the keyboard set
+/// shares it.
+pub const INJECTION_KEYBOARD_IDENTITY: KeyboardIdentity = KeyboardIdentity {
+    vendor_id: 0x16c0,
+    product_id: 0x27dc,
+    country_code: 0, // `not_supported`
+};
 
 /// Size of the `virtual_hid_keyboard_parameters` struct: three 8-byte
 /// little-endian fields (vendor ID, product ID, country code).
@@ -239,13 +264,13 @@ fn build_request_payload(request_type: u8, report: &[u8]) -> Vec<u8> {
 /// The daemon rejects the request with a "buffer size error" unless this
 /// payload is exactly `KEYBOARD_PARAMETERS_SIZE` bytes, so the virtual
 /// keyboard never becomes ready without it.
-fn build_keyboard_parameters() -> [u8; KEYBOARD_PARAMETERS_SIZE] {
+fn build_keyboard_parameters(
+    identity: &KeyboardIdentity,
+) -> [u8; KEYBOARD_PARAMETERS_SIZE] {
     let mut params = [0u8; KEYBOARD_PARAMETERS_SIZE];
-    params[0..8].copy_from_slice(&KARABINER_KEYBOARD_VENDOR_ID.to_le_bytes());
-    params[8..16]
-        .copy_from_slice(&KARABINER_KEYBOARD_PRODUCT_ID.to_le_bytes());
-    params[16..24]
-        .copy_from_slice(&KARABINER_KEYBOARD_COUNTRY_CODE.to_le_bytes());
+    params[0..8].copy_from_slice(&identity.vendor_id.to_le_bytes());
+    params[8..16].copy_from_slice(&identity.product_id.to_le_bytes());
+    params[16..24].copy_from_slice(&identity.country_code.to_le_bytes());
     params
 }
 
@@ -319,13 +344,27 @@ pub struct KarabinerClient {
 }
 
 impl KarabinerClient {
+    /// Probe whether the Karabiner service socket is reachable.
+    ///
+    /// Connects and immediately disconnects without sending any requests,
+    /// so no virtual keyboard is created.  Fails when the socket does not
+    /// exist or the caller lacks permission to connect (the socket is
+    /// root-only).
+    pub fn probe_socket() -> std::io::Result<()> {
+        UnixStream::connect(SOCKET_PATH)?;
+        Ok(())
+    }
+
     /// Start the client.
     ///
     /// Spawns the background thread and returns immediately; the thread
-    /// retries connecting to the daemon until it succeeds.  Use
+    /// retries connecting to the daemon until it succeeds.  The virtual
+    /// keyboard is created with the given identity.  Use
     /// [`KarabinerClient::wait_ready`] to block until the virtual keyboard
     /// is ready.
-    pub fn connect() -> Result<Self, KarabinerClientError> {
+    pub fn connect(
+        identity: KeyboardIdentity,
+    ) -> Result<Self, KarabinerClientError> {
         let (tx, rx) = mpsc::channel();
         let ready = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -336,7 +375,9 @@ impl KarabinerClient {
 
         thread::Builder::new()
             .name("karabiner-client".into())
-            .spawn(move || client_loop(rx, ready_thread, shutdown_thread))
+            .spawn(move || {
+                client_loop(rx, ready_thread, shutdown_thread, identity)
+            })
             .map_err(KarabinerClientError::ThreadSpawnFailed)?;
 
         Ok(Self {
@@ -421,6 +462,7 @@ fn client_loop(
     rx: mpsc::Receiver<ClientCommand>,
     ready: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    identity: KeyboardIdentity,
 ) {
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -430,7 +472,8 @@ fn client_loop(
         match UnixStream::connect(SOCKET_PATH) {
             Ok(stream) => {
                 eprintln!("Karabiner daemon connected");
-                if let Err(e) = run_connection(stream, &rx, &ready, &shutdown)
+                if let Err(e) =
+                    run_connection(stream, &rx, &ready, &shutdown, identity)
                 {
                     eprintln!(
                         "Karabiner daemon connection lost ({e}); \
@@ -462,6 +505,7 @@ fn run_connection(
     rx: &mpsc::Receiver<ClientCommand>,
     ready: &Arc<AtomicBool>,
     shutdown: &Arc<AtomicBool>,
+    identity: KeyboardIdentity,
 ) -> std::io::Result<()> {
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
 
@@ -473,7 +517,7 @@ fn run_connection(
         &mut stream,
         &mut next_request_id,
         REQ_KEYBOARD_INITIALIZE,
-        &build_keyboard_parameters(),
+        &build_keyboard_parameters(&identity),
     )?;
 
     let mut last_heartbeat = Instant::now();
@@ -700,7 +744,7 @@ mod tests {
     fn test_encode_initialize_frame_matches_expected() {
         let payload = build_request_payload(
             REQ_KEYBOARD_INITIALIZE,
-            &build_keyboard_parameters(),
+            &build_keyboard_parameters(&OUTPUT_KEYBOARD_IDENTITY),
         );
         assert_eq!(
             encode_id_frame(MSG_REQUEST, 1, &payload),
@@ -712,7 +756,24 @@ mod tests {
     fn test_keyboard_parameters_size() {
         // The daemon requires exactly 24 bytes after the protocol version
         // and request type, or it rejects the initialize request.
-        assert_eq!(build_keyboard_parameters().len(), 24);
+        assert_eq!(
+            build_keyboard_parameters(&OUTPUT_KEYBOARD_IDENTITY).len(),
+            24
+        );
+    }
+
+    #[test]
+    fn test_build_keyboard_parameters_injection_identity() {
+        // The injection keyboard must register with its own product ID so
+        // the daemon can distinguish it from the output keyboard.
+        assert_eq!(
+            build_keyboard_parameters(&INJECTION_KEYBOARD_IDENTITY),
+            [
+                0xc0, 0x16, 0, 0, 0, 0, 0, 0, // vendor ID 0x16c0 (LE)
+                0xdc, 0x27, 0, 0, 0, 0, 0, 0, // product ID 0x27dc (LE)
+                0, 0, 0, 0, 0, 0, 0, 0, // country code 0 (LE)
+            ]
+        );
     }
 
     #[test]
@@ -840,7 +901,13 @@ mod tests {
         let ready_thread = Arc::clone(&ready);
 
         let client = thread::spawn(move || {
-            run_connection(client_stream, &rx, &ready_thread, &shutdown)
+            run_connection(
+                client_stream,
+                &rx,
+                &ready_thread,
+                &shutdown,
+                OUTPUT_KEYBOARD_IDENTITY,
+            )
         });
 
         // 1. The client sends virtual_hid_keyboard_initialize first.
