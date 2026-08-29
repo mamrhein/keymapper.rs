@@ -36,12 +36,12 @@ pub fn hid_usage_to_keycode(usage: HidUsage) -> Option<u16> {
         // --- Keyboard page (0x07) ---
         // Modifiers.
         (0x07, 0xE0) => Some(29),  // KEY_LEFTCTRL
-        (0x07, 0xE1) => Some(97),  // KEY_RIGHTCTRL
-        (0x07, 0xE2) => Some(42),  // KEY_LEFTSHIFT
-        (0x07, 0xE3) => Some(54),  // KEY_RIGHTSHIFT
-        (0x07, 0xE4) => Some(56),  // KEY_LEFTALT
-        (0x07, 0xE5) => Some(100), // KEY_RIGHTALT
-        (0x07, 0xE6) => Some(125), // KEY_LEFTMETA
+        (0x07, 0xE1) => Some(42),  // KEY_LEFTSHIFT
+        (0x07, 0xE2) => Some(56),  // KEY_LEFTALT
+        (0x07, 0xE3) => Some(125), // KEY_LEFTMETA
+        (0x07, 0xE4) => Some(97),  // KEY_RIGHTCTRL
+        (0x07, 0xE5) => Some(54),  // KEY_RIGHTSHIFT
+        (0x07, 0xE6) => Some(100), // KEY_RIGHTALT
         (0x07, 0xE7) => Some(126), // KEY_RIGHTMETA
         // Editor / misc.
         (0x07, 0x39) => Some(58),  // KEY_CAPSLOCK
@@ -55,9 +55,9 @@ pub fn hid_usage_to_keycode(usage: HidUsage) -> Option<u16> {
         (0x07, 0x52) => Some(103), // KEY_UP
         (0x07, 0x51) => Some(108), // KEY_DOWN
         (0x07, 0x50) => Some(105), // KEY_LEFT
-        (0x07, 0x4B) => Some(106), // KEY_RIGHT
-        (0x07, 0x4E) => Some(104), // KEY_PAGEUP
-        (0x07, 0x4F) => Some(109), // KEY_PAGEDOWN
+        (0x07, 0x4F) => Some(106), // KEY_RIGHT
+        (0x07, 0x4B) => Some(104), // KEY_PAGEUP
+        (0x07, 0x4E) => Some(109), // KEY_PAGEDOWN
         (0x07, 0x4A) => Some(102), // KEY_HOME
         (0x07, 0x4D) => Some(107), // KEY_END
         // Function keys.

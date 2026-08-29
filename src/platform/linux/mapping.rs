@@ -891,12 +891,12 @@ mod tests {
         // All eight modifier bits resolve to the corresponding evdev
         // codes; bit 8 is out of range.
         assert_eq!(modifier_bit_to_keycode(0), Some(29)); // KEY_LEFTCTRL
-        assert_eq!(modifier_bit_to_keycode(1), Some(97)); // KEY_RIGHTCTRL
-        assert_eq!(modifier_bit_to_keycode(2), Some(42)); // KEY_LEFTSHIFT
-        assert_eq!(modifier_bit_to_keycode(3), Some(54)); // KEY_RIGHTSHIFT
-        assert_eq!(modifier_bit_to_keycode(4), Some(56)); // KEY_LEFTALT
-        assert_eq!(modifier_bit_to_keycode(5), Some(100)); // KEY_RIGHTALT
-        assert_eq!(modifier_bit_to_keycode(6), Some(125)); // KEY_LEFTMETA
+        assert_eq!(modifier_bit_to_keycode(1), Some(42)); // KEY_LEFTSHIFT
+        assert_eq!(modifier_bit_to_keycode(2), Some(56)); // KEY_LEFTALT
+        assert_eq!(modifier_bit_to_keycode(3), Some(125)); // KEY_LEFTMETA
+        assert_eq!(modifier_bit_to_keycode(4), Some(97)); // KEY_RIGHTCTRL
+        assert_eq!(modifier_bit_to_keycode(5), Some(54)); // KEY_RIGHTSHIFT
+        assert_eq!(modifier_bit_to_keycode(6), Some(100)); // KEY_RIGHTALT
         assert_eq!(modifier_bit_to_keycode(7), Some(126)); // KEY_RIGHTMETA
         assert_eq!(modifier_bit_to_keycode(8), None);
     }
