@@ -683,11 +683,15 @@ fn kill_stale_daemons() {
     kill_orphaned_daemons();
 
     // Wait for the killed daemons' virtual keyboard nodes to be destroyed,
-    // so the monitor does not seize a stale node.  This runs even when no
-    // daemon was found, because a node can outlive its daemon: the service
-    // daemon destroys it asynchronously after the client socket closes.
+    // so neither the monitor nor the daemon seizes a stale node.  This runs
+    // even when no daemon was found, because a node can outlive its daemon:
+    // the service daemon destroys it asynchronously after the client socket
+    // closes.  A stale injection keyboard node is equally dangerous: it can
+    // satisfy the injector-device wait before the new injector's node
+    // registers, leaving the daemon's seizure stale and leaking injected
+    // keys into the focused window.
     #[cfg(target_os = "macos")]
-    wait_for_output_keyboard_gone();
+    wait_for_virtual_keyboards_gone();
 
     // Give the kernel a moment to release the seized devices.
     thread::sleep(Duration::from_millis(500));
@@ -717,22 +721,26 @@ fn kill_orphaned_daemons() {
     }
 }
 
-/// Wait until no Karabiner output keyboard node remains in IOKit.
+/// Wait until no Karabiner DriverKit virtual keyboard node remains in IOKit.
 ///
-/// A stale daemon's output keyboard (the Karabiner DriverKit virtual device)
-/// is destroyed asynchronously by the service daemon when the daemon's client
-/// socket closes (on SIGKILL).  If a node lingers when the e2e monitor starts,
-/// the monitor may seize it; when it is later destroyed, the seizure is void
-/// and the new daemon's output leaks into the focused window (e.g. running a
-/// shell-history command in the user's terminal).  Polling until the node is
-/// gone closes that race.
+/// Both the daemon's output keyboard and the e2e injection keyboard are
+/// DriverKit virtual devices, and both are destroyed asynchronously by the
+/// service daemon when their client socket closes (on SIGKILL).  A lingering
+/// output keyboard node can be seized by the e2e monitor; when it is later
+/// destroyed, the seizure is void and the new daemon's output leaks into the
+/// focused window (e.g. running a shell-history command in the user's
+/// terminal).  A lingering injection keyboard node is equally dangerous: it
+/// can satisfy the injector-device wait before the new injector's node
+/// registers, so the daemon seizes the stale node and the injected keys leak
+/// into the focused window.  Polling until both identities are gone closes
+/// those races.
 ///
 /// The manager is scheduled with the current run loop and pumped while
 /// waiting, because `IOHIDManagerCopyDevices` only reflects devices the
 /// manager has been notified about, and removal notifications are delivered
 /// through the run loop.
 #[cfg(target_os = "macos")]
-fn wait_for_output_keyboard_gone() {
+fn wait_for_virtual_keyboards_gone() {
     use keymapper::platform::HidDeviceManager;
     use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
 
@@ -748,15 +756,15 @@ fn wait_for_output_keyboard_gone() {
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if manager.find_karabiner_virtual_keyboard().is_none() {
+        if !manager.has_karabiner_virtual_keyboard() {
             return;
         }
 
         if Instant::now() >= deadline {
             eprintln!(
-                "warning: a stale Karabiner output keyboard node is still \
-                 present after 10 s; the e2e monitor may seize it and miss \
-                 the new daemon's output"
+                "warning: a stale Karabiner virtual keyboard node is still \
+                 present after 10 s; the e2e monitor or daemon may seize it \
+                 and miss the new daemon's output"
             );
             return;
         }

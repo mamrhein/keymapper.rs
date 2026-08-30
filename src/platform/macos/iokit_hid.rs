@@ -1721,6 +1721,41 @@ impl HidDeviceManager {
         result
     }
 
+    /// Returns true if any Karabiner DriverKit virtual keyboard is currently
+    /// connected — either the daemon's output keyboard or the e2e injection
+    /// keyboard.
+    ///
+    /// Unlike [`Self::scan_devices`] (which skips the output keyboard and
+    /// logs) and [`Self::find_karabiner_virtual_keyboard`] (which matches
+    /// only the output keyboard), this matches both identities and does not
+    /// log, so it is safe to call in a poll loop.  The e2e harness uses it
+    /// to wait for stale virtual keyboard nodes to be destroyed before
+    /// starting the monitor and daemon.
+    pub fn has_karabiner_virtual_keyboard(&self) -> bool {
+        let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
+
+        if device_set.is_null() {
+            return false;
+        }
+
+        let mut found = false;
+
+        // `CFSetApplyFunction` has no early exit, so the applier stops
+        // checking once a match has been found.
+        unsafe {
+            CFSetApplyFunction(
+                device_set,
+                karabiner_virtual_keyboard_applier,
+                &mut found as *mut bool as *mut c_void,
+            );
+        }
+
+        // Release the CFSet.
+        unsafe { CFRelease(device_set as *const _) };
+
+        found
+    }
+
     // Schedule the manager with the current run loop for hotplug support.
     pub fn schedule_with_runloop(&self) {
         let run_loop = CFRunLoop::current()
@@ -1805,6 +1840,30 @@ unsafe extern "C" fn find_karabiner_applier(
 
     if hid_device.is_output_keyboard() {
         *result = Some(hid_device);
+    }
+}
+
+/// `CFSetApplyFunction` applier for
+/// [`HidDeviceManager::has_karabiner_virtual_keyboard`].
+///
+/// Sets the `bool` passed as the context once any device identifies as a
+/// Karabiner DriverKit virtual keyboard (output or injection identity).
+unsafe extern "C" fn karabiner_virtual_keyboard_applier(
+    value: *const c_void,
+    info: *mut c_void,
+) {
+    let found = unsafe { &mut *(info as *mut bool) };
+
+    // A match was already found; nothing left to do.
+    if *found {
+        return;
+    }
+
+    let device = value as *mut IOHIDDevice;
+    let hid_device = HidDevice { device };
+
+    if hid_device.is_output_keyboard() || hid_device.is_injection_keyboard() {
+        *found = true;
     }
 }
 
