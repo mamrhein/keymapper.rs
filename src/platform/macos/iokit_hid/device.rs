@@ -30,9 +30,9 @@ use super::{
         IOHIDDeviceClose, IOHIDDeviceCopyMatchingElements,
         IOHIDDeviceGetProperty, IOHIDDeviceOpen, IOHIDElement, IOHIDManager,
         IOHIDManagerClose, IOHIDManagerCopyDevices, IOHIDManagerCreate,
-        IOHIDManagerOpen, IOHIDManagerScheduleWithRunLoop, IOHIDQueue,
-        IOHIDQueueAddElement, IOHIDQueueCreate,
-        IOHIDQueueRegisterValueAvailableCallback,
+        IOHIDManagerOpen, IOHIDManagerScheduleWithRunLoop,
+        IOHIDManagerSetDeviceMatching, IOHIDQueue, IOHIDQueueAddElement,
+        IOHIDQueueCreate, IOHIDQueueRegisterValueAvailableCallback,
         IOHIDQueueScheduleWithRunLoop, IOHIDQueueStart, IOHIDQueueStop,
         IoKitError, check_io_return, create_cf_string, kCFAllocatorDefault,
         kCFNumberSInt32Type, kIOHIDMapKeyProductID, kIOHIDMapKeyVendorID,
@@ -466,6 +466,13 @@ impl HidDeviceManager {
                 usage_key as *const _,
                 usage_number as *const _,
             );
+        }
+
+        // Apply the matching dictionary.  Without this the manager matches no
+        // devices, so `IOHIDManagerCopyDevices` would always return an empty
+        // set and the daemon/monitor would never discover any keyboard.
+        unsafe {
+            IOHIDManagerSetDeviceMatching(manager, dict);
         }
 
         // Release CF objects.
