@@ -26,10 +26,8 @@ use std::{
 use super::{InjectorError, KeyInjector};
 use crate::{
     HidUsage,
-    platform::{
-        INJECTION_KEYBOARD_IDENTITY, KarabinerClient,
-        cg_keycode_to_hid_usage_full,
-    },
+    common::hid_usage::PAGE_KEYBOARD,
+    platform::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient},
 };
 
 /// How long `setup()` waits for the injection keyboard to become ready.
@@ -37,6 +35,14 @@ const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Inter-event pacing, matching the previous CGEvent-based injector.
 const EVENT_PACING: Duration = Duration::from_millis(5);
+
+/// Whether the platform injector can inject the given usage.
+///
+/// The Karabiner keyboard report carries keyboard-page usage slots only;
+/// the consumer report path exists but is not wired into the injector.
+pub fn is_injectable(usage: HidUsage) -> bool {
+    usage.page() == PAGE_KEYBOARD
+}
 
 /// macOS keyboard injector for end-to-end tests.
 ///
@@ -73,13 +79,21 @@ impl MacOSInjector {
         (modifiers, usages)
     }
 
-    /// Translate a CGKeyCode, update the held set, and send the new state.
-    fn inject(&self, code: u16, is_down: bool) -> Result<(), InjectorError> {
-        let usage = cg_keycode_to_hid_usage_full(code).ok_or_else(|| {
-            InjectorError::InjectionFailed(format!(
-                "no keyboard-page HID usage for key code {code}"
-            ))
-        })?;
+    /// Update the held set and send the new state.
+    fn inject(
+        &self,
+        usage: HidUsage,
+        is_down: bool,
+    ) -> Result<(), InjectorError> {
+        // The Karabiner keyboard report carries keyboard-page usage slots
+        // only; consumer-page usages cannot be injected through it.
+        if usage.page() != PAGE_KEYBOARD {
+            return Err(InjectorError::NotSupported(format!(
+                "consumer page usage {} cannot be carried by the keyboard \
+                 report",
+                usage.as_str()
+            )));
+        }
 
         let (modifiers, usages) = {
             let mut held = self.held.lock().unwrap();
@@ -139,12 +153,12 @@ impl KeyInjector for MacOSInjector {
         Ok(())
     }
 
-    fn inject_key_down(&self, code: u16) -> Result<(), InjectorError> {
-        self.inject(code, true)
+    fn inject_key_down(&self, usage: HidUsage) -> Result<(), InjectorError> {
+        self.inject(usage, true)
     }
 
-    fn inject_key_up(&self, code: u16) -> Result<(), InjectorError> {
-        self.inject(code, false)
+    fn inject_key_up(&self, usage: HidUsage) -> Result<(), InjectorError> {
+        self.inject(usage, false)
     }
 
     fn teardown(&mut self) {
@@ -234,5 +248,17 @@ mod tests {
         let e: Box<dyn std::error::Error> =
             Box::new(InjectorError::NotSupported("test".into()));
         assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn is_injectable_excludes_consumer_page() {
+        // Consumer page usages have no keyboard-report slot.
+        assert!(!is_injectable(HidUsage::PlayPause));
+        assert!(!is_injectable(HidUsage::VolumeUp));
+        assert!(!is_injectable(HidUsage::Mute));
+
+        // Keyboard page usages are injectable.
+        assert!(is_injectable(HidUsage::A));
+        assert!(is_injectable(HidUsage::LeftControl));
     }
 }

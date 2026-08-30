@@ -53,11 +53,8 @@ use std::{
 use common::E2eLock;
 use event_log::{LogEvent, assert_events_match, event_str};
 use keymapper::{
-    common::{
-        config::AppConfig,
-        hid_usage::{HidUsage, PAGE_CONSUMER},
-    },
-    test_util::key_injector::{InjectorError, KeyInjector},
+    common::{config::AppConfig, hid_usage::HidUsage},
+    test_util::key_injector::{InjectorError, KeyInjector, is_injectable},
 };
 
 // ---------------------------------------------------------------------------
@@ -123,10 +120,10 @@ fn cli_bin_path() -> PathBuf {
 /// injects a down event followed by an up event with a small delay between.
 #[derive(Debug, Clone)]
 struct InjectionStep {
-    /// The native key codes to inject (modifiers first, then base key).
-    keys_down: Vec<u16>,
-    /// The native key codes to release (base key first, then modifiers).
-    keys_up: Vec<u16>,
+    /// The usages to press (modifiers first, then base key).
+    keys_down: Vec<HidUsage>,
+    /// The usages to release (base key first, then modifiers).
+    keys_up: Vec<HidUsage>,
 }
 
 /// The result of parsing a config file for test sequence generation.
@@ -215,14 +212,27 @@ fn build_test_sequences(config_path: Option<&Path>) -> TestSequences {
         }
     }
 
-    // Pick 5 passthrough keys that are not used by any rule.  Consumer
-    // page usages are excluded: the macOS injector has no CGKeyCode for
-    // them, so they cannot be part of a cross-platform injection sequence.
+    // Every trigger and output key in the fixture must be injectable on
+    // this platform; the `.expect()` in `inject_step` would fail otherwise,
+    // but an explicit assertion gives a clearer failure message.
+    for key in &used_keys {
+        assert!(
+            is_injectable(*key),
+            "fixture key {} cannot be injected on this platform",
+            key.as_str()
+        );
+    }
+
+    // Pick 5 passthrough keys that are not used by any rule and that the
+    // platform injector can actually inject.  `is_injectable` is a real
+    // capability check rather than a hardcoded page assumption, so a key
+    // like `NumpadClear` (unmapped on Windows) is excluded if fixture
+    // growth ever pushes it into the selection window.
     let passthrough_keys: Vec<HidUsage> = HidUsage::all()
         .iter()
         .skip(9) // skip modifier keys and CapsLock
         .copied()
-        .filter(|k| k.page() != PAGE_CONSUMER)
+        .filter(|k| is_injectable(*k))
         .filter(|k| !used_keys.contains(k))
         .filter(|k| !platform_excludes_passthrough(*k))
         .take(5)
@@ -443,19 +453,14 @@ fn rule_expected_events<'a>(
 fn key_event_to_injection_step(
     key_event: &keymapper::common::config::KeyEvent,
 ) -> InjectionStep {
-    // Convert each HidUsage to its platform native code.
-    let mut keys_down: Vec<u16> = key_event
-        .modifiers
-        .iter()
-        .map(|k| common_to_platform_code(*k))
-        .collect();
-    let base_code = common_to_platform_code(key_event.base);
-    keys_down.push(base_code);
+    // Modifiers are pressed first, then the base key.
+    let mut keys_down = key_event.modifiers.clone();
+    keys_down.push(key_event.base);
 
     // Release in reverse order: base first, then modifiers last-to-first.
-    let mut keys_up: Vec<u16> = vec![base_code];
-    for mod_code in key_event.modifiers.iter().rev() {
-        keys_up.push(common_to_platform_code(*mod_code));
+    let mut keys_up = vec![key_event.base];
+    for mod_key in key_event.modifiers.iter().rev() {
+        keys_up.push(*mod_key);
     }
 
     InjectionStep { keys_down, keys_up }
@@ -463,154 +468,10 @@ fn key_event_to_injection_step(
 
 /// Build an injection step for a single key with no modifiers.
 fn single_key_injection_step(key: HidUsage) -> InjectionStep {
-    let code = common_to_platform_code(key);
     InjectionStep {
-        keys_down: vec![code],
-        keys_up: vec![code],
+        keys_down: vec![key],
+        keys_up: vec![key],
     }
-}
-
-/// Convert a platform-agnostic `[HidUsage]` to the platform-specific
-/// native key code for injection.
-///
-/// On macOS this returns CGKeyCodes for use with the CGEvent-based injector.
-/// On other platforms it returns the platform-native key code.
-#[cfg(target_os = "macos")]
-fn common_to_platform_code(usage: HidUsage) -> u16 {
-    // CGKeyCode lookup derived from USB HID Usage Tables.
-    match usage {
-        HidUsage::A => 0,
-        HidUsage::S => 1,
-        HidUsage::D => 2,
-        HidUsage::F => 3,
-        HidUsage::H => 4,
-        HidUsage::G => 5,
-        HidUsage::Z => 6,
-        HidUsage::X => 7,
-        HidUsage::C => 8,
-        HidUsage::V => 9,
-        HidUsage::IsoExtra => 10,
-        HidUsage::B => 11,
-        HidUsage::Q => 12,
-        HidUsage::W => 13,
-        HidUsage::E => 14,
-        HidUsage::R => 15,
-        HidUsage::Y => 16,
-        HidUsage::T => 17,
-        HidUsage::Number1 => 18,
-        HidUsage::Number2 => 19,
-        HidUsage::Number3 => 20,
-        HidUsage::Number4 => 21,
-        HidUsage::Number6 => 22,
-        HidUsage::Number5 => 23,
-        HidUsage::Equal => 24,
-        HidUsage::Number9 => 25,
-        HidUsage::Number7 => 26,
-        HidUsage::Minus => 27,
-        HidUsage::Number8 => 28,
-        HidUsage::Number0 => 29,
-        HidUsage::BracketRight => 30,
-        HidUsage::O => 31,
-        HidUsage::U => 32,
-        HidUsage::BracketLeft => 33,
-        HidUsage::I => 34,
-        HidUsage::P => 35,
-        HidUsage::Return => 36,
-        HidUsage::L => 37,
-        HidUsage::J => 38,
-        HidUsage::Quote => 39,
-        HidUsage::K => 40,
-        HidUsage::Semicolon => 41,
-        HidUsage::Backslash => 42,
-        HidUsage::Comma => 43,
-        HidUsage::Slash => 44,
-        HidUsage::N => 45,
-        HidUsage::M => 46,
-        HidUsage::Period => 47,
-        HidUsage::Tab => 48,
-        HidUsage::Space => 49,
-        HidUsage::Grave => 50,
-        HidUsage::Backspace => 51,
-        HidUsage::Escape => 53,
-        HidUsage::Delete => 117,
-        HidUsage::RightCommand => 54,
-        HidUsage::LeftCommand => 55,
-        HidUsage::LeftShift => 56,
-        HidUsage::CapsLock => 57,
-        HidUsage::LeftAlt => 58,
-        HidUsage::LeftControl => 59,
-        HidUsage::RightShift => 60,
-        HidUsage::RightAlt => 61,
-        HidUsage::RightControl => 62,
-        HidUsage::NumpadDecimal => 65,
-        HidUsage::NumpadPlus => 69,
-        HidUsage::NumpadClear => 71,
-        HidUsage::NumpadDivide => 73,
-        HidUsage::NumpadMultiply => 75,
-        HidUsage::NumpadEnter => 76,
-        HidUsage::NumpadMinus => 78,
-        HidUsage::NumpadEqual => 90,
-        HidUsage::Numpad0 => 82,
-        HidUsage::Numpad1 => 83,
-        HidUsage::Numpad2 => 84,
-        HidUsage::Numpad3 => 85,
-        HidUsage::Numpad4 => 86,
-        HidUsage::Numpad5 => 87,
-        HidUsage::Numpad6 => 88,
-        HidUsage::Numpad7 => 89,
-        HidUsage::Numpad8 => 91,
-        HidUsage::Numpad9 => 92,
-        HidUsage::F5 => 96,
-        HidUsage::F6 => 97,
-        HidUsage::F7 => 98,
-        HidUsage::F3 => 99,
-        HidUsage::F8 => 100,
-        HidUsage::F9 => 101,
-        HidUsage::F11 => 103,
-        HidUsage::F10 => 109,
-        HidUsage::F12 => 111,
-        HidUsage::Home => 115,
-        HidUsage::PageUp => 116,
-        HidUsage::F4 => 118,
-        HidUsage::End => 119,
-        HidUsage::F2 => 120,
-        HidUsage::PageDown => 121,
-        HidUsage::F1 => 122,
-        HidUsage::LeftArrow => 123,
-        HidUsage::RightArrow => 124,
-        HidUsage::DownArrow => 125,
-        HidUsage::UpArrow => 126,
-        HidUsage::IsoHash => 50, // Non-US # and ~
-        // Consumer page usages have no CGKeyCode and cannot be injected.
-        other => {
-            panic!("no CGKeyCode for consumer page usage {}", other.as_str())
-        }
-    }
-}
-
-/// Convert a platform-agnostic `[HidUsage]` to the evdev `KEY_*` code for
-/// injection on Linux.
-///
-/// The injector emits real evdev key codes plus an `MSC_SCAN` carrying the
-/// HID usage, mirroring a physical HID keyboard.  The daemon's static
-/// translation table is the single source of truth for the mapping.
-#[cfg(target_os = "linux")]
-fn common_to_platform_code(usage: HidUsage) -> u16 {
-    keymapper::platform::hid_translate::hid_usage_to_keycode(usage)
-        .expect("every HidUsage has an evdev code")
-}
-
-/// Convert a platform-agnostic `[HidUsage]` to the Windows virtual-key
-/// code for injection.
-///
-/// The daemon's low-level hook receives the injected VK code and converts
-/// it to a `HidUsage` via the platform `Key` table, mirroring the physical
-/// keyboard path.
-#[cfg(windows)]
-fn common_to_platform_code(usage: HidUsage) -> u16 {
-    keymapper::platform::Key::from_hid_usage(usage)
-        .expect("every HidUsage has a VK code on Windows")
-        .as_native()
 }
 
 // ---------------------------------------------------------------------------
@@ -892,9 +753,9 @@ fn create_injector() -> Result<Option<Box<dyn KeyInjector>>, InjectorError> {
 /// Inject a single step from the test sequence.  Presses all keys in
 /// *step.keys_down* (down), then releases them in *step.keys_up* order.
 fn inject_step(injector: &dyn KeyInjector, step: &InjectionStep) {
-    for &code in &step.keys_down {
+    for &usage in &step.keys_down {
         injector
-            .inject_key_down(code)
+            .inject_key_down(usage)
             .expect("failed to inject key down");
         // Small delay between key presses within a chord.
         thread::sleep(Duration::from_millis(3));
@@ -904,9 +765,9 @@ fn inject_step(injector: &dyn KeyInjector, step: &InjectionStep) {
     // as a distinct press+release pair.
     thread::sleep(Duration::from_millis(50));
 
-    for &code in &step.keys_up {
+    for &usage in &step.keys_up {
         injector
-            .inject_key_up(code)
+            .inject_key_up(usage)
             .expect("failed to inject key up");
         thread::sleep(Duration::from_millis(3));
     }

@@ -28,9 +28,18 @@ use evdev::{
 };
 
 use super::{InjectorError, KeyInjector};
+use crate::{HidUsage, platform::hid_translate::hid_usage_to_keycode};
 
 /// Unique device name prefix for injector input keyboards.
 pub const INPUT_DEVICE_NAME_PREFIX: &str = "virtual-keyboard";
+
+/// Whether the platform injector can inject the given usage.
+///
+/// The forward table covers all of `HidUsage::ALL`, so every usage is
+/// injectable.
+pub fn is_injectable(usage: HidUsage) -> bool {
+    hid_usage_to_keycode(usage).is_some()
+}
 
 // ---------------------------------------------------------------------------
 // Injector implementation
@@ -131,12 +140,25 @@ impl LinuxInjector {
     }
 
     /// Inject a keyboard event into the virtual input device.
-    fn inject_key(&self, code: u16, value: i32) -> Result<(), InjectorError> {
+    fn inject_key(
+        &self,
+        usage: HidUsage,
+        value: i32,
+    ) -> Result<(), InjectorError> {
         const EV_KEY: u16 = 1;
         const EV_MSC: u16 = 4;
         const MSC_SCAN: u16 = 4;
         const EV_SYN: u16 = 0;
         const SYN_REPORT: u16 = 0;
+
+        // The forward table is the same one the daemon's output path writes
+        // with, so the injector and the daemon can never drift.
+        let code = hid_usage_to_keycode(usage).ok_or_else(|| {
+            InjectorError::NotSupported(format!(
+                "no evdev key code for {}",
+                usage.as_str()
+            ))
+        })?;
 
         let device = self.device.as_ref().ok_or_else(|| {
             InjectorError::InjectionFailed(
@@ -152,10 +174,7 @@ impl LinuxInjector {
         // `(page << 16) | id` before each key press; the daemon prefers it
         // over the EV_KEY code.  Key releases carry no scan code.
         let mut events: Vec<InputEvent> = Vec::new();
-        if value == 1
-            && let Some(usage) =
-                crate::platform::hid_translate::keycode_to_hid_usage(code)
-        {
+        if value == 1 {
             events.push(InputEvent::new(
                 EV_MSC,
                 MSC_SCAN,
@@ -201,14 +220,14 @@ impl KeyInjector for LinuxInjector {
         Ok(())
     }
 
-    fn inject_key_down(&self, code: u16) -> Result<(), InjectorError> {
+    fn inject_key_down(&self, usage: HidUsage) -> Result<(), InjectorError> {
         // Value 1 = press, value 2 = auto-repeat (treated as press).
-        self.inject_key(code, 1)
+        self.inject_key(usage, 1)
     }
 
-    fn inject_key_up(&self, code: u16) -> Result<(), InjectorError> {
+    fn inject_key_up(&self, usage: HidUsage) -> Result<(), InjectorError> {
         // Value 0 = release.
-        self.inject_key(code, 0)
+        self.inject_key(usage, 0)
     }
 
     fn teardown(&mut self) {
@@ -395,12 +414,22 @@ mod tests {
             return;
         }
 
-        // Inject a key-down and key-up for KEY_A (30).
-        const KEY_A: u16 = 30;
-
-        injector.inject_key_down(KEY_A).expect("inject key down");
-        injector.inject_key_up(KEY_A).expect("inject key up");
+        // Inject a key-down and key-up for the "A" key.
+        injector
+            .inject_key_down(HidUsage::A)
+            .expect("inject key down");
+        injector.inject_key_up(HidUsage::A).expect("inject key up");
 
         injector.teardown();
+    }
+
+    #[test]
+    fn is_injectable_covers_all_usages() {
+        for usage in HidUsage::ALL {
+            assert!(
+                is_injectable(usage),
+                "expected {usage} to be injectable on linux"
+            );
+        }
     }
 }

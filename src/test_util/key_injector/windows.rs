@@ -17,6 +17,15 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use super::{InjectorError, KeyInjector};
+use crate::{HidUsage, platform::Key};
+
+/// Whether the platform injector can inject the given usage.
+///
+/// `Key::from_hid_usage` returns `None` for consumer page usages and for
+/// `NumpadClear` / `NumpadEqual`, which have no native variant.
+pub fn is_injectable(usage: HidUsage) -> bool {
+    Key::from_hid_usage(usage).is_some()
+}
 
 /// Windows keyboard injector for end-to-end tests.
 pub struct WindowsInjector {
@@ -28,9 +37,18 @@ impl WindowsInjector {
     /// Inject a synthetic keyboard event using `SendInput`.
     fn inject_key(
         &self,
-        code: u16,
+        usage: HidUsage,
         is_down: bool,
     ) -> Result<(), InjectorError> {
+        let vk = Key::from_hid_usage(usage).map(Key::as_native).ok_or_else(
+            || {
+                InjectorError::NotSupported(format!(
+                    "no virtual key for {}",
+                    usage.as_str()
+                ))
+            },
+        )?;
+
         let flags: u32 = if is_down {
             0
         } else {
@@ -41,7 +59,7 @@ impl WindowsInjector {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(code),
+                    wVk: VIRTUAL_KEY(vk),
                     wScan: 0,
                     dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
                     time: 0,
@@ -76,12 +94,12 @@ impl KeyInjector for WindowsInjector {
         Ok(())
     }
 
-    fn inject_key_down(&self, code: u16) -> Result<(), InjectorError> {
-        self.inject_key(code, true)
+    fn inject_key_down(&self, usage: HidUsage) -> Result<(), InjectorError> {
+        self.inject_key(usage, true)
     }
 
-    fn inject_key_up(&self, code: u16) -> Result<(), InjectorError> {
-        self.inject_key(code, false)
+    fn inject_key_up(&self, usage: HidUsage) -> Result<(), InjectorError> {
+        self.inject_key(usage, false)
     }
 
     fn teardown(&mut self) {
@@ -147,5 +165,18 @@ mod tests {
         let injector = WindowsInjector::new().unwrap().unwrap();
         // Drop without explicit teardown should not panic.
         drop(injector);
+    }
+
+    #[test]
+    fn is_injectable_excludes_unmapped_keys() {
+        // Consumer page usages and unmapped keyboard keys are not
+        // injectable.
+        assert!(!is_injectable(HidUsage::PlayPause));
+        assert!(!is_injectable(HidUsage::VolumeUp));
+        assert!(!is_injectable(HidUsage::NumpadClear));
+        assert!(!is_injectable(HidUsage::NumpadEqual));
+
+        // A regular key is injectable.
+        assert!(is_injectable(HidUsage::A));
     }
 }

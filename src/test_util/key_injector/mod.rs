@@ -16,6 +16,8 @@
 
 use std::fmt;
 
+use crate::HidUsage;
+
 /// Errors that can occur during injector setup or operation.
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -54,6 +56,11 @@ impl std::error::Error for InjectorError {}
 
 /// Platform-abstracted keyboard injector for end-to-end tests.
 ///
+/// The injector speaks [`HidUsage`] — the canonical key identity — and owns
+/// the `HidUsage → native code` translation internally; callers never see a
+/// platform code space.  Query a platform's per-usage capability with the
+/// free function [`is_injectable`].
+///
 /// The lifecycle is:
 /// 1. Create an injector instance (`new()`).
 /// 2. Call `setup()` to create virtual devices.
@@ -79,11 +86,13 @@ pub trait KeyInjector {
     /// After this call the injector is ready to inject events.
     fn setup(&mut self) -> Result<(), InjectorError>;
 
-    /// Inject a key-down event into the virtual input keyboard.
-    fn inject_key_down(&self, code: u16) -> Result<(), InjectorError>;
+    /// Inject a key-down event for the given usage into the virtual input
+    /// keyboard.
+    fn inject_key_down(&self, usage: HidUsage) -> Result<(), InjectorError>;
 
-    /// Inject a key-up event into the virtual input keyboard.
-    fn inject_key_up(&self, code: u16) -> Result<(), InjectorError>;
+    /// Inject a key-up event for the given usage into the virtual input
+    /// keyboard.
+    fn inject_key_up(&self, usage: HidUsage) -> Result<(), InjectorError>;
 
     /// Shut down the injector and release all resources.
     ///
@@ -109,17 +118,17 @@ pub trait KeyInjector {
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::MacOSInjector;
+pub use macos::{MacOSInjector, is_injectable};
 
 #[cfg(target_os = "linux")]
 mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::LinuxInjector;
+pub use linux::{LinuxInjector, is_injectable};
 
 #[cfg(target_os = "windows")]
 mod windows;
 
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)]
-pub use windows::WindowsInjector;
+pub use windows::{WindowsInjector, is_injectable};
