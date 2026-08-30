@@ -679,6 +679,23 @@ impl Drop for ProcessGuard {
 /// mistaken for a stale one.
 #[cfg(unix)]
 fn kill_stale_daemons() {
+    // SIGKILL any orphaned daemons.
+    kill_orphaned_daemons();
+
+    // Wait for the killed daemons' virtual keyboard nodes to be destroyed,
+    // so the monitor does not seize a stale node.  This runs even when no
+    // daemon was found, because a node can outlive its daemon: the service
+    // daemon destroys it asynchronously after the client socket closes.
+    #[cfg(target_os = "macos")]
+    wait_for_output_keyboard_gone();
+
+    // Give the kernel a moment to release the seized devices.
+    thread::sleep(Duration::from_millis(500));
+}
+
+/// SIGKILL any `keymapperd` processes found via `pgrep`.
+#[cfg(unix)]
+fn kill_orphaned_daemons() {
     let Ok(output) =
         Command::new("pgrep").arg("-x").arg("keymapperd").output()
     else {
@@ -698,8 +715,56 @@ fn kill_stale_daemons() {
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
-    // Give the kernel a moment to release the seized devices.
-    thread::sleep(Duration::from_millis(500));
+}
+
+/// Wait until no Karabiner output keyboard node remains in IOKit.
+///
+/// A stale daemon's output keyboard (the Karabiner DriverKit virtual device)
+/// is destroyed asynchronously by the service daemon when the daemon's client
+/// socket closes (on SIGKILL).  If a node lingers when the e2e monitor starts,
+/// the monitor may seize it; when it is later destroyed, the seizure is void
+/// and the new daemon's output leaks into the focused window (e.g. running a
+/// shell-history command in the user's terminal).  Polling until the node is
+/// gone closes that race.
+///
+/// The manager is scheduled with the current run loop and pumped while
+/// waiting, because `IOHIDManagerCopyDevices` only reflects devices the
+/// manager has been notified about, and removal notifications are delivered
+/// through the run loop.
+#[cfg(target_os = "macos")]
+fn wait_for_output_keyboard_gone() {
+    use keymapper::platform::HidDeviceManager;
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+
+    let Ok(manager) = HidDeviceManager::new_keyboard_matcher() else {
+        eprintln!(
+            "warning: could not create IOHIDManager; skipping the wait for "
+            "stale virtual keyboards"
+        );
+        return;
+    };
+
+    manager.schedule_with_runloop();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if manager.find_karabiner_virtual_keyboard().is_none() {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            eprintln!(
+                "warning: a stale Karabiner output keyboard node is still "
+                "present after 10 s; the e2e monitor may seize it and miss "
+                "the new daemon's output"
+            );
+            return;
+        }
+
+        // Pump the run loop so removal notifications are processed; a short
+        // timeout keeps the deadline check responsive.
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.1, true);
+    }
 }
 
 /// RAII guard that stops the daemon on `Drop`.
@@ -1061,8 +1126,14 @@ fn read_daemon_log(config_dir: &Path) -> String {
 fn write_phase_config(config_out: &Path, phase: Option<&Path>) {
     match phase {
         Some(fixture) => {
-            std::fs::copy(fixture, config_out)
-                .expect("failed to copy config fixture");
+            // Read + write instead of `fs::copy`: on Apple targets, copy
+            // uses an APFS clone that inherits the fixture's ownership,
+            // which breaks the daemon's config-ownership check when the
+            // test runs as a different user (e.g. root via sudo).
+            let content =
+                std::fs::read(fixture).expect("failed to read config fixture");
+            std::fs::write(config_out, content)
+                .expect("failed to write config fixture");
         }
         None => {
             std::fs::write(config_out, "groups: []\n")
