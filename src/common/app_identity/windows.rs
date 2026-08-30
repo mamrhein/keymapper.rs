@@ -7,24 +7,102 @@
 // $Source$
 // $Revision$
 
-//! Lists visible application names on Windows.
+//! Windows application identity.
 //!
-//! The returned `app_name` is the `FileDescription` from the PE version
-//! resources of the process executable, falling back to the file stem.
-//! This matches exactly what `active-win-pos-rs` returns on Windows.
+//! The foreground application is resolved from the process that owns the
+//! foreground window.  The visible application list is produced by
+//! enumerating visible top-level windows; the returned `app_name` is the
+//! `FileDescription` from the PE version resources of the process
+//! executable, falling back to the file stem.  This matches exactly what
+//! `active-win-pos-rs` returns on Windows.
 
 use std::{collections::HashSet, path::Path};
 
-use windows::Win32::{
-    System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
-        TH32CS_SNAPMODULE,
-    },
-    UI::WindowsAndMessaging::{
-        EnumWindows, GetDesktopWindow, GetWindowThreadProcessId,
-        IsWindowVisible,
+use windows::{
+    core::BOOL,
+    Win32::{
+        Foundation::{CloseHandle, HWND, LPARAM},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
+                TH32CS_SNAPMODULE,
+            },
+            Threading::{
+                OpenProcess, PROCESS_NAME_FORMAT,
+                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            },
+        },
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetDesktopWindow, GetForegroundWindow,
+            GetWindowThreadProcessId, IsWindowVisible,
+        },
     },
 };
+
+/// Synchronously query the current foreground application name.
+///
+/// Resolves the foreground window to its owning process and extracts the
+/// executable name from the full image path.  Returns `"unknown"` when the
+/// query fails or no window is in the foreground.
+pub fn get_active_app_name() -> String {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return "unknown".to_string();
+    }
+
+    // Get the process ID of the thread that owns the foreground window.
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return "unknown".to_string();
+    }
+
+    // Open the process with minimal permissions to query its image name.
+    let Ok(process) = (unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+    }) else {
+        return "unknown".to_string();
+    };
+    if process.is_invalid() {
+        return "unknown".to_string();
+    }
+
+    // Query the full process image path (wide string).
+    let mut buffer = [0u16; 512]; // MAX_PATH * 2, sufficient for executable paths.
+    let mut size = buffer.len() as u32;
+    let ok = unsafe {
+        QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        )
+    };
+
+    if ok.is_err() {
+        // CloseHandle fails only with an invalid handle, which would be a bug.
+        let _ = unsafe { CloseHandle(process) };
+        return "unknown".to_string();
+    }
+
+    // CloseHandle fails only with an invalid handle, which would be a bug.
+    let _ = unsafe { CloseHandle(process) };
+
+    // Extract the executable name from the full path.  The path uses backslash
+    // separators (e.g. "C:\Windows\System32\notepad.exe"), so we find the last
+    // backslash and take the file name from there.
+    if let Ok(path) = String::from_utf16(&buffer[..size as usize])
+        && let Some(stem) = path.rsplit('\\').next()
+    {
+        return stem.to_string();
+    }
+
+    "unknown".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Visible application list (EnumWindows + PE version resources)
+// ---------------------------------------------------------------------------
 
 /// Convert a null-terminated UTF-16 slice to a Rust String.
 fn utf16_to_string(data: &[u16]) -> String {
@@ -171,7 +249,7 @@ fn get_process_exe_path(pid: u32) -> Option<String> {
         };
 
         // CloseHandle fails only with an invalid handle, which would be a bug.
-        let _ = windows::Win32::Foundation::CloseHandle(mod_snap);
+        let _ = CloseHandle(mod_snap);
         result
     }
 }
@@ -181,10 +259,8 @@ struct WindowCollector {
     pids: HashSet<u32>,
 }
 
-use windows::{Win32::Foundation::LPARAM, core::BOOL};
-
 extern "system" fn enum_windows_proc(
-    hwnd: windows::Win32::Foundation::HWND,
+    hwnd: HWND,
     param: LPARAM,
 ) -> BOOL {
     if unsafe { IsWindowVisible(hwnd) }.as_bool() {

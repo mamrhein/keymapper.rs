@@ -7,7 +7,6 @@
 // $Source$
 // $Revision$
 
-mod active_app;
 mod dispatch;
 mod key;
 mod keyboard;
@@ -23,7 +22,6 @@ pub(crate) mod raw_input;
 /// may use.
 pub const CAPTURE_TAG: usize = 0x4B_4D_50_01;
 
-pub(crate) use active_app::get_active_app_name;
 pub use key::Key;
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;

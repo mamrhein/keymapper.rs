@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-//! Lists visible application names on Linux.
+//! Visible application list on Linux.
 //!
 //! Scans `/proc` for processes connected to a display server (via environment
 //! variables `WAYLAND_DISPLAY` or `DISPLAY`), resolves their executable name
@@ -98,9 +98,7 @@ pub fn list_app_names() -> Vec<String> {
         };
 
         // Try matching by executable name first.
-        if let Some(app_id) =
-            super::super::linux::desktop::resolve_app_id(&exe)
-        {
+        if let Some(app_id) = super::desktop::resolve_app_id(&exe) {
             app_ids.push(app_id);
             continue;
         }
@@ -116,7 +114,7 @@ pub fn list_app_names() -> Vec<String> {
         };
 
         if let Some(app_id) =
-            super::super::linux::desktop::resolve_app_id_from_cmdline(&cmdline)
+            super::desktop::resolve_app_id_from_cmdline(&cmdline)
         {
             app_ids.push(app_id);
         }

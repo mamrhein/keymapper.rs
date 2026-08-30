@@ -39,5 +39,5 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    keymapper::util::monitor::run(args.output);
+    keymapper::test_util::monitor::run(args.output);
 }

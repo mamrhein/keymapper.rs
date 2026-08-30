@@ -11,12 +11,11 @@ use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 use keymapper::{
+    cli::{daemon_cmd, keyboard_cmd, keys_cmd, server_cmd},
     common::{
+        app_identity,
         config::{AppConfig, KeyEvent, RuleGroup},
         keyboard::KeyboardSpecifier,
-    },
-    util::platform::{
-        appnames_cmd, daemon_cmd, keyboard_cmd, keys_cmd, server_cmd,
     },
 };
 
@@ -286,7 +285,7 @@ fn reject_symlink(path: &Path) -> Result<(), String> {
 }
 
 fn cmd_appnames() -> Result<(), Box<dyn std::error::Error>> {
-    let names = appnames_cmd::list_app_names();
+    let names = app_identity::list_app_names();
 
     if names.is_empty() {
         println!("No visible applications found.");

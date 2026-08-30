@@ -7,8 +7,8 @@
 // $Source$
 // $Revision$
 
-//! Utility modules for keymapper.
+//! Test and monitoring helpers for the e2e test harness: the key event
+//! injector and the `keymapper_monitor` capture backend.
 
 pub mod key_injector;
 pub mod monitor;
-pub mod platform;

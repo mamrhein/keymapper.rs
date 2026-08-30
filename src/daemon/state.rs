@@ -40,7 +40,7 @@ const ACTIVE_APP_OVERRIDE_ENV: &str = "KEYMAPPER_ACTIVE_APP";
 fn resolved_active_app_name() -> String {
     match std::env::var(ACTIVE_APP_OVERRIDE_ENV) {
         Ok(name) if !name.is_empty() => name,
-        _ => crate::platform::get_active_app_name(),
+        _ => crate::common::app_identity::get_active_app_name(),
     }
 }
 
@@ -837,7 +837,7 @@ groups:
         // Key-down produces one chord output: Cmd+A.
         let down_outputs = results[0].as_ref().unwrap();
         assert_eq!(down_outputs.len(), 1);
-                let chord = &down_outputs[0];
+        let chord = &down_outputs[0];
         assert_eq!(chord.usage, HidUsage::A);
         // Cmd modifier bit should be set (bit 3 for LeftCommand).
         assert!((chord.modifiers & (1 << 3)) != 0);

@@ -20,13 +20,10 @@ mod windows;
 pub use linux::hid_translate;
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
-    VIRTUAL_KEYBOARD_NAME, get_active_app_name,
-    hid_translate::keycode_to_hid_usage,
+    VIRTUAL_KEYBOARD_NAME, hid_translate::keycode_to_hid_usage,
 };
 #[cfg(target_os = "linux")]
 pub use linux::{discover_and_open_keyboards, list_keyboards, start_mapping};
-#[cfg(target_os = "macos")]
-pub(crate) use macos::get_active_app_name;
 #[cfg(target_os = "macos")]
 pub use macos::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
@@ -36,7 +33,5 @@ pub use macos::{
 };
 #[cfg(target_os = "windows")]
 pub use windows::CAPTURE_TAG;
-#[cfg(target_os = "windows")]
-pub(crate) use windows::get_active_app_name;
 #[cfg(target_os = "windows")]
 pub use windows::{Key, list_keyboards, start_mapping};

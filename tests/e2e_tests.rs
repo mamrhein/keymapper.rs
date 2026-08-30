@@ -57,7 +57,7 @@ use keymapper::{
         config::AppConfig,
         hid_usage::{HidUsage, PAGE_CONSUMER},
     },
-    util::key_injector::{InjectorError, KeyInjector},
+    test_util::key_injector::{InjectorError, KeyInjector},
 };
 
 // ---------------------------------------------------------------------------
@@ -866,21 +866,21 @@ fn wait_for_ready_file(ready_file: &Path, config_dir: &Path) {
 
 #[cfg(target_os = "macos")]
 fn create_injector() -> Result<Option<Box<dyn KeyInjector>>, InjectorError> {
-    use keymapper::util::key_injector::MacOSInjector;
+    use keymapper::test_util::key_injector::MacOSInjector;
     let injector = MacOSInjector::new()?;
     Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector>))
 }
 
 #[cfg(target_os = "linux")]
 fn create_injector() -> Result<Option<Box<dyn KeyInjector>>, InjectorError> {
-    use keymapper::util::key_injector::LinuxInjector;
+    use keymapper::test_util::key_injector::LinuxInjector;
     let injector = LinuxInjector::new()?;
     Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector>))
 }
 
 #[cfg(target_os = "windows")]
 fn create_injector() -> Result<Option<Box<dyn KeyInjector>>, InjectorError> {
-    use keymapper::util::key_injector::WindowsInjector;
+    use keymapper::test_util::key_injector::WindowsInjector;
     let injector = WindowsInjector::new()?;
     Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector>))
 }

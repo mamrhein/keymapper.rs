@@ -7,14 +7,12 @@
 // $Source$
 // $Revision$
 
-mod active_app;
 mod iokit_hid;
 mod karabiner_client;
 mod keyboard;
 mod keycode;
 mod mapping;
 
-pub(crate) use active_app::get_active_app_name;
 pub use iokit_hid::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
     IOHIDQueue, for_each_hid_value,

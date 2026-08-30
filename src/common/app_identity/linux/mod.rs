@@ -7,13 +7,19 @@
 // $Source$
 // $Revision$
 
-//! Linux foreground application query.
+//! Linux application identity.
 //!
-//! Detects the active display server via `$XDG_SESSION_TYPE` and delegates
-//! to the appropriate backend (X11 or Wayland).
+//! The foreground application is detected via `$XDG_SESSION_TYPE` and
+//! delegated to the appropriate backend (X11 or Wayland).  The list of
+//! visible applications is produced by scanning `/proc` for GUI processes
+//! (see the `apps` module) and resolving them against `.desktop` files.
 
+mod apps;
+mod desktop;
 mod wayland;
 mod x11;
+
+pub(crate) use apps::list_app_names;
 
 /// Synchronously query the current foreground application name.
 ///
