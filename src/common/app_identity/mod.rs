@@ -62,3 +62,30 @@ pub fn list_app_names() -> Vec<String> {
 pub fn list_app_names() -> Vec<String> {
     windows::list_app_names()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The daemon and the CLI must agree on the app name namespace: the
+    /// value returned by `get_active_app_name` must be one of the names
+    /// `list_app_names` prints, so a rule scoped to an `appnames` value can
+    /// actually match the active app.
+    ///
+    /// In headless environments the active query returns `"unknown"` and
+    /// the test passes trivially.
+    #[test]
+    fn active_app_name_is_in_app_name_list() {
+        let active = get_active_app_name();
+        if active == "unknown" || active.is_empty() {
+            return;
+        }
+
+        let names = list_app_names();
+        assert!(
+            names.contains(&active),
+            "active app {active:?} is not among the visible app names: \
+             {names:?}",
+        );
+    }
+}

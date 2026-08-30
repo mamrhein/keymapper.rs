@@ -13,6 +13,11 @@
 //! variables `WAYLAND_DISPLAY` or `DISPLAY`), resolves their executable name
 //! against `.desktop` files, and returns the resulting application ids.
 //!
+//! The per-process resolution in [`resolve_process_app_id`] is the single
+//! definition of the app identity for a process on Linux; both
+//! [`list_app_names`] and the active-app queries (X11, Wayland) go through
+//! it so they stay in the same namespace.
+//!
 //! This approach is independent of the display server (X11, Wayland, etc.) and
 //! works uniformly across all compositors.
 
@@ -36,11 +41,9 @@ fn is_gui_process(pid: Pid) -> bool {
 
 /// Resolve the executable name for a process by reading the `/proc/[pid]/exe`
 /// symlink, falling back to `/proc/[pid]/cmdline` first token.
-fn resolve_exe_name(pid: Pid) -> Option<String> {
-    let pid_str = pid.as_u32().to_string();
-
+fn resolve_exe_name(pid: u32) -> Option<String> {
     // Try resolving the exe symlink — gives us the real binary path.
-    if let Some(stem) = fs::read_link(format!("/proc/{}/exe", pid_str))
+    if let Some(stem) = fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
         .and_then(|path| {
             path.file_stem()
@@ -52,7 +55,7 @@ fn resolve_exe_name(pid: Pid) -> Option<String> {
     }
 
     // Fall back to the first token of cmdline.
-    let Ok(cmdline) = fs::read(format!("/proc/{}/cmdline", pid_str)) else {
+    let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
         return None;
     };
 
@@ -75,6 +78,32 @@ fn resolve_exe_name(pid: Pid) -> Option<String> {
     None
 }
 
+/// Resolve the `.desktop` application id for a process by matching its
+/// executable name against `.desktop` entries, falling back to matching its
+/// command line against the `Exec` paths.
+///
+/// This is the single definition of the per-process app identity on Linux.
+/// Both [`list_app_names`] and the active-app queries must go through it so
+/// they produce values from the same namespace.
+pub(crate) fn resolve_process_app_id(pid: u32) -> Option<String> {
+    // Try matching by executable name first.
+    let exe = resolve_exe_name(pid)?;
+
+    if let Some(app_id) = super::desktop::resolve_app_id(&exe) {
+        return Some(app_id);
+    }
+
+    // Fall back to matching the process cmdline against the full Exec path
+    // from .desktop files.  This handles apps whose actual binary name
+    // differs from the Exec key (e.g., sandboxed apps like Zed where the
+    // running binary is "zed-editor" but Exec is "zed").
+    let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
+        return None;
+    };
+
+    super::desktop::resolve_app_id_from_cmdline(&cmdline)
+}
+
 /// Return the sorted, deduplicated list of application ids for all GUI
 /// processes connected to a display server.
 ///
@@ -92,30 +121,7 @@ pub fn list_app_names() -> Vec<String> {
             continue;
         }
 
-        // Resolve the executable name and match against .desktop entries.
-        let Some(exe) = resolve_exe_name(process.pid()) else {
-            continue;
-        };
-
-        // Try matching by executable name first.
-        if let Some(app_id) = super::desktop::resolve_app_id(&exe) {
-            app_ids.push(app_id);
-            continue;
-        }
-
-        // Fall back to matching the process cmdline against the full Exec
-        // path from .desktop files.  This handles apps whose actual binary
-        // name differs from the Exec key (e.g., sandboxed apps like Zed
-        // where the running binary is "zed-editor" but Exec is "zed").
-        let Ok(cmdline) =
-            fs::read(format!("/proc/{}/cmdline", process.pid().as_u32()))
-        else {
-            continue;
-        };
-
-        if let Some(app_id) =
-            super::desktop::resolve_app_id_from_cmdline(&cmdline)
-        {
+        if let Some(app_id) = resolve_process_app_id(process.pid().as_u32()) {
             app_ids.push(app_id);
         }
     }

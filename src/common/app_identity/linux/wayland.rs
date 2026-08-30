@@ -12,6 +12,12 @@
 //! Probes compositors in order: KDE (KWin), GNOME, COSMIC, then
 //! wlroots-based compositors and Hyprland.  Each probe is a synchronous,
 //! blocking operation that connects, queries, and disconnects immediately.
+//!
+//! Wherever a compositor reports the active window's owning process (KDE,
+//! GNOME), the PID is resolved to the `.desktop` application id via
+//! [`super::apps::resolve_process_app_id`] — the same namespace
+//! [`super::apps::list_app_names`] produces.  The remaining backends return
+//! the app id / class the compositor itself reports for the active window.
 
 use std::time::Duration;
 
@@ -68,7 +74,8 @@ fn query_kde() -> String {
     };
 
     if pid > 0 {
-        return resolve_pid_to_name(pid as u32);
+        return super::apps::resolve_process_app_id(pid as u32)
+            .unwrap_or_default();
     }
 
     String::new()
@@ -87,12 +94,14 @@ fn query_gnome() -> String {
     };
 
     // GNOME Shell exposes a read-only Eval interface that can run
-    // JavaScript in the shell context.  We use it to query the
-    // focused window's wm_class (equivalent to X11 WM_CLASS).
+    // JavaScript in the shell context.  We use it to query the focused
+    // window's owning PID and resolve it against the .desktop files.  The
+    // wm_class alone is not used because it is not reliably a .desktop
+    // application id.
     let js = "global.display.focus_window && \
-              global.display.focus_window.get_wm_class() || ''";
+              global.display.focus_window.get_pid() || 0";
 
-    let result: String = match conn.call_method(
+    let pid: i32 = match conn.call_method(
         Some("org.gnome.Shell"),
         "/org/gnome/Shell",
         Some("org.gnome.Shell.Eval"),
@@ -106,8 +115,9 @@ fn query_gnome() -> String {
         Err(_) => return String::new(),
     };
 
-    if !result.is_empty() {
-        return result.trim().to_string();
+    if pid > 0 {
+        return super::apps::resolve_process_app_id(pid as u32)
+            .unwrap_or_default();
     }
 
     String::new()
@@ -126,7 +136,10 @@ fn query_cosmic() -> String {
     };
 
     // Check if COSMIC is running by attempting to connect to its D-Bus
-    // service.
+    // service.  Current COSMIC builds (com.system76.CosmicComp) do not
+    // expose an active-window interface yet, so this probe is a
+    // best-effort forward-looking query that simply fails until one
+    // appears.
     let app_id: String = match conn.call_method(
         Some("com.system76.CosmicDesktop"),
         "/org/freedesktop/Portal/v1",
@@ -321,13 +334,4 @@ fn extract_json_string(json: &str, key: &str) -> String {
     }
 
     result
-}
-
-/// Resolve a PID to its process name by reading `/proc/<pid>/comm`.
-fn resolve_pid_to_name(pid: u32) -> String {
-    std::fs::read_to_string(format!("/proc/{pid}/comm"))
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{pid}"))
 }

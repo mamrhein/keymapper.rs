@@ -10,9 +10,12 @@
 //! Linux application identity.
 //!
 //! The foreground application is detected via `$XDG_SESSION_TYPE` and
-//! delegated to the appropriate backend (X11 or Wayland).  The list of
-//! visible applications is produced by scanning `/proc` for GUI processes
-//! (see the `apps` module) and resolving them against `.desktop` files.
+//! delegated to the appropriate backend (X11 or Wayland).  Both backends
+//! resolve the active window's owning process to its `.desktop`
+//! application id, the same namespace the visible application list uses.
+//! The list of visible applications is produced by scanning `/proc` for
+//! GUI processes (see the `apps` module) and resolving them against
+//! `.desktop` files.
 
 mod apps;
 mod desktop;

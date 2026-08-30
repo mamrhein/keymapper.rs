@@ -7,25 +7,29 @@
 // $Source$
 // $Revision$
 
-//! X11 active window query via EWMH `_NET_ACTIVE_WINDOW`.
+//! X11 active application query via EWMH `_NET_ACTIVE_WINDOW`.
 //!
 //! Connects to the X server, resolves the active window from the root
-//! window's `_NET_ACTIVE_WINDOW` property, then reads `_NET_WM_NAME`
-//! (falling back to `WM_NAME`) from that window.
+//! window's `_NET_ACTIVE_WINDOW` property, then reads `_NET_WM_PID` from
+//! that window and resolves the owning process to its `.desktop`
+//! application id — the same namespace [`super::apps::list_app_names`]
+//! produces.
+//!
+//! The window title is deliberately _not_ used: it changes as the document
+//! changes and would never match an `appnames` value.
 
 use x11rb::{
     connection::{Connection, RequestConnection},
-    cookie::Cookie,
     errors::ReplyError,
-    protocol::xproto::{
-        AtomEnum, ConnectionExt as _, GetPropertyReply, GetPropertyType,
-        Window,
-    },
+    protocol::xproto::{ConnectionExt as _, GetPropertyType, Window},
 };
 
 /// Synchronously query the current foreground application name on X11.
 ///
-/// Returns `"unknown"` if the X connection fails or no active window is set.
+/// Resolves the active window's owning process (`_NET_WM_PID`) to its
+/// `.desktop` application id.  Returns `"unknown"` if the X connection
+/// fails, no active window is set, the window has no `_NET_WM_PID`, or the
+/// process cannot be resolved against a `.desktop` file.
 pub fn get_active_app_name() -> String {
     let (conn, screen_num) = match x11rb::connect(None) {
         Ok(result) => result,
@@ -41,34 +45,29 @@ pub fn get_active_app_name() -> String {
     };
 
     // Step 2: Query the root window for the active window ID.
-    let active_window =
-        match get_window_property_atom(&conn, root_window, net_active_atom) {
-            Ok(Some(wid)) if wid != 0 => wid,
-            _ => return "unknown".to_string(),
-        };
+    let Some(active_window) =
+        get_window_property_u32(&conn, root_window, net_active_atom)
+            .filter(|&wid| wid != 0)
+    else {
+        return "unknown".to_string();
+    };
 
-    // Step 3: Read _NET_WM_NAME (UTF-8) from the active window.
-    let utf8_name_atom = match intern_atom(&conn, b"_NET_WM_NAME") {
+    // Step 3: Read the owning process from _NET_WM_PID.
+    let wm_pid_atom = match intern_atom(&conn, b"_NET_WM_PID") {
         Ok(atom) if atom != 0 => atom,
         _ => return "unknown".to_string(),
     };
 
-    if let Some(name) =
-        get_window_property_string(&conn, active_window, utf8_name_atom)
-    {
-        return name;
-    }
+    let Some(pid) = get_window_property_u32(&conn, active_window, wm_pid_atom)
+        .filter(|&pid| pid != 0)
+    else {
+        return "unknown".to_string();
+    };
 
-    // Step 4: Fall back to WM_NAME (core window name, Latin-1).
-    if let Some(name) = get_window_property_string(
-        &conn,
-        active_window,
-        AtomEnum::WM_NAME.into(),
-    ) {
-        return name;
-    }
-
-    "unknown".to_string()
+    // Step 4: Resolve the process to the same .desktop application id
+    // namespace as list_app_names.
+    super::apps::resolve_process_app_id(pid)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Intern an atom name, returning its XID (u32).
@@ -81,55 +80,33 @@ fn intern_atom<C: RequestConnection>(
     Ok(reply.atom)
 }
 
-/// Query a window property that holds an ATOM value.
-fn get_window_property_atom<C: RequestConnection>(
+/// Query a window property that holds a single 32-bit value (a window id or
+/// a pid).
+///
+/// `GetPropertyType::ANY` is used because EWMH declares `_NET_ACTIVE_WINDOW`
+/// as `WINDOW` and `_NET_WM_PID` as `CARDINAL`, but both values are 4 bytes
+/// wide and only the value is of interest here.
+fn get_window_property_u32<C: RequestConnection>(
     conn: &C,
     window: Window,
     property_atom: u32,
-) -> Result<Option<u32>, ReplyError> {
-    let cookie = conn.get_property(
-        false,
-        window,
-        property_atom,
-        AtomEnum::ATOM,
-        0,
-        1, // request 1 ATOM (4 bytes).
-    )?;
-    let reply = cookie.reply()?;
-
-    if reply.value_len > 0 {
-        // The value is a sequence of 4-byte integers (ATOMs).
-        Ok(reply.value32().and_then(|mut iter| iter.next()))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Query a window property that holds raw bytes, interpreting them as UTF-8.
-fn get_window_property_string<C: RequestConnection>(
-    conn: &C,
-    window: Window,
-    property_atom: u32,
-) -> Option<String> {
-    // Request up to 4096 32-bit chunks (16 KiB), more than enough for a
-    // window title.
-    let cookie: Cookie<'_, C, GetPropertyReply> = conn
+) -> Option<u32> {
+    let cookie = conn
         .get_property(
             false,
             window,
             property_atom,
             GetPropertyType::ANY,
             0,
-            4096,
+            1, // request 1 32-bit chunk (4 bytes).
         )
         .ok()?;
 
     let reply = cookie.reply().ok()?;
-    if reply.value_len == 0 {
-        return None;
+    if reply.value_len > 0 {
+        // The value is a single 4-byte integer.
+        reply.value32().and_then(|mut iter| iter.next())
+    } else {
+        None
     }
-
-    // The property value is raw bytes.  _NET_WM_NAME is UTF-8; WM_NAME is
-    // Latin-1, but we decode both as lossy UTF-8 for simplicity.
-    Some(String::from_utf8_lossy(&reply.value).into_owned())
 }

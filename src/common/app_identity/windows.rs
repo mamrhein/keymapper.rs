@@ -9,41 +9,37 @@
 
 //! Windows application identity.
 //!
-//! The foreground application is resolved from the process that owns the
-//! foreground window.  The visible application list is produced by
-//! enumerating visible top-level windows; the returned `app_name` is the
+//! Both entry points resolve each process to the same canonical name: the
 //! `FileDescription` from the PE version resources of the process
-//! executable, falling back to the file stem.  This matches exactly what
-//! `active-win-pos-rs` returns on Windows.
+//! executable, falling back to the file stem.  `get_active_app_name`
+//! resolves the process that owns the foreground window, and
+//! `list_app_names` enumerates the processes that own visible top-level
+//! windows.  This guarantees the active app name is always one of the
+//! names printed by `keymapper appnames`.
 
 use std::{collections::HashSet, path::Path};
 
 use windows::{
-    core::BOOL,
     Win32::{
         Foundation::{CloseHandle, HWND, LPARAM},
-        System::{
-            Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW,
-                TH32CS_SNAPMODULE,
-            },
-            Threading::{
-                OpenProcess, PROCESS_NAME_FORMAT,
-                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-            },
+        System::Diagnostics::ToolHelp::{
+            CREATE_TOOLHELP_SNAPSHOT_FLAGS, CreateToolhelp32Snapshot,
+            MODULEENTRY32W, Module32FirstW, TH32CS_SNAPMODULE,
         },
         UI::WindowsAndMessaging::{
             EnumWindows, GetDesktopWindow, GetForegroundWindow,
             GetWindowThreadProcessId, IsWindowVisible,
         },
     },
+    core::BOOL,
 };
 
 /// Synchronously query the current foreground application name.
 ///
-/// Resolves the foreground window to its owning process and extracts the
-/// executable name from the full image path.  Returns `"unknown"` when the
-/// query fails or no window is in the foreground.
+/// Resolves the foreground window to its owning process and returns the
+/// same canonical name [`list_app_names`] produces for that process.
+/// Returns `"unknown"` when the query fails or no window is in the
+/// foreground.
 pub fn get_active_app_name() -> String {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_invalid() {
@@ -57,47 +53,7 @@ pub fn get_active_app_name() -> String {
         return "unknown".to_string();
     }
 
-    // Open the process with minimal permissions to query its image name.
-    let Ok(process) = (unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-    }) else {
-        return "unknown".to_string();
-    };
-    if process.is_invalid() {
-        return "unknown".to_string();
-    }
-
-    // Query the full process image path (wide string).
-    let mut buffer = [0u16; 512]; // MAX_PATH * 2, sufficient for executable paths.
-    let mut size = buffer.len() as u32;
-    let ok = unsafe {
-        QueryFullProcessImageNameW(
-            process,
-            PROCESS_NAME_FORMAT(0),
-            windows::core::PWSTR(buffer.as_mut_ptr()),
-            &mut size,
-        )
-    };
-
-    if ok.is_err() {
-        // CloseHandle fails only with an invalid handle, which would be a bug.
-        let _ = unsafe { CloseHandle(process) };
-        return "unknown".to_string();
-    }
-
-    // CloseHandle fails only with an invalid handle, which would be a bug.
-    let _ = unsafe { CloseHandle(process) };
-
-    // Extract the executable name from the full path.  The path uses backslash
-    // separators (e.g. "C:\Windows\System32\notepad.exe"), so we find the last
-    // backslash and take the file name from there.
-    if let Ok(path) = String::from_utf16(&buffer[..size as usize])
-        && let Some(stem) = path.rsplit('\\').next()
-    {
-        return stem.to_string();
-    }
-
-    "unknown".to_string()
+    app_name_for_pid(pid).unwrap_or_else(|| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -225,12 +181,10 @@ fn file_stem(path: &str) -> String {
 
 /// Get the executable path for a process by enumerating its modules.
 fn get_process_exe_path(pid: u32) -> Option<String> {
-    let Ok(mod_snap) = (unsafe {
-        CreateToolhelp32Snapshot(
-            TH32CS_SNAPMODULE | windows::Win32::System::Diagnostics::ToolHelp::CREATE_TOOLHELP_SNAPSHOT_FLAGS(pid),
-            pid,
-        )
-    }) else {
+    let snap_flags = TH32CS_SNAPMODULE | CREATE_TOOLHELP_SNAPSHOT_FLAGS(pid);
+
+    let Ok(mod_snap) = (unsafe { CreateToolhelp32Snapshot(snap_flags, pid) })
+    else {
         return None;
     };
     if mod_snap.is_invalid() {
@@ -259,10 +213,7 @@ struct WindowCollector {
     pids: HashSet<u32>,
 }
 
-extern "system" fn enum_windows_proc(
-    hwnd: HWND,
-    param: LPARAM,
-) -> BOOL {
+extern "system" fn enum_windows_proc(hwnd: HWND, param: LPARAM) -> BOOL {
     if unsafe { IsWindowVisible(hwnd) }.as_bool() {
         let mut pid: u32 = 0;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
@@ -283,7 +234,7 @@ pub fn list_app_names() -> Vec<String> {
     // Ensure a desktop session is active.
     unsafe {
         let _ = GetDesktopWindow();
-    }
+    };
 
     let mut collector = WindowCollector {
         pids: HashSet::new(),
@@ -302,19 +253,27 @@ pub fn list_app_names() -> Vec<String> {
     let mut app_names: Vec<String> = Vec::new();
 
     for &pid in &collector.pids {
-        if let Some(exe_path) = get_process_exe_path(pid) {
-            // Match the same logic as active-win-pos-rs: FileDescription
-            // first, then file stem as fallback.
-            let app_name = get_file_description(&exe_path)
-                .unwrap_or_else(|| file_stem(&exe_path));
-
-            if !app_name.is_empty() {
-                app_names.push(app_name);
-            }
+        if let Some(name) = app_name_for_pid(pid) {
+            app_names.push(name);
         }
     }
 
     app_names.sort();
     app_names.dedup();
     app_names
+}
+
+/// Resolve the canonical app name for a process: the `FileDescription`
+/// from its executable's PE version resources, falling back to the file
+/// stem.
+///
+/// This is the single definition of the per-process app identity on
+/// Windows.  Both entry points of this module must go through it so they
+/// stay in the same namespace.
+fn app_name_for_pid(pid: u32) -> Option<String> {
+    let exe_path = get_process_exe_path(pid)?;
+    let name = get_file_description(&exe_path)
+        .unwrap_or_else(|| file_stem(&exe_path));
+
+    if name.is_empty() { None } else { Some(name) }
 }

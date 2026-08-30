@@ -9,11 +9,12 @@
 
 //! macOS application identity.
 //!
-//! The foreground application is queried via NSWorkspace.  The visible
-//! application list is read from the CoreGraphics window list; the returned
-//! `app_name` is the value of `kCGWindowOwnerName` from
-//! `CGWindowListCopyWindowInfo`, which is exactly what `active-win-pos-rs`
-//! returns for the active window on macOS.
+//! Both entry points derive their names from the CoreGraphics window list:
+//! `list_app_names` returns the `kCGWindowOwnerName` of every on-screen
+//! window, and `get_active_app_name` returns the owner name of the
+//! frontmost application's on-screen window (the frontmost pid is queried
+//! via NSWorkspace).  This guarantees the active app name is always one of
+//! the names printed by `keymapper appnames`.
 
 use std::{ffi::c_void, ptr::NonNull};
 
@@ -27,8 +28,10 @@ use objc2_core_graphics::{
 
 /// Synchronously query the current foreground application name.
 ///
-/// Returns `"unknown"` if no application is in the foreground or the
-/// query fails.
+/// Returns the CoreGraphics window owner name of the frontmost
+/// application's on-screen window, so the result is always one of the
+/// names produced by [`list_app_names`].  Returns `"unknown"` if no
+/// frontmost application is found or it has no on-screen window.
 pub fn get_active_app_name() -> String {
     // NSWorkspace is a Foundation singleton that is safe to access from
     // any thread.  The subsequent calls only read immutable state from the
@@ -42,28 +45,28 @@ pub fn get_active_app_name() -> String {
         return "unknown".to_string();
     };
 
-    // Prefer the localized display name; fall back to the bundle
-    // identifier if the display name is unavailable.
-    if let Some(name) = app.localizedName() {
-        return name.to_string();
+    let pid = app.processIdentifier() as u64;
+    if pid == 0 {
+        return "unknown".to_string();
     }
 
-    if let Some(bundle_id) = app.bundleIdentifier() {
-        return bundle_id.to_string();
-    }
+    let options = CGWindowListOption::OptionOnScreenOnly
+        | CGWindowListOption::ExcludeDesktopElements;
+    let Some(array) = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+    else {
+        return "unknown".to_string();
+    };
 
-    "unknown".to_string()
+    window_owners(&array)
+        .into_iter()
+        .find(|(window_pid, _)| *window_pid == pid)
+        .map(|(_, name)| name)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
 // Visible application list (CoreGraphics window list)
 // ---------------------------------------------------------------------------
-
-/// Internal record used for deduplication.
-struct WindowInfo {
-    pid: u64,
-    app_name: String,
-}
 
 /// Try to extract a numeric value for `key` from a dictionary.
 fn get_number(dict: &CFDictionary, key: &str) -> Option<i64> {
@@ -126,7 +129,8 @@ fn get_value_from_dict(
     }
 }
 
-/// Enumerate all on-screen windows and extract unique application names.
+/// Enumerate all on-screen windows and extract the unique application
+/// names.
 pub fn list_app_names() -> Vec<String> {
     let options = CGWindowListOption::OptionOnScreenOnly
         | CGWindowListOption::ExcludeDesktopElements;
@@ -136,20 +140,29 @@ pub fn list_app_names() -> Vec<String> {
         return Vec::new();
     };
 
-    list_from_array(&array)
+    let mut names: Vec<String> = window_owners(&array)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
-/// Extract app names from a CFArray of window dictionaries.
-fn list_from_array(
+/// Collect the (owner pid, owner name) pair for every on-screen window.
+///
+/// This is the single source of the (pid, name) data; both entry points of
+/// this module must go through it so they stay in the same namespace.
+fn window_owners(
     array: &CFRetained<objc2_core_foundation::CFArray>,
-) -> Vec<String> {
+) -> Vec<(u64, String)> {
     // Dereference to &CFArray for the FFI-style accessor functions.
     let cf_array: &objc2_core_foundation::CFArray = array;
 
     unsafe {
         let count = cf_array.count();
 
-        let mut seen: Vec<WindowInfo> = Vec::new();
+        let mut owners: Vec<(u64, String)> = Vec::new();
 
         for i in 0..count {
             let value_ptr = cf_array.value_at_index(i);
@@ -160,15 +173,13 @@ fn list_from_array(
 
             // The array owns this pointer, so we retain it.
             let cf_type = CFRetained::retain(NonNull::new_unchecked(
-                value_ptr as *mut CFType,
+                value_ptr as *const CFType,
             ));
 
             // Check that it's a CFDictionary.
-            if cf_type.downcast_ref::<CFDictionary>().is_none() {
+            let Some(dict) = cf_type.downcast::<CFDictionary>() else {
                 continue;
-            }
-
-            let dict = cf_type.downcast::<CFDictionary>().unwrap();
+            };
 
             // Get window owner PID — skip if missing or zero.
             let Some(pid) = get_number(&dict, "kCGWindowOwnerPID") else {
@@ -184,19 +195,9 @@ fn list_from_array(
                 continue;
             };
 
-            seen.push(WindowInfo {
-                pid: pid as u64,
-                app_name,
-            });
+            owners.push((pid as u64, app_name));
         }
 
-        // Deduplicate: sort by name then pid, keep first occurrence of each
-        // unique name.
-        seen.sort_by(|a, b| {
-            a.app_name.cmp(&b.app_name).then(a.pid.cmp(&b.pid))
-        });
-        seen.dedup_by(|a, b| a.app_name == b.app_name && a.pid == b.pid);
-
-        seen.into_iter().map(|info| info.app_name).collect()
+        owners
     }
 }
