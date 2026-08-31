@@ -7,6 +7,8 @@
 // $Source$
 // $Revision$
 
+use std::fmt;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
@@ -42,18 +44,31 @@ impl<'de> Deserialize<'de> for KeyEvent {
     }
 }
 
+impl fmt::Display for KeyEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The canonical `+`-separated form: held modifiers in order, base
+        // key last, all in canonical key names.  Re-parsing the rendered
+        // string always yields this same event (input aliases are
+        // normalized on parse).
+        for (i, modifier) in self.modifiers.iter().enumerate() {
+            if i > 0 {
+                f.write_str("+")?;
+            }
+            f.write_str(modifier.as_str())?;
+        }
+        if !self.modifiers.is_empty() {
+            f.write_str("+")?;
+        }
+        f.write_str(self.base.as_str())
+    }
+}
+
 impl Serialize for KeyEvent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        let parts: Vec<String> = self
-            .modifiers
-            .iter()
-            .map(|k| k.as_str().to_string())
-            .chain(std::iter::once(self.base.as_str().to_string()))
-            .collect();
-        serializer.serialize_str(&parts.join("+"))
+        serializer.collect_str(self)
     }
 }
 
@@ -216,7 +231,7 @@ impl Serialize for MappingTable {
 
         let mut map = serializer.serialize_map(Some(self.0.len()))?;
         for (trigger, outputs) in &self.0 {
-            let key = trigger_to_string(trigger);
+            let key = trigger.to_string();
 
             if outputs.len() == 1 {
                 map.serialize_entry(&key, &outputs[0])?;
@@ -226,17 +241,6 @@ impl Serialize for MappingTable {
         }
         map.end()
     }
-}
-
-/// Serialize a KeyEvent back to its `+`-separated string form.
-fn trigger_to_string(event: &KeyEvent) -> String {
-    event
-        .modifiers
-        .iter()
-        .map(|k| k.as_str().to_string())
-        .chain(std::iter::once(event.base.as_str().to_string()))
-        .collect::<Vec<_>>()
-        .join("+")
 }
 
 // ---------------------------------------------------------------------------
@@ -447,9 +451,7 @@ impl AppConfig {
                 // No-op: the only output is identical to the trigger.
                 if outputs.len() == 1 && outputs[0] == *trigger {
                     diagnostics.push(format!(
-                        "'{}': {} remaps to itself (no-op)",
-                        label,
-                        trigger_to_string(trigger)
+                        "'{label}': {trigger} remaps to itself (no-op)"
                     ));
                 }
             }
@@ -461,8 +463,7 @@ impl AppConfig {
                 let names: Vec<&str> =
                     locations.iter().map(|(_, name)| name.as_str()).collect();
                 diagnostics.push(format!(
-                    "trigger {} appears in multiple groups: {}",
-                    trigger_to_string(trigger),
+                    "trigger {trigger} appears in multiple groups: {}",
                     names.join(", ")
                 ));
             }
@@ -499,8 +500,7 @@ impl AppConfig {
                         reported_pairs.push(pair.clone());
                         diagnostics.push(format!(
                             "{} and {} form a circular pair (swap)",
-                            trigger_to_string(&pair.0),
-                            trigger_to_string(&pair.1)
+                            pair.0, pair.1
                         ));
                     }
                 }
@@ -528,6 +528,56 @@ mod tests {
         let config = AppConfig::load_from_str("groups: []").unwrap();
         assert!(config.groups.is_empty());
         assert!(config.keyboards.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // KeyEvent display / round-trip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn display_round_trips_through_parse() {
+        // `Display` (used by the serializers) renders canonical key names,
+        // so re-parsing the rendered string always yields the same event,
+        // even when the input used aliases.
+        for s in ["A", "CapsLock", "Ctrl+A", "Cmd+Shift+T", "RightAlt+L"] {
+            let event = KeyEvent::parse(s).unwrap();
+            assert_eq!(
+                KeyEvent::parse(&event.to_string()).unwrap(),
+                event,
+                "round-trip failed for {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_normalizes_aliases_to_canonical_names() {
+        assert_eq!(
+            KeyEvent::parse("Ctrl+A").unwrap().to_string(),
+            "LeftControl+A"
+        );
+        assert_eq!(
+            KeyEvent::parse("Cmd+Shift+T").unwrap().to_string(),
+            "LeftCommand+LeftShift+T"
+        );
+        // Already-canonical strings render unchanged.
+        assert_eq!(
+            KeyEvent::parse("LeftControl+LeftShift+T")
+                .unwrap()
+                .to_string(),
+            "LeftControl+LeftShift+T"
+        );
+    }
+
+    #[test]
+    fn display_serializes_bare_and_chord_events() {
+        let bare = KeyEvent::parse("CapsLock").unwrap();
+        assert_eq!(serde_yaml::to_string(&bare).unwrap().trim(), "CapsLock");
+
+        let chord = KeyEvent::parse("LeftCommand+LeftShift+T").unwrap();
+        assert_eq!(
+            serde_yaml::to_string(&chord).unwrap().trim(),
+            "LeftCommand+LeftShift+T"
+        );
     }
 
     #[test]
