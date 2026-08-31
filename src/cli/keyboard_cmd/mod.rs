@@ -107,22 +107,31 @@ pub fn list() {
 
 /// Print a string padded to the given width, truncating if necessary.
 fn print_padded(s: &str, width: usize) {
-    if s.len() > width {
-        // Truncate with ellipsis for overly long values.
-        if width <= 3 {
-            print!("{}", &s[..width]);
-        } else {
-            print!("{}…", &s[..width - 1]);
-        }
+    print!("{}", pad(s, width));
+}
+
+/// Pad a string to the given width (in characters), truncating with an
+/// ellipsis when necessary.  Truncation happens on character boundaries so
+/// multi-byte UTF-8 values (e.g. non-ASCII vendor names) cannot panic.
+fn pad(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return format!("{s:<width$}", width = width);
+    }
+    if width <= 3 {
+        s.chars().take(width).collect()
     } else {
-        print!("{:width$}", s, width = width);
+        format!("{}…", s.chars().take(width - 1).collect::<String>())
     }
 }
 
 /// Calculate the optimal column width for a header and a list of values.
+///
+/// Widths are in characters so they line up with `pad` for multi-byte
+/// UTF-8 values.
 fn width_for_column(header: &str, values: &[&str]) -> usize {
-    let max_value = values.iter().map(|s| s.len()).max().unwrap_or(0);
-    header.len().max(max_value).min(40) // Cap at 40 chars to avoid excessive widths.
+    let max_value =
+        values.iter().map(|s| s.chars().count()).max().unwrap_or(0);
+    header.chars().count().max(max_value).min(40)
 }
 
 #[cfg(test)]
@@ -149,6 +158,30 @@ mod tests {
         let values = vec![long.as_str()];
         let w = width_for_column("X", &values);
         assert_eq!(w, 40); // capped at 40
+    }
+
+    #[test]
+    fn pad_pads_short_values() {
+        assert_eq!(pad("Test", 8), "Test    ");
+    }
+
+    #[test]
+    fn pad_truncates_long_values_with_ellipsis() {
+        assert_eq!(pad("Logitech", 6), "Logit…");
+    }
+
+    #[test]
+    fn pad_truncates_without_ellipsis_when_too_narrow() {
+        assert_eq!(pad("abcd", 3), "abc");
+    }
+
+    #[test]
+    fn pad_handles_multibyte_utf8_without_panic() {
+        // Truncation points that would land mid-character in bytes.
+        assert_eq!(pad("ÄÖÜ", 2), "ÄÖ");
+        assert_eq!(pad("ÄÖÜ", 4), "ÄÖÜ ");
+        let vendor = "Müller&Söhne";
+        assert_eq!(pad(vendor, 6).chars().count(), 6);
     }
 
     #[test]
