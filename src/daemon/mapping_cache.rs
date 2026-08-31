@@ -16,19 +16,12 @@ use crate::common::{
 };
 
 // ---------------------------------------------------------------------------
-// Modifier bitmask layout (u8): specific key bits only.
-//
-// bit 0: left control      bit 4: right control
-// bit 1: left shift        bit 5: right shift
-// bit 2: left alt          bit 6: right alt
-// bit 3: left command/win  bit 7: right command/win
-//
-// The bit positions match the HID modifier usage ids (0xE0–0xE7), so left
-// side modifiers occupy bits 0–3 and right side modifiers bits 4–7.
+// Modifier bitmasks (u8) hold specific key bits following the canonical
+// layout in `common::modifier::ModifierRole`.
 //
 // Input matching uses exact equality.  "Either side" semantics (e.g. "ctrl"
 // matching left or right) are achieved by compile-time rule expansion: a
-// rule with "ctrl" produces two entries, one with bit 0 and one with bit 4.
+// rule with "ctrl" produces two entries, one for each side.
 // ---------------------------------------------------------------------------
 
 /// A platform-native key event: modifiers held together with a base key press.
@@ -252,12 +245,6 @@ fn expand_modifier_bits(modifiers: &[HidUsage]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // Bit positions per the header comment:
-    // bit 0: left control,   bit 4: right control
-    // bit 1: left shift,     bit 5: right shift
-    // bit 2: left alt,       bit 6: right alt
-    // bit 3: left command,   bit 7: right command
 
     // -----------------------------------------------------------------------
     // expand_modifier_bits

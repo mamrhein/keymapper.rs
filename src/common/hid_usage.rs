@@ -22,6 +22,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::common::modifier::ModifierRole;
+
 /// HID usage page for Keyboard/Keypad.
 pub const PAGE_KEYBOARD: u16 = 0x07;
 
@@ -606,21 +608,13 @@ impl HidUsage {
     ///
     /// Returns `None` if the usage is not a recognised modifier key.  This
     /// replaces all per-platform `keycode_to_modifier_bit()` functions with a
-    /// single canonical mapping.
-    ///
-    /// The HID modifier usage ids (0xE0–0xE7) map directly to the
-    /// `ModifierRole` discriminant values (0–7), so the bit position is simply
-    /// `id - 0xE0`.
+    /// single canonical mapping; the bit layout itself is defined by
+    /// `common::modifier::ModifierRole`.
     pub fn hid_usage_to_modifier_bit(usage: Self) -> Option<u8> {
         if usage.page() != PAGE_KEYBOARD {
             return None;
         }
-        let id = usage.id();
-        if (0xE0..=0xE7).contains(&id) {
-            Some((id - 0xE0) as u8)
-        } else {
-            None
-        }
+        ModifierRole::from_hid_id(usage.id()).map(|role| role as u8)
     }
 }
 
@@ -1082,8 +1076,8 @@ mod tests {
 
     #[test]
     fn hid_usage_to_modifier_bit_all_eight_modifiers() {
-        // Every modifier usage maps to its `ModifierRole` bit position.
-        // The HID modifier ids (0xE0-0xE7) map directly to bits 0-7.
+        // Every modifier usage maps to its `ModifierRole` bit position; the
+        // canonical layout lives in `common::modifier`.
         let modifiers: [(HidUsage, u8); 8] = [
             (HidUsage::LeftControl, 0),
             (HidUsage::LeftShift, 1),

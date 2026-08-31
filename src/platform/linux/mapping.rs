@@ -35,10 +35,11 @@ use super::{
 };
 use crate::{
     common::{
-        hid_usage::{HidUsage, PAGE_KEYBOARD},
+        hid_usage::HidUsage,
         keyboard::{
             KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
         },
+        modifier::ModifierRole,
     },
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
@@ -177,14 +178,12 @@ struct ManagedDevice {
 
 /// Map a modifier bit position to the evdev `KEY_*` code for emission.
 ///
-/// Modifier HID usage ids run 0xE0-0xE7 on the keyboard page, so the bit
-/// position is the offset from 0xE0 (see
-/// `HidUsage::hid_usage_to_modifier_bit`).  The resolved modifier usage is
-/// looked up in the shared `hid_translate` table like any other key.
+/// The bit resolves to a `ModifierRole` (the canonical layout lives in
+/// `common::modifier`); the resulting modifier usage is looked up in the
+/// shared `hid_translate` table like any other key.
 fn modifier_bit_to_keycode(bit: u8) -> Option<u16> {
-    let usage = HidUsage::from_code(
-        ((PAGE_KEYBOARD as u32) << 16) | ((0xE0 + bit) as u32),
-    )?;
+    let role = ModifierRole::try_from_bit(bit)?;
+    let usage = HidUsage::keyboard(role.hid_id())?;
     hid_usage_to_keycode(usage)
 }
 
