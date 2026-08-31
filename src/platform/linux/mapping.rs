@@ -165,6 +165,14 @@ struct ManagedDevice {
     path: String,
     /// Bitmask of currently active modifiers for this device only.
     modifiers: u8,
+    /// Bitmask of forwarded (unmapped) modifier keys that are still held.
+    /// Mapped modifiers are excluded so their self-contained output taps
+    /// do not leak into later state.
+    forwarded_modifiers: u8,
+    /// Bitmask of modifier keys that were part of a fired trigger and have
+    /// already been released on the virtual keyboard.  Their physical
+    /// release is swallowed so it is not forwarded a second time.
+    consumed_modifiers: u8,
     /// Last received `MSC_SCAN` value, consumed by the next `EV_KEY`
     /// event.  The kernel emits the scan code before the key event of the
     /// same press; key-ups and repeats carry no scan code, so those fall
@@ -367,6 +375,17 @@ fn process_device_events(
             // and the original modifier press is NOT forwarded to the
             // virtual device, preventing double emission.
             if value == 1 {
+                // The trigger's modifiers were forwarded when pressed.
+                // Release them now so the output is emitted as a clean tap;
+                // mark them consumed so their physical release is swallowed
+                // below rather than forwarded a second time.
+                let consumed = lookup_modifiers & managed.forwarded_modifiers;
+                if consumed != 0 {
+                    managed.forwarded_modifiers &= !consumed;
+                    managed.consumed_modifiers |= consumed;
+                    release_consumed_modifiers(virtual_device, consumed);
+                }
+
                 for native_key in &outputs {
                     if let Err(e) = emit_key_event(virtual_device, native_key)
                     {
@@ -375,6 +394,34 @@ fn process_device_events(
                 }
             }
             continue;
+        }
+
+        // A modifier key-up that did not fire a trigger: a consumed modifier
+        // (already released when its trigger fired) and a mapped
+        // bare-modifier trigger's release are both swallowed, while a
+        // forwarded modifier's release is forwarded and untracked.
+        if value == 0
+            && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
+        {
+            let mask = 1u8 << bit;
+            if managed.consumed_modifiers & mask != 0 {
+                managed.consumed_modifiers &= !mask;
+                continue;
+            }
+            if managed.forwarded_modifiers & mask == 0 {
+                // The press was mapped (a bare-modifier trigger) and never
+                // forwarded, so its release is swallowed.
+                continue;
+            }
+            managed.forwarded_modifiers &= !mask;
+        }
+
+        // Track a forwarded (unmapped) modifier press so a later fired
+        // trigger can release it cleanly.
+        if value == 1
+            && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
+        {
+            managed.forwarded_modifiers |= 1 << bit;
         }
 
         // Forward the event to the virtual device.
@@ -408,6 +455,32 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
 
     if let Err(e) = device.emit(&events) {
         eprintln!("emit error: {e}");
+    }
+}
+
+/// Release a set of consumed trigger modifiers on the virtual device.
+///
+/// Emits a key-up for each set bit in *consumed* (ascending bit order) so
+/// the fired trigger's modifiers are dropped before the mapped output is
+/// emitted.  Without this the output would ride on the still-held modifier
+/// and produce an unintended control sequence (e.g. the rule
+/// `Ctrl+Semicolon -> C` would emit Ctrl+C, i.e. SIGINT).
+fn release_consumed_modifiers(device: &mut VirtualDevice, consumed: u8) {
+    // Raw evdev event type codes.
+    const EV_KEY: u16 = 1;
+    const EV_SYN: u16 = 0;
+    const SYN_REPORT: u16 = 0;
+
+    for bit in 0..8 {
+        if consumed & (1 << bit) != 0
+            && let Some(code) = modifier_bit_to_keycode(bit)
+        {
+            let _ = device.emit(&[
+                InputEvent::new(EV_KEY, code, 0),
+                InputEvent::new(EV_SYN, SYN_REPORT, 0),
+            ]);
+            thread::sleep(EMIT_SPACING);
+        }
     }
 }
 
@@ -605,6 +678,8 @@ fn handle_device_add(
         device,
         path: kb.device.clone(),
         modifiers: 0,
+        forwarded_modifiers: 0,
+        consumed_modifiers: 0,
         pending_scan: None,
     };
 
@@ -714,6 +789,8 @@ pub fn start_mapping(
             device,
             path: kb.device,
             modifiers: 0,
+            forwarded_modifiers: 0,
+            consumed_modifiers: 0,
             pending_scan: None,
         });
     }
