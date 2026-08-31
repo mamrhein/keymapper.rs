@@ -29,29 +29,19 @@ pub fn default_config_path() -> Option<PathBuf> {
 
 /// Search standard platform directories for the user configuration file.
 ///
-/// Search order:
-/// 1. Current working directory (development convenience)
-/// 2. Platform-specific application config directory
+/// Searches the locations from [`search_dirs`] in priority order: current
+/// working directory first (development convenience), then the
+/// platform-specific application config directory.
 ///
 /// Symbolic links are rejected; `config.yaml` must be a regular file.
 /// Returns `None` when no configuration file exists in any search location.
 pub fn find_config_path() -> Option<PathBuf> {
-    let candidate = |dir: &Path| dir.join(CONFIG_FILE);
-
-    // CWD (development / manual invocation).
-    let path = candidate(Path::new("."));
-    if path.is_file() && !is_symlink(&path) {
-        return Some(path);
-    }
-
-    // Platform-specific application directory.
-    if let Some(dir) = platform_config_dir() {
-        let path = candidate(&dir);
+    for dir in search_dirs() {
+        let path = dir.join(CONFIG_FILE);
         if path.is_file() && !is_symlink(&path) {
             return Some(path);
         }
     }
-
     None
 }
 
@@ -107,10 +97,17 @@ pub fn print_search_locations() {
          one of the following locations:"
     );
 
-    if let Some(dir) = platform_config_dir() {
-        eprintln!("  1. {}", dir.display());
+    // Drive off `search_dirs()` so the printed order can never drift from
+    // the actual search order.
+    let cwd = cwd_path();
+    for (i, dir) in search_dirs().enumerate() {
+        let label = if Some(dir.as_path()) == cwd.as_deref() {
+            "Current working directory".to_string()
+        } else {
+            dir.display().to_string()
+        };
+        eprintln!("  {}. {label}", i + 1);
     }
-    eprintln!("  2. Current working directory");
 }
 
 // ---------------------------------------------------------------------------
@@ -138,4 +135,29 @@ fn platform_config_dir() -> Option<PathBuf> {
 fn platform_config_dir() -> Option<PathBuf> {
     // %APPDATA%\keymapperd
     dirs::config_dir().map(|d| d.join(APP_NAME))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CWD is searched before the platform config directory.  All lookup
+    /// functions and `print_search_locations` drive off this order.
+    #[test]
+    fn search_dirs_prioritises_cwd_over_platform_dir() {
+        let cwd = std::env::current_dir().unwrap();
+        let dirs: Vec<PathBuf> = search_dirs().collect();
+
+        assert_eq!(dirs.first(), Some(&cwd));
+        if let Some(platform) = platform_config_dir() {
+            assert_eq!(dirs.len(), 2);
+            assert_eq!(dirs[1], platform);
+        } else {
+            assert_eq!(dirs.len(), 1);
+        }
+    }
 }
