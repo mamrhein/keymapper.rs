@@ -173,11 +173,11 @@ fn window_owners(
 
             // The array owns this pointer, so we retain it.
             let cf_type = CFRetained::retain(NonNull::new_unchecked(
-                value_ptr as *const CFType,
+                value_ptr as *mut CFType,
             ));
 
             // Check that it's a CFDictionary.
-            let Some(dict) = cf_type.downcast::<CFDictionary>() else {
+            let Some(dict) = cf_type.downcast::<CFDictionary>().ok() else {
                 continue;
             };
 
