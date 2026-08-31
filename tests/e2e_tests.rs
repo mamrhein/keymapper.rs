@@ -540,6 +540,27 @@ impl Drop for ProcessGuard {
 /// mistaken for a stale one.
 #[cfg(unix)]
 fn kill_stale_daemons() {
+    // SIGKILL any orphaned daemons.
+    kill_orphaned_daemons();
+
+    // Wait for the killed daemons' virtual keyboard nodes to be destroyed,
+    // so neither the monitor nor the daemon seizes a stale node.  This runs
+    // even when no daemon was found, because a node can outlive its daemon:
+    // the service daemon destroys it asynchronously after the client socket
+    // closes.  A stale injection keyboard node is equally dangerous: it can
+    // satisfy the injector-device wait before the new injector's node
+    // registers, leaving the daemon's seizure stale and leaking injected
+    // keys into the focused window.
+    #[cfg(target_os = "macos")]
+    wait_for_virtual_keyboards_gone();
+
+    // Give the kernel a moment to release the seized devices.
+    thread::sleep(Duration::from_millis(500));
+}
+
+/// SIGKILL any `keymapperd` processes found via `pgrep`.
+#[cfg(unix)]
+fn kill_orphaned_daemons() {
     let Ok(output) =
         Command::new("pgrep").arg("-x").arg("keymapperd").output()
     else {
@@ -559,8 +580,60 @@ fn kill_stale_daemons() {
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
     }
-    // Give the kernel a moment to release the seized devices.
-    thread::sleep(Duration::from_millis(500));
+}
+
+/// Wait until no Karabiner DriverKit virtual keyboard node remains in IOKit.
+///
+/// Both the daemon's output keyboard and the e2e injection keyboard are
+/// DriverKit virtual devices, and both are destroyed asynchronously by the
+/// service daemon when their client socket closes (on SIGKILL).  A lingering
+/// output keyboard node can be seized by the e2e monitor; when it is later
+/// destroyed, the seizure is void and the new daemon's output leaks into the
+/// focused window (e.g. running a shell-history command in the user's
+/// terminal).  A lingering injection keyboard node is equally dangerous: it
+/// can satisfy the injector-device wait before the new injector's node
+/// registers, so the daemon seizes the stale node and the injected keys leak
+/// into the focused window.  Polling until both identities are gone closes
+/// those races.
+///
+/// The manager is scheduled with the current run loop and pumped while
+/// waiting, because `IOHIDManagerCopyDevices` only reflects devices the
+/// manager has been notified about, and removal notifications are delivered
+/// through the run loop.
+#[cfg(target_os = "macos")]
+fn wait_for_virtual_keyboards_gone() {
+    use keymapper::platform::HidDeviceManager;
+    use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+
+    let Ok(manager) = HidDeviceManager::new_keyboard_matcher() else {
+        eprintln!(
+            "warning: could not create IOHIDManager; skipping the wait for \
+             stale virtual keyboards"
+        );
+        return;
+    };
+
+    manager.schedule_with_runloop();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if !manager.has_karabiner_virtual_keyboard() {
+            return;
+        }
+
+        if Instant::now() >= deadline {
+            eprintln!(
+                "warning: a stale Karabiner virtual keyboard node is still \
+                 present after 10 s; the e2e monitor or daemon may seize it \
+                 and miss the new daemon's output"
+            );
+            return;
+        }
+
+        // Pump the run loop so removal notifications are processed; a short
+        // timeout keeps the deadline check responsive.
+        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.1, true);
+    }
 }
 
 /// RAII guard that stops the daemon on `Drop`.
@@ -922,8 +995,14 @@ fn read_daemon_log(config_dir: &Path) -> String {
 fn write_phase_config(config_out: &Path, phase: Option<&Path>) {
     match phase {
         Some(fixture) => {
-            std::fs::copy(fixture, config_out)
-                .expect("failed to copy config fixture");
+            // Read + write instead of `fs::copy`: on Apple targets, copy
+            // uses an APFS clone that inherits the fixture's ownership,
+            // which breaks the daemon's config-ownership check when the
+            // test runs as a different user (e.g. root via sudo).
+            let content =
+                std::fs::read(fixture).expect("failed to read config fixture");
+            std::fs::write(config_out, content)
+                .expect("failed to write config fixture");
         }
         None => {
             std::fs::write(config_out, "groups: []\n")

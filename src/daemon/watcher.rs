@@ -238,13 +238,17 @@ fn validate_and_reload(
         ));
     }
 
-    // Security check: file is owned by the current user.
+    // Security check: file is owned by the current user.  Skipped when
+    // running as root: a root daemon legitimately reads configs owned by
+    // regular users (the production layout keeps the config in the user's
+    // home directory), and the world-writable check below is the meaningful
+    // tamper guard in that case.
+    let current_uid = unsafe { libc::getuid() };
     let uid = metadata.uid();
-    if uid != unsafe { libc::getuid() } {
+    if current_uid != 0 && uid != current_uid {
         return ReloadResult::Err(format!(
             "config file is owned by uid {} (current user: {})",
-            uid,
-            unsafe { libc::getuid() },
+            uid, current_uid,
         ));
     }
 
