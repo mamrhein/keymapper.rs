@@ -2,10 +2,11 @@
 
 Cross-platform key-remapping daemon and CLI utility for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, hot-reload, and macros.
 
-The project ships two binaries:
+The project ships three binaries:
 
 - **`keymapperd`** — the background daemon that intercepts keyboard events and applies remapping rules.
 - **`keymapper`** — a CLI utility for managing configuration, inspecting keys, and controlling the daemon.
+- **`keymapper_monitor`** — a keyboard event monitor used by the end-to-end tests to capture the daemon's output (a test tool, not meant for daily use).
 
 ## Installation
 
@@ -31,7 +32,7 @@ The driver must be enabled in System Settings > General > Login Items & Extensio
 
 ## Quick start
 
-```bash
+````bash
 # Create an empty configuration file
 keymapper config create
 
@@ -48,14 +49,15 @@ Run `keymapperd` as root. On macOS, install the LaunchDaemon:
 
 ```bash
 sudo scripts/install-macos.sh /usr/local/bin/keymapperd
-```
+````
 
 Or, if installed via Homebrew, start the service:
 
 ```bash
 brew services start keymapper
 ```
-```
+
+````
 
 ## Configuration
 
@@ -102,7 +104,7 @@ The daemon exits with an error if no configuration file is found in any search l
 # Macro — emit a sequence of key events
 - mappings:
     F1: [Cmd+C, T]
-```
+````
 
 ### Structure
 
@@ -200,6 +202,10 @@ Manage the configuration file.
 | `create [dir]`       | Create an empty configuration file at the given directory or the default platform-specific location                                                                                                 |
 | `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names)                                                                        |
 
+### `keymapper keyboards`
+
+List all connected keyboard devices, printing each keyboard's name, vendor, model, port type, and device identifier. The identifier can be used in the `--keyboard` / `--keyboards-global` filters to scope rules to a specific device.
+
 ### `keymapper keys`
 
 Key introspection tools.
@@ -209,14 +215,21 @@ Key introspection tools.
 | `list`     | Print all key names recognised in the configuration file                                       |
 | `probe`    | Wait for physical key presses and print each key's name and code. Press Control+Escape to exit |
 
-### `keymapper server`
+### `keymapper daemon`
 
 Daemon process management.
+
+All subcommands accept an optional `--config-dir DIR` flag that selects the process-management backend, chosen once per invocation so a `start` and a later `stop` always target the same mechanism:
+
+- **Omitted** (production mode) — manages keymapperd through the platform service manager: `launchctl` on macOS, `systemctl --user` on Linux, or a direct spawn on Windows.
+- **`--config-dir DIR`** (development mode) — spawns keymapperd as a detached background process with `DIR` as its working directory, tracked through `DIR/keymapperd.pid`.
 
 | Subcommand | Description                                   |
 | ---------- | --------------------------------------------- |
 | `status`   | Check whether keymapperd is running           |
 | `start`    | Start keymapperd if it is not already running |
+| `stop`     | Stop keymapperd if it is running              |
+| `restart`  | Restart keymapperd (stop then start)          |
 
 ## Hot-reload
 
@@ -236,8 +249,8 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 ## How it works
 
-| Platform | Mechanism |
-|----------|-----------|
-| Linux | `evdev` device grab + `uinput` virtual keyboard |
-| macOS | IOKit device seizure for input capture, Karabiner DriverKit daemon for event emission |
-| Windows | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (a VHF virtual HID driver is planned, see [windows-driver.md](docs/windows-driver.md)) |
+| Platform | Mechanism                                                                                                                                                               |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                                         |
+| macOS    | IOKit device seizure for input capture, Karabiner DriverKit daemon for event emission                                                                                   |
+| Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (a VHF virtual HID driver is planned, see [windows-driver.md](docs/windows-driver.md)) |

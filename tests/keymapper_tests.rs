@@ -852,7 +852,7 @@ fn config_add_keyboard_unknown_field_fails() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn server_status_not_running() {
+fn daemon_status_not_running() {
     // keymapperd is unlikely to be running in the test environment.
     let output = Command::new(bin_path())
         .args(["daemon", "status"])
@@ -870,7 +870,7 @@ fn server_status_not_running() {
 }
 
 #[test]
-fn server_start_not_found() {
+fn daemon_start_not_found() {
     // Hold the e2e lock: the test probes the process list for `keymapperd`,
     // and a daemon started by a concurrent e2e test would make `daemon
     // start` report "started" (its 500 ms liveness check would see the
@@ -903,7 +903,7 @@ fn server_start_not_found() {
 
     assert!(
         already_running || has_error,
-        "server start should either report 'already running' or fail with a \
+        "daemon start should either report 'already running' or fail with a \
          clear error.\nstdout: {}\nstderr: {}",
         stdout,
         stderr

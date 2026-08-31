@@ -159,7 +159,7 @@ Virtual HID driver:
 
 Then:
   keymapper config create    # create a configuration file
-  keymapper server status    # verify the daemon is running
+  keymapper daemon status    # verify the daemon is running
 
 To uninstall:
   sudo ./uninstall-macos.sh

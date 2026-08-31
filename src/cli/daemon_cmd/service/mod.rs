@@ -7,10 +7,12 @@
 // $Source$
 // $Revision$
 
-//! Platform-specific helpers for managing the keymapperd daemon process.
+//! Service-manager process management for keymapperd (production mode).
 //!
 //! On macOS and Linux this delegates to the native service manager (launchd /
-//! systemd --user).  On Windows it directly spawns the daemon binary.
+//! `systemctl --user`).  On Windows it directly spawns the daemon binary.
+//! This is the backend selected when no `--config-dir` is provided; the
+//! PID-file (development) backend lives in [`super::pid_file`].
 
 #[cfg(target_os = "linux")]
 mod linux;

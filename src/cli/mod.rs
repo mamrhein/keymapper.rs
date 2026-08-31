@@ -12,4 +12,3 @@
 pub mod daemon_cmd;
 pub mod keyboard_cmd;
 pub mod keys_cmd;
-pub mod server_cmd;
