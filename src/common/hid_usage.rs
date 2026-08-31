@@ -17,6 +17,12 @@
 //! The enum contains variants from two HID usage pages:
 //! - Keyboard/Keypad page (0x07) — standard keyboard keys.
 //! - Consumer page (0x0C) — media and display control keys.
+//!
+//! The enum and every table-driven impl (`from_code`, `as_str`, `ALL`, the
+//! string parser, and the Linux evdev key code) are generated from the single
+//! declarative table at the bottom of this module.  That table is the one
+//! source of truth: adding a key means adding one line, and nothing else can
+//! drift out of sync with it.
 
 use std::fmt;
 
@@ -30,140 +36,251 @@ pub const PAGE_KEYBOARD: u16 = 0x07;
 /// HID usage page for Consumer.
 pub const PAGE_CONSUMER: u16 = 0x0C;
 
-/// HID-based key identity for configuration and cross-platform code.
+/// Returns a user-friendly error message for an unrecognised key name.
 ///
-/// The discriminant encodes the combined HID usage as `(page << 16) | id`.
-/// This matches the format of Linux MSC_SCAN codes, allowing direct
-/// conversion via `from_code()`.
-#[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum HidUsage {
+/// Shared by the `HidUsage` parser and the platform `Key` enums, which all
+/// resolve the same set of config-facing key names.
+pub(crate) fn unknown_key_error(s: &str) -> String {
+    format!(
+        "Unknown key name '{}'. Use names like CapsLock, LeftCtrl, A, F1, 1, \
+         Minus, Equal, BracketLeft, etc.",
+        s
+    )
+}
+
+/// Error returned when a string cannot be parsed as a `HidUsage`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HidUsageParseError(pub String);
+
+impl fmt::Display for HidUsageParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", unknown_key_error(&self.0))
+    }
+}
+
+impl std::error::Error for HidUsageParseError {}
+
+// ---------------------------------------------------------------------------
+// Table-driven generation
+// ---------------------------------------------------------------------------
+//
+// `define_hid_usage!` is the single source of truth for the `HidUsage` enum.
+// Each table line declares one variant:
+//
+//     Variant = 0xPPPPUU, "CanonicalName" [, [alias, ...]] , evdev: N;
+//
+// where `0xPPPPUU` is the combined HID usage `(page << 16) | id`,
+// `CanonicalName` is the config-facing string (and serialization form), the
+// optional bracket list holds additional parse aliases, and `evdev` is the
+// Linux evdev `KEY_*` code used for emission.  The macro expands to the enum
+// plus every impl that is a pure function of this table, so the variant list
+// is written exactly once.
+
+macro_rules! define_hid_usage {
+    {
+        $(
+            $variant:ident = $code:literal, $name:literal
+            $(, [ $($alias:literal),* ])?
+            , evdev: $evdev:literal
+            ;
+        )*
+    } => {
+        /// HID-based key identity for configuration and cross-platform code.
+        ///
+        /// The discriminant encodes the combined HID usage as `(page << 16) | id`.
+        /// This matches the format of Linux MSC_SCAN codes, allowing direct
+        /// conversion via `from_code()`.
+        #[repr(u32)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum HidUsage {
+            $( $variant = $code, )*
+        }
+
+        impl HidUsage {
+            /// Construct a `HidUsage` from a combined HID usage code.
+            ///
+            /// Returns `None` if the code does not match a recognized usage.
+            #[inline]
+            pub fn from_code(code: u32) -> Option<Self> {
+                match code {
+                    $( $code => Some(Self::$variant), )*
+                    _ => None,
+                }
+            }
+
+            /// Return the canonical config-name for this key.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( Self::$variant => $name, )*
+                }
+            }
+
+            /// All defined `HidUsage` variants.
+            pub fn all() -> &'static [Self] {
+                Self::ALL
+            }
+
+            /// Slice of all defined `HidUsage` variants.
+            pub const ALL: &[Self] = &[ $( Self::$variant, )* ];
+
+            /// Return the Linux evdev `KEY_*` code for this usage.
+            ///
+            /// This is the single source of truth for the evdev key code; the
+            /// Linux `hid_translate` tables are derived from it.  Every
+            /// currently-defined usage has a stable evdev equivalent, so this
+            /// is always `Some`; the `Option` keeps the emission path honest
+            /// should a future usage lack one.
+            #[allow(dead_code)] // used by linux-specific code and tests
+            pub(crate) const fn evdev_keycode(self) -> Option<u16> {
+                match self {
+                    $( Self::$variant => Some($evdev), )*
+                }
+            }
+        }
+
+        /// Parse a `HidUsage` from a string slice.
+        ///
+        /// Accepts canonical names (`LeftControl`, `A`, `F1`) and common
+        /// aliases (`Ctrl`, `Cmd`, `Esc`).  Generic modifier names resolve to
+        /// left-side defaults.  Case-sensitive.
+        impl TryFrom<&str> for HidUsage {
+            type Error = HidUsageParseError;
+
+            fn try_from(value: &str) -> Result<Self, Self::Error> {
+                match value {
+                    // The extra `?` group keeps `$alias` repeating at the same
+                    // depth as in the matcher, which `macro_rules` requires.
+                    $( $name $( $( | $alias )* )? => Ok(Self::$variant), )*
+                    other => Err(HidUsageParseError(other.to_owned())),
+                }
+            }
+        }
+    };
+}
+
+define_hid_usage! {
     // --- Keyboard page (0x07) — Modifiers ---
-    LeftControl = 0x0700E0,
-    LeftShift = 0x0700E1,
-    LeftAlt = 0x0700E2,
-    LeftCommand = 0x0700E3,
-    RightControl = 0x0700E4,
-    RightShift = 0x0700E5,
-    RightAlt = 0x0700E6,
-    RightCommand = 0x0700E7,
+    LeftControl = 0x0700E0, "LeftControl", ["Ctrl", "LeftCtrl"], evdev: 29;
+    RightControl = 0x0700E4, "RightControl", ["RightCtrl"], evdev: 97;
+    LeftShift = 0x0700E1, "LeftShift", ["Shift"], evdev: 42;
+    RightShift = 0x0700E5, "RightShift", evdev: 54;
+    LeftAlt = 0x0700E2, "LeftAlt", ["Alt", "Option", "LeftOption"], evdev: 56;
+    RightAlt = 0x0700E6, "RightAlt", ["RightOption"], evdev: 100;
+    LeftCommand = 0x0700E3, "LeftCommand", ["Command", "Cmd", "Super", "LeftCmd"], evdev: 125;
+    RightCommand = 0x0700E7, "RightCommand", ["RightCmd"], evdev: 126;
     // --- Keyboard page — Caps Lock ---
-    CapsLock = 0x070039,
+    CapsLock = 0x070039, "CapsLock", ["Caps"], evdev: 58;
     // --- Keyboard page — Editor / misc ---
-    Return = 0x070028,
-    Escape = 0x070029,
-    Backspace = 0x07002A,
-    Tab = 0x07002B,
-    Space = 0x07002C,
-    // Insert = 0x070049
-    Delete = 0x07004C,
+    Tab = 0x07002B, "Tab", evdev: 15;
+    Space = 0x07002C, "Space", evdev: 57;
+    Return = 0x070028, "Return", ["Enter"], evdev: 28;
+    Backspace = 0x07002A, "Backspace", evdev: 14;
+    Delete = 0x07004C, "Delete", evdev: 111;
+    Escape = 0x070029, "Escape", ["Esc"], evdev: 1;
     // --- Keyboard page — Navigation ---
-    Home = 0x07004A,
-    PageUp = 0x07004B,
-    End = 0x07004D,
-    PageDown = 0x07004E,
-    RightArrow = 0x07004F,
-    LeftArrow = 0x070050,
-    DownArrow = 0x070051,
-    UpArrow = 0x070052,
+    UpArrow = 0x070052, "UpArrow", ["Up"], evdev: 103;
+    DownArrow = 0x070051, "DownArrow", ["Down"], evdev: 108;
+    LeftArrow = 0x070050, "LeftArrow", ["Left"], evdev: 105;
+    RightArrow = 0x07004F, "RightArrow", ["Right"], evdev: 106;
+    PageUp = 0x07004B, "PageUp", ["PgUp"], evdev: 104;
+    PageDown = 0x07004E, "PageDown", ["PgDn"], evdev: 109;
+    Home = 0x07004A, "Home", evdev: 102;
+    End = 0x07004D, "End", evdev: 107;
     // --- Keyboard page — Function keys ---
-    F1 = 0x07003A,
-    F2 = 0x07003B,
-    F3 = 0x07003C,
-    F4 = 0x07003D,
-    F5 = 0x07003E,
-    F6 = 0x07003F,
-    F7 = 0x070040,
-    F8 = 0x070041,
-    F9 = 0x070042,
-    F10 = 0x070043,
-    F11 = 0x070044,
-    F12 = 0x070045,
-    // PrintScreen = 0x070046
-    // ScrollLock = 0x070047
-    // Pause = 0x070048
+    F1 = 0x07003A, "F1", evdev: 59;
+    F2 = 0x07003B, "F2", evdev: 60;
+    F3 = 0x07003C, "F3", evdev: 61;
+    F4 = 0x07003D, "F4", evdev: 62;
+    F5 = 0x07003E, "F5", evdev: 63;
+    F6 = 0x07003F, "F6", evdev: 64;
+    F7 = 0x070040, "F7", evdev: 65;
+    F8 = 0x070041, "F8", evdev: 66;
+    F9 = 0x070042, "F9", evdev: 67;
+    F10 = 0x070043, "F10", evdev: 68;
+    F11 = 0x070044, "F11", evdev: 87;
+    F12 = 0x070045, "F12", evdev: 88;
     // --- Keyboard page — Letters ---
-    A = 0x070004,
-    B = 0x070005,
-    C = 0x070006,
-    D = 0x070007,
-    E = 0x070008,
-    F = 0x070009,
-    G = 0x07000A,
-    H = 0x07000B,
-    I = 0x07000C,
-    J = 0x07000D,
-    K = 0x07000E,
-    L = 0x07000F,
-    M = 0x070010,
-    N = 0x070011,
-    O = 0x070012,
-    P = 0x070013,
-    Q = 0x070014,
-    R = 0x070015,
-    S = 0x070016,
-    T = 0x070017,
-    U = 0x070018,
-    V = 0x070019,
-    W = 0x07001A,
-    X = 0x07001B,
-    Y = 0x07001C,
-    Z = 0x07001D,
+    A = 0x070004, "A", evdev: 30;
+    B = 0x070005, "B", evdev: 48;
+    C = 0x070006, "C", evdev: 46;
+    D = 0x070007, "D", evdev: 32;
+    E = 0x070008, "E", evdev: 18;
+    F = 0x070009, "F", evdev: 33;
+    G = 0x07000A, "G", evdev: 34;
+    H = 0x07000B, "H", evdev: 35;
+    I = 0x07000C, "I", evdev: 23;
+    J = 0x07000D, "J", evdev: 36;
+    K = 0x07000E, "K", evdev: 37;
+    L = 0x07000F, "L", evdev: 38;
+    M = 0x070010, "M", evdev: 50;
+    N = 0x070011, "N", evdev: 49;
+    O = 0x070012, "O", evdev: 24;
+    P = 0x070013, "P", evdev: 25;
+    Q = 0x070014, "Q", evdev: 16;
+    R = 0x070015, "R", evdev: 19;
+    S = 0x070016, "S", evdev: 31;
+    T = 0x070017, "T", evdev: 20;
+    U = 0x070018, "U", evdev: 22;
+    V = 0x070019, "V", evdev: 47;
+    W = 0x07001A, "W", evdev: 17;
+    X = 0x07001B, "X", evdev: 45;
+    Y = 0x07001C, "Y", evdev: 21;
+    Z = 0x07001D, "Z", evdev: 44;
     // --- Keyboard page — Numbers ---
-    Number1 = 0x07001E,
-    Number2 = 0x07001F,
-    Number3 = 0x070020,
-    Number4 = 0x070021,
-    Number5 = 0x070022,
-    Number6 = 0x070023,
-    Number7 = 0x070024,
-    Number8 = 0x070025,
-    Number9 = 0x070026,
-    Number0 = 0x070027,
+    Number1 = 0x07001E, "1", ["Number1"], evdev: 2;
+    Number2 = 0x07001F, "2", ["Number2"], evdev: 3;
+    Number3 = 0x070020, "3", ["Number3"], evdev: 4;
+    Number4 = 0x070021, "4", ["Number4"], evdev: 5;
+    Number5 = 0x070022, "5", ["Number5"], evdev: 6;
+    Number6 = 0x070023, "6", ["Number6"], evdev: 7;
+    Number7 = 0x070024, "7", ["Number7"], evdev: 8;
+    Number8 = 0x070025, "8", ["Number8"], evdev: 9;
+    Number9 = 0x070026, "9", ["Number9"], evdev: 10;
+    Number0 = 0x070027, "0", ["Number0"], evdev: 11;
     // --- Keyboard page — Numpad ---
-    Numpad1 = 0x070059,
-    Numpad2 = 0x07005A,
-    Numpad3 = 0x07005B,
-    Numpad4 = 0x07005C,
-    Numpad5 = 0x07005D,
-    Numpad6 = 0x07005E,
-    Numpad7 = 0x07005F,
-    Numpad8 = 0x070060,
-    Numpad9 = 0x070061,
-    Numpad0 = 0x070062,
-    NumpadDecimal = 0x070063,
-    NumpadMultiply = 0x070055,
-    NumpadPlus = 0x070057,
-    NumpadDivide = 0x070054,
-    NumpadEnter = 0x070058,
-    NumpadMinus = 0x070056,
-    NumpadClear = 0x070065,
-    NumpadEqual = 0x070067,
+    Numpad0 = 0x070062, "Numpad0", evdev: 82;
+    Numpad1 = 0x070059, "Numpad1", evdev: 79;
+    Numpad2 = 0x07005A, "Numpad2", evdev: 80;
+    Numpad3 = 0x07005B, "Numpad3", evdev: 81;
+    Numpad4 = 0x07005C, "Numpad4", evdev: 75;
+    Numpad5 = 0x07005D, "Numpad5", evdev: 76;
+    Numpad6 = 0x07005E, "Numpad6", evdev: 77;
+    Numpad7 = 0x07005F, "Numpad7", evdev: 71;
+    Numpad8 = 0x070060, "Numpad8", evdev: 72;
+    Numpad9 = 0x070061, "Numpad9", evdev: 73;
+    NumpadDecimal = 0x070063, "NumpadDecimal", evdev: 83;
+    NumpadMultiply = 0x070055, "NumpadMultiply", ["KP_Multiply"], evdev: 55;
+    NumpadPlus = 0x070057, "NumpadPlus", ["KP_Add"], evdev: 78;
+    NumpadDivide = 0x070054, "NumpadDivide", ["KP_Divide"], evdev: 98;
+    NumpadEnter = 0x070058, "NumpadEnter", ["KP_Enter"], evdev: 96;
+    NumpadMinus = 0x070056, "NumpadMinus", ["KP_Subtract"], evdev: 74;
+    NumpadClear = 0x070065, "NumpadClear", evdev: 140;
+    NumpadEqual = 0x070067, "NumpadEqual", evdev: 117;
     // --- Keyboard page — Punctuation / symbols ---
-    Minus = 0x07002D,
-    Equal = 0x07002E,
-    BracketLeft = 0x07002F,
-    BracketRight = 0x070031,
-    Backslash = 0x070030,
-    Semicolon = 0x070033,
-    Quote = 0x070034,
-    Grave = 0x070035,
-    Comma = 0x070036,
-    Slash = 0x070037,
-    Period = 0x070038,
-    IsoExtra = 0x070064,
-    IsoHash = 0x070032,
+    Minus = 0x07002D, "Minus", evdev: 12;
+    Equal = 0x07002E, "Equal", evdev: 13;
+    BracketLeft = 0x07002F, "BracketLeft", evdev: 26;
+    BracketRight = 0x070031, "BracketRight", evdev: 27;
+    Backslash = 0x070030, "Backslash", evdev: 43;
+    Semicolon = 0x070033, "Semicolon", evdev: 39;
+    Quote = 0x070034, "Quote", evdev: 40;
+    Grave = 0x070035, "Grave", evdev: 41;
+    Comma = 0x070036, "Comma", evdev: 51;
+    Slash = 0x070037, "Slash", evdev: 53;
+    Period = 0x070038, "Period", evdev: 52;
+    IsoExtra = 0x070064, "IsoExtra", ["NonUSBackslash"], evdev: 86;
+    IsoHash = 0x070032, "IsoHash", ["Hash"], evdev: 99;
     // --- Consumer page (0x0C) — Media controls ---
-    PlayPause = 0x0C00CD,
-    VolumeUp = 0x0C00E9,
-    VolumeDown = 0x0C00EA,
-    Mute = 0x0C00E2,
-    NextTrack = 0x0C00B5,
-    PreviousTrack = 0x0C00B6,
-    Stop = 0x0C00B7,
+    PlayPause = 0x0C00CD, "PlayPause", ["Play"], evdev: 164;
+    VolumeUp = 0x0C00E9, "VolumeUp", ["VolUp"], evdev: 115;
+    VolumeDown = 0x0C00EA, "VolumeDown", ["VolDown"], evdev: 114;
+    Mute = 0x0C00E2, "Mute", ["VolMute"], evdev: 113;
+    NextTrack = 0x0C00B5, "NextTrack", ["ScanNext"], evdev: 163;
+    PreviousTrack = 0x0C00B6, "PreviousTrack", ["ScanPrev"], evdev: 165;
+    Stop = 0x0C00B7, "Stop", ["MediaStop"], evdev: 166;
     // --- Consumer page — Display controls ---
-    BrightnessUp = 0x0C006F,
-    BrightnessDown = 0x0C0070,
+    BrightnessUp = 0x0C006F, "BrightnessUp", evdev: 225;
+    BrightnessDown = 0x0C0070, "BrightnessDown", evdev: 224;
 }
 
 impl HidUsage {
@@ -179,128 +296,6 @@ impl HidUsage {
     #[inline]
     pub const fn code(self) -> u32 {
         self as u32
-    }
-
-    /// Construct a `HidUsage` from a combined HID usage code.
-    ///
-    /// Returns `None` if the code does not match a recognized usage.
-    #[inline]
-    pub fn from_code(code: u32) -> Option<Self> {
-        match code {
-            0x0700E0 => Some(Self::LeftControl),
-            0x0700E1 => Some(Self::LeftShift),
-            0x0700E2 => Some(Self::LeftAlt),
-            0x0700E3 => Some(Self::LeftCommand),
-            0x0700E4 => Some(Self::RightControl),
-            0x0700E5 => Some(Self::RightShift),
-            0x0700E6 => Some(Self::RightAlt),
-            0x0700E7 => Some(Self::RightCommand),
-            0x070039 => Some(Self::CapsLock),
-            0x070028 => Some(Self::Return),
-            0x070029 => Some(Self::Escape),
-            0x07002A => Some(Self::Backspace),
-            0x07002B => Some(Self::Tab),
-            0x07002C => Some(Self::Space),
-            0x07004C => Some(Self::Delete),
-            0x07004A => Some(Self::Home),
-            0x07004B => Some(Self::PageUp),
-            0x07004D => Some(Self::End),
-            0x07004E => Some(Self::PageDown),
-            0x07004F => Some(Self::RightArrow),
-            0x070050 => Some(Self::LeftArrow),
-            0x070051 => Some(Self::DownArrow),
-            0x070052 => Some(Self::UpArrow),
-            0x07003A => Some(Self::F1),
-            0x07003B => Some(Self::F2),
-            0x07003C => Some(Self::F3),
-            0x07003D => Some(Self::F4),
-            0x07003E => Some(Self::F5),
-            0x07003F => Some(Self::F6),
-            0x070040 => Some(Self::F7),
-            0x070041 => Some(Self::F8),
-            0x070042 => Some(Self::F9),
-            0x070043 => Some(Self::F10),
-            0x070044 => Some(Self::F11),
-            0x070045 => Some(Self::F12),
-            0x070004 => Some(Self::A),
-            0x070005 => Some(Self::B),
-            0x070006 => Some(Self::C),
-            0x070007 => Some(Self::D),
-            0x070008 => Some(Self::E),
-            0x070009 => Some(Self::F),
-            0x07000A => Some(Self::G),
-            0x07000B => Some(Self::H),
-            0x07000C => Some(Self::I),
-            0x07000D => Some(Self::J),
-            0x07000E => Some(Self::K),
-            0x07000F => Some(Self::L),
-            0x070010 => Some(Self::M),
-            0x070011 => Some(Self::N),
-            0x070012 => Some(Self::O),
-            0x070013 => Some(Self::P),
-            0x070014 => Some(Self::Q),
-            0x070015 => Some(Self::R),
-            0x070016 => Some(Self::S),
-            0x070017 => Some(Self::T),
-            0x070018 => Some(Self::U),
-            0x070019 => Some(Self::V),
-            0x07001A => Some(Self::W),
-            0x07001B => Some(Self::X),
-            0x07001C => Some(Self::Y),
-            0x07001D => Some(Self::Z),
-            0x07001E => Some(Self::Number1),
-            0x07001F => Some(Self::Number2),
-            0x070020 => Some(Self::Number3),
-            0x070021 => Some(Self::Number4),
-            0x070022 => Some(Self::Number5),
-            0x070023 => Some(Self::Number6),
-            0x070024 => Some(Self::Number7),
-            0x070025 => Some(Self::Number8),
-            0x070026 => Some(Self::Number9),
-            0x070027 => Some(Self::Number0),
-            0x070062 => Some(Self::Numpad0),
-            0x070059 => Some(Self::Numpad1),
-            0x07005A => Some(Self::Numpad2),
-            0x07005B => Some(Self::Numpad3),
-            0x07005C => Some(Self::Numpad4),
-            0x07005D => Some(Self::Numpad5),
-            0x07005E => Some(Self::Numpad6),
-            0x07005F => Some(Self::Numpad7),
-            0x070060 => Some(Self::Numpad8),
-            0x070061 => Some(Self::Numpad9),
-            0x070063 => Some(Self::NumpadDecimal),
-            0x070055 => Some(Self::NumpadMultiply),
-            0x070057 => Some(Self::NumpadPlus),
-            0x070054 => Some(Self::NumpadDivide),
-            0x070058 => Some(Self::NumpadEnter),
-            0x070056 => Some(Self::NumpadMinus),
-            0x070065 => Some(Self::NumpadClear),
-            0x070067 => Some(Self::NumpadEqual),
-            0x07002D => Some(Self::Minus),
-            0x07002E => Some(Self::Equal),
-            0x07002F => Some(Self::BracketLeft),
-            0x070031 => Some(Self::BracketRight),
-            0x070030 => Some(Self::Backslash),
-            0x070033 => Some(Self::Semicolon),
-            0x070034 => Some(Self::Quote),
-            0x070035 => Some(Self::Grave),
-            0x070036 => Some(Self::Comma),
-            0x070037 => Some(Self::Slash),
-            0x070038 => Some(Self::Period),
-            0x070064 => Some(Self::IsoExtra),
-            0x070032 => Some(Self::IsoHash),
-            // Consumer page
-            0x0C00CD => Some(Self::PlayPause),
-            0x0C00E9 => Some(Self::VolumeUp),
-            0x0C00EA => Some(Self::VolumeDown),
-            0x0C00E2 => Some(Self::Mute),
-            0x0C00B5 => Some(Self::NextTrack),
-            0x0C00B6 => Some(Self::PreviousTrack),
-            0x0C00B7 => Some(Self::Stop),
-            0x0C006F => Some(Self::BrightnessUp),
-            0x0C0070 => Some(Self::BrightnessDown),
-            _ => None,
-        }
     }
 
     // -------------------------------------------------------------------
@@ -336,269 +331,6 @@ impl HidUsage {
     pub fn consumer(id: u16) -> Option<Self> {
         Self::from_code(((PAGE_CONSUMER as u32) << 16) | id as u32)
     }
-
-    // -------------------------------------------------------------------
-    // String conversion (canonical config name)
-    // -------------------------------------------------------------------
-
-    /// Return the canonical config-name for this key.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::LeftControl => "LeftControl",
-            Self::RightControl => "RightControl",
-            Self::LeftShift => "LeftShift",
-            Self::RightShift => "RightShift",
-            Self::LeftAlt => "LeftAlt",
-            Self::RightAlt => "RightAlt",
-            Self::LeftCommand => "LeftCommand",
-            Self::RightCommand => "RightCommand",
-            Self::CapsLock => "CapsLock",
-            Self::Tab => "Tab",
-            Self::Space => "Space",
-            Self::Return => "Return",
-            Self::Backspace => "Backspace",
-            Self::Delete => "Delete",
-            Self::Escape => "Escape",
-            Self::UpArrow => "UpArrow",
-            Self::DownArrow => "DownArrow",
-            Self::LeftArrow => "LeftArrow",
-            Self::RightArrow => "RightArrow",
-            Self::PageUp => "PageUp",
-            Self::PageDown => "PageDown",
-            Self::Home => "Home",
-            Self::End => "End",
-            Self::F1 => "F1",
-            Self::F2 => "F2",
-            Self::F3 => "F3",
-            Self::F4 => "F4",
-            Self::F5 => "F5",
-            Self::F6 => "F6",
-            Self::F7 => "F7",
-            Self::F8 => "F8",
-            Self::F9 => "F9",
-            Self::F10 => "F10",
-            Self::F11 => "F11",
-            Self::F12 => "F12",
-            Self::A => "A",
-            Self::B => "B",
-            Self::C => "C",
-            Self::D => "D",
-            Self::E => "E",
-            Self::F => "F",
-            Self::G => "G",
-            Self::H => "H",
-            Self::I => "I",
-            Self::J => "J",
-            Self::K => "K",
-            Self::L => "L",
-            Self::M => "M",
-            Self::N => "N",
-            Self::O => "O",
-            Self::P => "P",
-            Self::Q => "Q",
-            Self::R => "R",
-            Self::S => "S",
-            Self::T => "T",
-            Self::U => "U",
-            Self::V => "V",
-            Self::W => "W",
-            Self::X => "X",
-            Self::Y => "Y",
-            Self::Z => "Z",
-            Self::Number1 => "1",
-            Self::Number2 => "2",
-            Self::Number3 => "3",
-            Self::Number4 => "4",
-            Self::Number5 => "5",
-            Self::Number6 => "6",
-            Self::Number7 => "7",
-            Self::Number8 => "8",
-            Self::Number9 => "9",
-            Self::Number0 => "0",
-            // Numpad
-            Self::Numpad0 => "Numpad0",
-            Self::Numpad1 => "Numpad1",
-            Self::Numpad2 => "Numpad2",
-            Self::Numpad3 => "Numpad3",
-            Self::Numpad4 => "Numpad4",
-            Self::Numpad5 => "Numpad5",
-            Self::Numpad6 => "Numpad6",
-            Self::Numpad7 => "Numpad7",
-            Self::Numpad8 => "Numpad8",
-            Self::Numpad9 => "Numpad9",
-            Self::NumpadDecimal => "NumpadDecimal",
-            Self::NumpadMultiply => "NumpadMultiply",
-            Self::NumpadPlus => "NumpadPlus",
-            Self::NumpadDivide => "NumpadDivide",
-            Self::NumpadEnter => "NumpadEnter",
-            Self::NumpadMinus => "NumpadMinus",
-            Self::NumpadClear => "NumpadClear",
-            Self::NumpadEqual => "NumpadEqual",
-            // Punctuation / symbols
-            Self::Minus => "Minus",
-            Self::Equal => "Equal",
-            Self::BracketLeft => "BracketLeft",
-            Self::BracketRight => "BracketRight",
-            Self::Backslash => "Backslash",
-            Self::Semicolon => "Semicolon",
-            Self::Quote => "Quote",
-            Self::Comma => "Comma",
-            Self::Period => "Period",
-            Self::Slash => "Slash",
-            Self::Grave => "Grave",
-            Self::IsoExtra => "IsoExtra",
-            Self::IsoHash => "IsoHash",
-            // Consumer page — media controls
-            Self::PlayPause => "PlayPause",
-            Self::VolumeUp => "VolumeUp",
-            Self::VolumeDown => "VolumeDown",
-            Self::Mute => "Mute",
-            Self::NextTrack => "NextTrack",
-            Self::PreviousTrack => "PreviousTrack",
-            Self::Stop => "Stop",
-            // Consumer page — display controls
-            Self::BrightnessUp => "BrightnessUp",
-            Self::BrightnessDown => "BrightnessDown",
-        }
-    }
-
-    // -------------------------------------------------------------------
-    // Enumeration
-    // -------------------------------------------------------------------
-
-    /// All defined `HidUsage` variants.
-    ///
-    /// Contains 111 entries: 102 keyboard/keypad usages plus 9 consumer
-    /// page usages.
-    pub fn all() -> &'static [Self] {
-        &Self::ALL
-    }
-
-    /// Array of all defined `HidUsage` variants (111 total).
-    pub const ALL: [Self; 111] = [
-        // Modifiers
-        Self::LeftControl,
-        Self::RightControl,
-        Self::LeftShift,
-        Self::RightShift,
-        Self::LeftAlt,
-        Self::RightAlt,
-        Self::LeftCommand,
-        Self::RightCommand,
-        // Caps Lock
-        Self::CapsLock,
-        // Editor / misc
-        Self::Tab,
-        Self::Space,
-        Self::Return,
-        Self::Backspace,
-        Self::Delete,
-        Self::Escape,
-        // Navigation
-        Self::UpArrow,
-        Self::DownArrow,
-        Self::LeftArrow,
-        Self::RightArrow,
-        Self::PageUp,
-        Self::PageDown,
-        Self::Home,
-        Self::End,
-        // Function keys
-        Self::F1,
-        Self::F2,
-        Self::F3,
-        Self::F4,
-        Self::F5,
-        Self::F6,
-        Self::F7,
-        Self::F8,
-        Self::F9,
-        Self::F10,
-        Self::F11,
-        Self::F12,
-        // Letters
-        Self::A,
-        Self::B,
-        Self::C,
-        Self::D,
-        Self::E,
-        Self::F,
-        Self::G,
-        Self::H,
-        Self::I,
-        Self::J,
-        Self::K,
-        Self::L,
-        Self::M,
-        Self::N,
-        Self::O,
-        Self::P,
-        Self::Q,
-        Self::R,
-        Self::S,
-        Self::T,
-        Self::U,
-        Self::V,
-        Self::W,
-        Self::X,
-        Self::Y,
-        Self::Z,
-        // Numbers
-        Self::Number1,
-        Self::Number2,
-        Self::Number3,
-        Self::Number4,
-        Self::Number5,
-        Self::Number6,
-        Self::Number7,
-        Self::Number8,
-        Self::Number9,
-        Self::Number0,
-        // Numpad
-        Self::Numpad0,
-        Self::Numpad1,
-        Self::Numpad2,
-        Self::Numpad3,
-        Self::Numpad4,
-        Self::Numpad5,
-        Self::Numpad6,
-        Self::Numpad7,
-        Self::Numpad8,
-        Self::Numpad9,
-        Self::NumpadDecimal,
-        Self::NumpadMultiply,
-        Self::NumpadPlus,
-        Self::NumpadDivide,
-        Self::NumpadEnter,
-        Self::NumpadMinus,
-        Self::NumpadClear,
-        Self::NumpadEqual,
-        // Punctuation / symbols
-        Self::Minus,
-        Self::Equal,
-        Self::BracketLeft,
-        Self::BracketRight,
-        Self::Backslash,
-        Self::Semicolon,
-        Self::Quote,
-        Self::Grave,
-        Self::Comma,
-        Self::Slash,
-        Self::Period,
-        Self::IsoExtra,
-        Self::IsoHash,
-        // Consumer page — media controls
-        Self::PlayPause,
-        Self::VolumeUp,
-        Self::VolumeDown,
-        Self::Mute,
-        Self::NextTrack,
-        Self::PreviousTrack,
-        Self::Stop,
-        // Consumer page — display controls
-        Self::BrightnessUp,
-        Self::BrightnessDown,
-    ];
 
     // -------------------------------------------------------------------
     // Modifier mapping
@@ -641,167 +373,6 @@ impl<'de> Deserialize<'de> for HidUsage {
         let s = String::deserialize(deserializer)?;
         Self::try_from(s.as_str())
             .map_err(|e| serde::de::Error::custom(e.to_string()))
-    }
-}
-
-/// Returns a user-friendly error message for an unrecognised key name.
-///
-/// Shared by the `HidUsage` parser and the platform `Key` enums, which all
-/// resolve the same set of config-facing key names.
-pub(crate) fn unknown_key_error(s: &str) -> String {
-    format!(
-        "Unknown key name '{}'. Use names like CapsLock, LeftCtrl, A, F1, 1, \
-         Minus, Equal, BracketLeft, etc.",
-        s
-    )
-}
-
-/// Error returned when a string cannot be parsed as a `HidUsage`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HidUsageParseError(pub String);
-
-impl fmt::Display for HidUsageParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", unknown_key_error(&self.0))
-    }
-}
-
-impl std::error::Error for HidUsageParseError {}
-
-/// Parse a `HidUsage` from a string slice.
-///
-/// Accepts canonical names (`LeftControl`, `A`, `F1`) and common aliases
-/// (`Ctrl`, `Cmd`, `Esc`).  Generic modifier names resolve to left-side
-/// defaults.  Case-sensitive.
-impl TryFrom<&str> for HidUsage {
-    type Error = HidUsageParseError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            // Generic modifiers -- resolve to left-side defaults
-            "Ctrl" => Ok(Self::LeftControl),
-            "Shift" => Ok(Self::LeftShift),
-            "Alt" | "Option" => Ok(Self::LeftAlt),
-            "Command" | "Cmd" | "Super" => Ok(Self::LeftCommand),
-            // Specific modifiers
-            "LeftControl" | "LeftCtrl" => Ok(Self::LeftControl),
-            "RightControl" | "RightCtrl" => Ok(Self::RightControl),
-            "LeftShift" => Ok(Self::LeftShift),
-            "RightShift" => Ok(Self::RightShift),
-            "LeftAlt" | "LeftOption" => Ok(Self::LeftAlt),
-            "RightAlt" | "RightOption" => Ok(Self::RightAlt),
-            "LeftCommand" | "LeftCmd" => Ok(Self::LeftCommand),
-            "RightCommand" | "RightCmd" => Ok(Self::RightCommand),
-            // Non-modifier keys
-            "CapsLock" | "Caps" => Ok(Self::CapsLock),
-            "Tab" => Ok(Self::Tab),
-            "Space" => Ok(Self::Space),
-            "Return" | "Enter" => Ok(Self::Return),
-            "Backspace" => Ok(Self::Backspace),
-            "Delete" => Ok(Self::Delete),
-            "Escape" | "Esc" => Ok(Self::Escape),
-            "UpArrow" | "Up" => Ok(Self::UpArrow),
-            "DownArrow" | "Down" => Ok(Self::DownArrow),
-            "LeftArrow" | "Left" => Ok(Self::LeftArrow),
-            "RightArrow" | "Right" => Ok(Self::RightArrow),
-            "PageUp" | "PgUp" => Ok(Self::PageUp),
-            "PageDown" | "PgDn" => Ok(Self::PageDown),
-            "Home" => Ok(Self::Home),
-            "End" => Ok(Self::End),
-            "F1" => Ok(Self::F1),
-            "F2" => Ok(Self::F2),
-            "F3" => Ok(Self::F3),
-            "F4" => Ok(Self::F4),
-            "F5" => Ok(Self::F5),
-            "F6" => Ok(Self::F6),
-            "F7" => Ok(Self::F7),
-            "F8" => Ok(Self::F8),
-            "F9" => Ok(Self::F9),
-            "F10" => Ok(Self::F10),
-            "F11" => Ok(Self::F11),
-            "F12" => Ok(Self::F12),
-            "A" => Ok(Self::A),
-            "B" => Ok(Self::B),
-            "C" => Ok(Self::C),
-            "D" => Ok(Self::D),
-            "E" => Ok(Self::E),
-            "F" => Ok(Self::F),
-            "G" => Ok(Self::G),
-            "H" => Ok(Self::H),
-            "I" => Ok(Self::I),
-            "J" => Ok(Self::J),
-            "K" => Ok(Self::K),
-            "L" => Ok(Self::L),
-            "M" => Ok(Self::M),
-            "N" => Ok(Self::N),
-            "O" => Ok(Self::O),
-            "P" => Ok(Self::P),
-            "Q" => Ok(Self::Q),
-            "R" => Ok(Self::R),
-            "S" => Ok(Self::S),
-            "T" => Ok(Self::T),
-            "U" => Ok(Self::U),
-            "V" => Ok(Self::V),
-            "W" => Ok(Self::W),
-            "X" => Ok(Self::X),
-            "Y" => Ok(Self::Y),
-            "Z" => Ok(Self::Z),
-            "1" | "Number1" => Ok(Self::Number1),
-            "2" | "Number2" => Ok(Self::Number2),
-            "3" | "Number3" => Ok(Self::Number3),
-            "4" | "Number4" => Ok(Self::Number4),
-            "5" | "Number5" => Ok(Self::Number5),
-            "6" | "Number6" => Ok(Self::Number6),
-            "7" | "Number7" => Ok(Self::Number7),
-            "8" | "Number8" => Ok(Self::Number8),
-            "9" | "Number9" => Ok(Self::Number9),
-            "0" | "Number0" => Ok(Self::Number0),
-            // Numpad
-            "Numpad0" => Ok(Self::Numpad0),
-            "Numpad1" => Ok(Self::Numpad1),
-            "Numpad2" => Ok(Self::Numpad2),
-            "Numpad3" => Ok(Self::Numpad3),
-            "Numpad4" => Ok(Self::Numpad4),
-            "Numpad5" => Ok(Self::Numpad5),
-            "Numpad6" => Ok(Self::Numpad6),
-            "Numpad7" => Ok(Self::Numpad7),
-            "Numpad8" => Ok(Self::Numpad8),
-            "Numpad9" => Ok(Self::Numpad9),
-            "NumpadDecimal" => Ok(Self::NumpadDecimal),
-            "NumpadMultiply" | "KP_Multiply" => Ok(Self::NumpadMultiply),
-            "NumpadPlus" | "KP_Add" => Ok(Self::NumpadPlus),
-            "NumpadDivide" | "KP_Divide" => Ok(Self::NumpadDivide),
-            "NumpadEnter" | "KP_Enter" => Ok(Self::NumpadEnter),
-            "NumpadMinus" | "KP_Subtract" => Ok(Self::NumpadMinus),
-            "NumpadClear" => Ok(Self::NumpadClear),
-            "NumpadEqual" => Ok(Self::NumpadEqual),
-            // Punctuation / symbols
-            "Minus" => Ok(Self::Minus),
-            "Equal" => Ok(Self::Equal),
-            "BracketLeft" => Ok(Self::BracketLeft),
-            "BracketRight" => Ok(Self::BracketRight),
-            "Backslash" => Ok(Self::Backslash),
-            "Semicolon" => Ok(Self::Semicolon),
-            "Quote" => Ok(Self::Quote),
-            "Comma" => Ok(Self::Comma),
-            "Period" => Ok(Self::Period),
-            "Slash" => Ok(Self::Slash),
-            "Grave" => Ok(Self::Grave),
-            "IsoExtra" | "NonUSBackslash" => Ok(Self::IsoExtra),
-            "IsoHash" | "Hash" => Ok(Self::IsoHash),
-            // Consumer page — media controls
-            "PlayPause" | "Play" => Ok(Self::PlayPause),
-            "VolumeUp" | "VolUp" => Ok(Self::VolumeUp),
-            "VolumeDown" | "VolDown" => Ok(Self::VolumeDown),
-            "Mute" | "VolMute" => Ok(Self::Mute),
-            "NextTrack" | "ScanNext" => Ok(Self::NextTrack),
-            "PreviousTrack" | "ScanPrev" => Ok(Self::PreviousTrack),
-            "Stop" | "MediaStop" => Ok(Self::Stop),
-            // Consumer page — display controls
-            "BrightnessUp" => Ok(Self::BrightnessUp),
-            "BrightnessDown" => Ok(Self::BrightnessDown),
-            other => Err(HidUsageParseError(other.to_owned())),
-        }
     }
 }
 
@@ -1167,6 +738,25 @@ mod tests {
             assert!(
                 seen.insert(usage.as_str()),
                 "duplicate canonical name '{}'",
+                usage.as_str(),
+            );
+        }
+    }
+
+    #[test]
+    fn no_duplicate_evdev_keycodes() {
+        // Every usage has an evdev key code, and no two usages share one.
+        // Uniqueness is what makes the Linux reverse lookup (a linear scan
+        // over `ALL`) an exact inverse of `evdev_keycode()`.
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for usage in HidUsage::ALL.iter().copied() {
+            let code = usage
+                .evdev_keycode()
+                .unwrap_or_else(|| panic!("missing evdev code for {}", usage.as_str()));
+            assert!(
+                seen.insert(code),
+                "duplicate evdev code {code} for {}",
                 usage.as_str(),
             );
         }
