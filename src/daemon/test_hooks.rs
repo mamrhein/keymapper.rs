@@ -5,7 +5,7 @@
 //              with the application.
 // ---------------------------------------------------------------------------
 // $Source$
-// $Revision:
+// $Revision$
 
 //! E2e-only test hooks.
 //!
@@ -33,9 +33,9 @@ pub const ACTIVE_APP_OVERRIDE_ENV: &str = "KEYMAPPER_ACTIVE_APP";
 
 /// Touch the readiness file named by [`READY_FILE_ENV`], if set.
 ///
-/// Called by each platform's `start_mapping` once the daemon is ready to
-/// process events.  A no-op when the environment variable is unset, so it is
-/// safe to call unconditionally.
+/// Injected into each platform's `start_mapping` by the daemon binary and
+/// invoked once the daemon is ready to process events.  A no-op when the
+/// environment variable is unset, so it is safe to pass unconditionally.
 pub fn signal_ready() {
     let Some(path) = std::env::var(READY_FILE_ENV).ok() else {
         return;

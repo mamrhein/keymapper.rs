@@ -622,9 +622,13 @@ extern "system" fn low_level_keyboard_proc(
 /// platforms but is a no-op on Windows: capture is a session-global
 /// `WH_KEYBOARD_LL` hook, and applying the filter per device (via raw input
 /// device ids) is a feature deliberately out of scope for this phase.
+/// `ready_signal` is invoked once the daemon can process events; it is
+/// injected by the caller so this module stays free of test-specific side
+/// effects.
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
     #[allow(unused_variables)] keyboard_filter: Option<Vec<KeyboardSpecifier>>,
+    ready_signal: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Start the raw input loop (spawns its own thread).
     let (_raw_loop, raw_rx) = start_raw_input_loop()?;
@@ -673,9 +677,10 @@ pub fn start_mapping(
     println!("Windows low-level hook listening (three-thread mode).");
 
     // The raw input loop, worker thread, and keyboard hook are all live, so
-    // the daemon can now process events.  Signal readiness for the e2e
-    // harness.
-    crate::daemon::test_hooks::signal_ready();
+    // the daemon can now process events.
+    if let Some(signal) = ready_signal {
+        signal();
+    }
 
     // Run the message loop.  This blocks until WM_QUIT is received.
     unsafe {

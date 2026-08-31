@@ -98,5 +98,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::from_raw(ptr as *const RwLock<dyn Lookup>)
     };
 
-    keymapper::platform::start_mapping(platform_state, global_filter)
+    // Inject the e2e readiness hook.  It is a no-op unless the harness set
+    // `KEYMAPPER_READY_FILE`, so production runs pay nothing for it, and the
+    // platform layer stays free of test-specific side effects.
+    keymapper::platform::start_mapping(
+        platform_state,
+        global_filter,
+        Some(Box::new(keymapper::daemon::test_hooks::signal_ready)),
+    )
 }

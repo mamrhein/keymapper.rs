@@ -752,9 +752,13 @@ fn handle_device_remove(
 // evdev event loop (epoll-based, multi-device)
 // ---------------------------------------------------------------------------
 
+/// `ready_signal` is invoked once the daemon can process events; it is
+/// injected by the caller so this module stays free of test-specific side
+/// effects.
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
     keyboard_filter: Option<Vec<KeyboardSpecifier>>,
+    ready_signal: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Discover and open keyboards for capture.  Degrade gracefully: with no
     // keyboards the daemon starts with an empty managed set, and the hot-plug
@@ -839,8 +843,9 @@ pub fn start_mapping(
 
     // All devices are grabbed, the virtual output device is created, and the
     // hot-plug monitor is running, so the daemon can now process events.
-    // Signal readiness for the e2e harness.
-    crate::daemon::test_hooks::signal_ready();
+    if let Some(signal) = ready_signal {
+        signal();
+    }
 
     let mut events = vec![epoll_event { events: 0, u64: 0 }; 64];
 
