@@ -29,21 +29,6 @@ use crate::common::{
 /// without lagging focus switches in any perceptible way.
 const ACTIVE_APP_TTL: Duration = Duration::from_millis(100);
 
-/// Environment variable that overrides the platform's active-app query.
-///
-/// The e2e tests run a windowless monitor that can never become the
-/// active window; setting this variable (to the monitor's app name) makes
-/// app-scoped rule evaluation deterministic in tests.
-const ACTIVE_APP_OVERRIDE_ENV: &str = "KEYMAPPER_ACTIVE_APP";
-
-/// Resolve the active application name, honoring the test override.
-fn resolved_active_app_name() -> String {
-    match std::env::var(ACTIVE_APP_OVERRIDE_ENV) {
-        Ok(name) if !name.is_empty() => name,
-        _ => crate::common::app_identity::get_active_app_name(),
-    }
-}
-
 /// Cached result of the most recent active-app query.
 #[derive(Debug)]
 struct CachedActiveApp {
@@ -242,7 +227,7 @@ impl Lookup for RuntimeState {
     fn active_app(&self) -> Arc<str> {
         let mut cache = self.active_app_cache.lock();
         if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
-            cache.name = resolved_active_app_name().into();
+            cache.name = super::test_hooks::active_app_name().into();
             cache.queried_at = Instant::now();
         }
         Arc::clone(&cache.name)

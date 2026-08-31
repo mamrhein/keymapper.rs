@@ -675,7 +675,7 @@ pub fn start_mapping(
     // The raw input loop, worker thread, and keyboard hook are all live, so
     // the daemon can now process events.  Signal readiness for the e2e
     // harness.
-    crate::daemon::signal_ready();
+    crate::daemon::test_hooks::signal_ready();
 
     // Run the message loop.  This blocks until WM_QUIT is received.
     unsafe {

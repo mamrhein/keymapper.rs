@@ -103,7 +103,7 @@ pub fn start_mapping(
 
     // The seizure mapping is live, so the daemon can now process events.
     // Signal readiness for the e2e harness.
-    crate::daemon::signal_ready();
+    crate::daemon::test_hooks::signal_ready();
 
     run_event_loop(handle, shutdown)
 }
