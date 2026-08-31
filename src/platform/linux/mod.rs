@@ -11,5 +11,5 @@ pub mod hid_translate;
 mod keyboard;
 mod mapping;
 
-pub use keyboard::{discover_and_open_keyboards, list_keyboards};
+pub use keyboard::list_keyboards;
 pub use mapping::{VIRTUAL_KEYBOARD_NAME, start_mapping};

@@ -57,7 +57,10 @@ use super::{
     raw_input::start_raw_input_loop,
 };
 use crate::{
-    common::{hid_usage::HidUsage, modifier::ModifierRole},
+    common::{
+        hid_usage::HidUsage, keyboard::KeyboardSpecifier,
+        modifier::ModifierRole,
+    },
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
 
@@ -614,8 +617,14 @@ extern "system" fn low_level_keyboard_proc(
 ///
 /// This is the entry point called by `keymapperd.rs` and replaces the
 /// previous single-threaded static-mutex architecture.
+///
+/// `keyboard_filter` is accepted for signature uniformity with the other
+/// platforms but is a no-op on Windows: capture is a session-global
+/// `WH_KEYBOARD_LL` hook, and applying the filter per device (via raw input
+/// device ids) is a feature deliberately out of scope for this phase.
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
+    #[allow(unused_variables)] keyboard_filter: Option<Vec<KeyboardSpecifier>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Start the raw input loop (spawns its own thread).
     let (_raw_loop, raw_rx) = start_raw_input_loop()?;

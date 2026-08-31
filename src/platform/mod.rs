@@ -37,10 +37,7 @@ mod windows;
 #[cfg(target_os = "linux")]
 pub use linux::hid_translate;
 #[cfg(target_os = "linux")]
-pub use linux::{
-    VIRTUAL_KEYBOARD_NAME, discover_and_open_keyboards, list_keyboards,
-    start_mapping,
-};
+pub use linux::{VIRTUAL_KEYBOARD_NAME, list_keyboards, start_mapping};
 #[cfg(target_os = "macos")]
 pub use macos::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,

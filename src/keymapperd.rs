@@ -38,18 +38,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // registry gets ALL keyboards so that filtering at rule-level can resolve
     // any device.
     //
-    // On Linux, discover_and_open_keyboards performs a single udev scan and
-    // keeps the devices open, avoiding a redundant open in start_mapping.
-    #[cfg(target_os = "linux")]
-    let (all_keyboards, opened_devices) = {
-        let opened = keymapper::platform::discover_and_open_keyboards()
-            .unwrap_or_default();
-        let infos: Vec<keymapper::common::keyboard::KeyboardInfo> =
-            opened.iter().map(|(info, _)| info.clone()).collect();
-        (infos, opened)
-    };
-
-    #[cfg(not(target_os = "linux"))]
+    // On Linux this performs a udev scan, and `start_mapping` performs a
+    // second scan for capture, so each device is opened twice at startup
+    // (the first fd is dropped immediately).  That is a startup-only cost of
+    // a few milliseconds, accepted in exchange for a uniform platform
+    // signature — threading the already-opened devices through would require
+    // a platform-specific `start_mapping`.
     let all_keyboards =
         keymapper::platform::list_keyboards().unwrap_or_default();
 
@@ -104,32 +98,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::from_raw(ptr as *const RwLock<dyn Lookup>)
     };
 
-    // On Linux, pass the filtered keyboard pairs for device-level capture.
-    // On macOS, pass the global filter so only matching keyboards are seized.
-    // On Windows, all keyboards are captured globally.
-    #[cfg(target_os = "linux")]
-    {
-        // Select the already-opened devices that match the grab list.
-        let grab_paths: std::collections::HashSet<&str> = keyboards_to_grab
-            .iter()
-            .map(|kb| kb.device.as_str())
-            .collect();
-
-        let opened_to_grab: Vec<_> = opened_devices
-            .into_iter()
-            .filter(|(info, _)| grab_paths.contains(info.device.as_str()))
-            .collect();
-
-        keymapper::platform::start_mapping(
-            platform_state,
-            opened_to_grab,
-            global_filter,
-        )
-    }
-
-    #[cfg(target_os = "macos")]
-    return keymapper::platform::start_mapping(platform_state, global_filter);
-
-    #[cfg(target_os = "windows")]
-    keymapper::platform::start_mapping(platform_state)
+    keymapper::platform::start_mapping(platform_state, global_filter)
 }

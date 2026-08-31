@@ -141,7 +141,7 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 /// Callers that only need discovery (e.g. the CLI `keyboards` command) should
 /// use [`list_keyboards`] instead.  The daemon uses this function to avoid a
 /// second udev scan and redundant device opens.
-pub fn discover_and_open_keyboards()
+pub(crate) fn discover_and_open_keyboards()
 -> Result<Vec<(KeyboardInfo, Device)>, Box<dyn std::error::Error>> {
     enumerate_keyboards()
 }

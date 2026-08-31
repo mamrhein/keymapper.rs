@@ -24,12 +24,14 @@ use std::{
 };
 
 use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
+use parking_lot::RwLock;
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
     flag::register,
 };
 
 use super::karabiner_client::{KarabinerClient, OUTPUT_KEYBOARD_IDENTITY};
+use crate::{common::keyboard::KeyboardSpecifier, daemon::state::Lookup};
 
 /// Start keyboard input capture via IOKit device seizure.
 ///
@@ -40,8 +42,8 @@ use super::karabiner_client::{KarabinerClient, OUTPUT_KEYBOARD_IDENTITY};
 /// unmapped keys forwarded unchanged.  The CFRunLoop is polled until a
 /// shutdown signal (SIGINT or SIGTERM) is received.
 pub fn start_mapping(
-    lookup: Arc<parking_lot::RwLock<dyn crate::daemon::state::Lookup>>,
-    keyboard_filter: Option<Vec<crate::common::keyboard::KeyboardSpecifier>>,
+    lookup: Arc<RwLock<dyn Lookup>>,
+    keyboard_filter: Option<Vec<KeyboardSpecifier>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Register signal handlers for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));

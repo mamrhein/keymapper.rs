@@ -29,7 +29,10 @@ use signal_hook::{
 };
 use udev::{Enumerator, MonitorBuilder};
 
-use super::hid_translate::{hid_usage_to_keycode, keycode_to_hid_usage};
+use super::{
+    hid_translate::{hid_usage_to_keycode, keycode_to_hid_usage},
+    keyboard::discover_and_open_keyboards,
+};
 use crate::{
     common::{
         hid_usage::{HidUsage, PAGE_KEYBOARD},
@@ -677,16 +680,33 @@ fn handle_device_remove(
 
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
-    keyboards_to_grab: Vec<(KeyboardInfo, Device)>,
-    global_filter: Option<Vec<KeyboardSpecifier>>,
+    keyboard_filter: Option<Vec<KeyboardSpecifier>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if keyboards_to_grab.is_empty() {
+    // Discover and open keyboards for capture.  Degrade gracefully: with no
+    // keyboards the daemon starts with an empty managed set, and the hot-plug
+    // monitor picks devices up as they appear.
+    let opened = discover_and_open_keyboards().unwrap_or_default();
+
+    // Select the devices matching the keyboard filter, then filter the opened
+    // pairs down to that grab set.
+    let infos: Vec<KeyboardInfo> =
+        opened.iter().map(|(info, _)| info.clone()).collect();
+    let to_grab: Vec<KeyboardInfo> =
+        filter_keyboards_by_specifiers(&infos, keyboard_filter.as_deref());
+    let grab_paths: std::collections::HashSet<&str> =
+        to_grab.iter().map(|kb| kb.device.as_str()).collect();
+    let opened_to_grab: Vec<(KeyboardInfo, Device)> = opened
+        .into_iter()
+        .filter(|(info, _)| grab_paths.contains(info.device.as_str()))
+        .collect();
+
+    if opened_to_grab.is_empty() {
         println!("No keyboards to grab. Waiting for events...");
     }
 
-    // Grab and register all pre-opened keyboards.
+    // Grab and register all opened keyboards.
     let mut managed_devices: Vec<ManagedDevice> = Vec::new();
-    for (kb, mut device) in keyboards_to_grab {
+    for (kb, mut device) in opened_to_grab {
         device.grab()?;
         device.set_nonblocking(true)?;
 
@@ -738,7 +758,7 @@ pub fn start_mapping(
     start_hotplug_monitor(
         Arc::clone(&managed_devices),
         epoll_fd.as_raw_fd(),
-        global_filter,
+        keyboard_filter,
     );
 
     // All devices are grabbed, the virtual output device is created, and the
