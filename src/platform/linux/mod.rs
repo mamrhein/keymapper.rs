@@ -12,5 +12,4 @@ mod keyboard;
 mod mapping;
 
 pub use keyboard::{discover_and_open_keyboards, list_keyboards};
-pub(crate) use mapping::VIRTUAL_KEYBOARD_NAME;
-pub use mapping::start_mapping;
+pub use mapping::{VIRTUAL_KEYBOARD_NAME, start_mapping};

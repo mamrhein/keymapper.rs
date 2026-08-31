@@ -29,7 +29,9 @@ use std::{
 use evdev::{Device, EventType};
 
 use super::{OutputEvent, register_signal_handlers, writer::EventWriter};
-use crate::platform::{VIRTUAL_KEYBOARD_NAME, keycode_to_hid_usage};
+use crate::platform::{
+    VIRTUAL_KEYBOARD_NAME, hid_translate::keycode_to_hid_usage,
+};
 
 /// Interval between polls while waiting for the daemon's virtual device.
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_millis(100);

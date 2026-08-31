@@ -45,8 +45,7 @@ use crate::{
 /// Exposed so the e2e monitor (Linux direct-capture mode) can locate and
 /// grab the device; the daemon itself never grabs it (see
 /// [`handle_device_add`]).
-pub(crate) const VIRTUAL_KEYBOARD_NAME: &str =
-    "CrossPlatform_Virtual_Keyboard";
+pub const VIRTUAL_KEYBOARD_NAME: &str = "CrossPlatform_Virtual_Keyboard";
 
 // ---------------------------------------------------------------------------
 // Raw epoll FFI for cross-thread operations
