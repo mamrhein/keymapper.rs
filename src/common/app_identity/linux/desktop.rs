@@ -210,12 +210,6 @@ fn parse_desktop_file_app_root(path: &Path) -> Option<(String, String)> {
 
 /// Extract the app installation root directory from an executable path.
 ///
-/// For standard system paths like `/usr/bin/foo` or `/usr/local/bin/foo`,
-/// returns `None` — these are matched by simple exe-name lookup.
-/// For bundled apps, returns the directory that contains subdirectories
-/// like `bin/`, `libexec/`, etc.
-/// Extract the app installation root directory from an executable path.
-///
 /// Returns the root path with a trailing "/" to ensure prefix matching
 /// does not produce false positives (e.g., "/opt/app/" matching
 /// "/opt/app2/something").
