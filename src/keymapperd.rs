@@ -9,10 +9,6 @@
 
 use std::sync::Arc;
 
-// Import Lookup so read-only trait methods are in scope, and
-// MutableLookup so mutation methods are callable on the concrete
-// RuntimeState type.
-use keymapper::daemon::state::{Lookup, MutableLookup};
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -72,35 +68,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Coerce to dyn MutableLookup at creation time.  The daemon-internal code
-    // (watcher) can call mutation methods via MutableLookup.  A pointer cast
-    // produces a dyn Lookup Arc for platform code, which only needs the
-    // read-only interface.  Both Arcs share the same allocation.
-    let state: Arc<RwLock<dyn MutableLookup>> =
-        Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
-            initial_cache,
-            all_keyboards,
-            // Inject the active-app source.  It honors the e2e override and
-            // falls back to the platform query, so production runs pay nothing
-            // for it and the state struct stays free of test-specific code.
-            Box::new(keymapper::daemon::test_hooks::active_app_name),
-        )));
+    // Keep the concrete type so both trait objects below are produced by a
+    // safe, compiler-checked unsized coercion (MutableLookup: Lookup).  Both
+    // Arcs share the same allocation.
+    let state = Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
+        initial_cache,
+        all_keyboards,
+        // Inject the active-app source.  It honors the e2e override and
+        // falls back to the platform query, so production runs pay nothing
+        // for it and the state struct stays free of test-specific code.
+        Box::new(keymapper::daemon::test_hooks::active_app_name),
+    )));
 
-    // Start hot-reloader thread
+    // Start hot-reloader thread.  The watcher needs the mutable interface to
+    // swap in recompiled caches; the concrete Arc is coerced to
+    // `dyn MutableLookup` at the call site.
+    let watcher_state = Arc::clone(&state);
     let _watcher = keymapper::daemon::watcher::start_config_watcher(
         &config_path,
-        Arc::clone(&state),
+        watcher_state,
     )?;
 
     println!("Cross-platform runtime engines fully synchronized.");
 
-    // Cast the Arc pointer to produce an Arc<RwLock<dyn Lookup>> that shares
-    // the same underlying allocation.  Safe because dyn MutableLookup's vtable
-    // is a superset of dyn Lookup's vtable, and the data pointer is identical.
-    let platform_state: Arc<RwLock<dyn Lookup>> = unsafe {
-        let ptr: *const RwLock<dyn MutableLookup> = Arc::as_ptr(&state);
-        Arc::from_raw(ptr as *const RwLock<dyn Lookup>)
-    };
+    // The platform layer only needs the read-only interface; the concrete Arc
+    // is coerced to `dyn Lookup` at the call site.
+    let platform_state = Arc::clone(&state);
 
     // Inject the e2e readiness hook.  It is a no-op unless the harness set
     // `KEYMAPPER_READY_FILE`, so production runs pay nothing for it, and the
