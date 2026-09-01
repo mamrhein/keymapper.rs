@@ -88,7 +88,6 @@ pub trait MutableLookup: Lookup {
 
 /// Live runtime state shared between the config hot-reloader and the
 /// platform-specific event tap.
-#[derive(Debug)]
 pub struct RuntimeState {
     lookup_cache: RuntimeLookupCache,
     /// Maps platform device identifiers to full keyboard metadata.  Populated
@@ -98,12 +97,30 @@ pub struct RuntimeState {
     /// Short-TTL cache for the expensive active-app platform query, which is
     /// performed on every key event.
     active_app_cache: Mutex<CachedActiveApp>,
+    /// Injectable source for the active application name.  The daemon binary
+    /// wires this to [`super::test_hooks::active_app_name`], which honors the
+    /// e2e override and falls back to the platform query; tests can supply a
+    /// fixed value.  Kept as a closure so the state struct never references
+    /// test-specific code directly.
+    active_app_source: Box<dyn Fn() -> String + Send + Sync>,
+}
+
+impl std::fmt::Debug for RuntimeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeState")
+            .field("lookup_cache", &self.lookup_cache)
+            .field("keyboard_registry", &self.keyboard_registry)
+            .field("active_app_cache", &self.active_app_cache)
+            .field("active_app_source", &"<fn>")
+            .finish()
+    }
 }
 
 impl RuntimeState {
     pub fn new(
         cache: RuntimeLookupCache,
         keyboards: Vec<KeyboardInfo>,
+        active_app_source: Box<dyn Fn() -> String + Send + Sync>,
     ) -> Self {
         Self {
             lookup_cache: cache,
@@ -118,6 +135,7 @@ impl RuntimeState {
                 name: Arc::from("unknown"),
                 queried_at: Instant::now(),
             }),
+            active_app_source,
         }
     }
 
@@ -227,7 +245,7 @@ impl Lookup for RuntimeState {
     fn active_app(&self) -> Arc<str> {
         let mut cache = self.active_app_cache.lock();
         if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
-            cache.name = super::test_hooks::active_app_name().into();
+            cache.name = (self.active_app_source)().into();
             cache.queried_at = Instant::now();
         }
         Arc::clone(&cache.name)
@@ -290,7 +308,14 @@ mod tests {
     fn build_state(yaml: &str, keyboards: Vec<KeyboardInfo>) -> RuntimeState {
         let config = AppConfig::load_from_str(yaml).unwrap();
         let cache = RuntimeLookupCache::compile_from_config(&config);
-        RuntimeState::new(cache, keyboards)
+        // Fixed source: these unit tests exercise rule matching and keyboard
+        // filtering, never the active-app query, so a constant keeps them
+        // deterministic and free of platform round-trips.
+        RuntimeState::new(
+            cache,
+            keyboards,
+            Box::new(|| "test_app".to_string()),
+        )
     }
 
     // -----------------------------------------------------------------------

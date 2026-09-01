@@ -80,6 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(RwLock::new(keymapper::daemon::state::RuntimeState::new(
             initial_cache,
             all_keyboards,
+            // Inject the active-app source.  It honors the e2e override and
+            // falls back to the platform query, so production runs pay nothing
+            // for it and the state struct stays free of test-specific code.
+            Box::new(keymapper::daemon::test_hooks::active_app_name),
         )));
 
     // Start hot-reloader thread
