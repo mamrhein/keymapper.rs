@@ -18,8 +18,20 @@
 //! [`super::apps::resolve_process_app_id`] — the same namespace
 //! [`super::apps::list_app_names`] produces.  The remaining backends return
 //! the app id / class the compositor itself reports for the active window.
+//! COSMIC has no D-Bus interface for this; it reports the active window
+//! through the `cosmic-toplevel-info` Wayland protocol extension instead.
 
 use std::time::Duration;
+
+use cosmic_protocols::toplevel_info::v1::client::{
+    zcosmic_toplevel_handle_v1, zcosmic_toplevel_info_v1,
+};
+use wayland_client::{
+    Connection, Dispatch, QueueHandle, protocol::wl_registry,
+};
+use wayland_protocols::ext::foreign_toplevel_list::v1::client::{
+    ext_foreign_toplevel_handle_v1, ext_foreign_toplevel_list_v1,
+};
 
 /// Synchronously query the current foreground application name on Wayland.
 ///
@@ -124,41 +136,281 @@ fn query_gnome() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// COSMIC — D-Bus fallback (pop-os specific)
+// COSMIC — cosmic-toplevel-info Wayland protocol
 // ---------------------------------------------------------------------------
 
+/// Query the active window on COSMIC.
+///
+/// COSMIC exposes the active window through the `zcosmic_toplevel_info_v1`
+/// Wayland global (crate `cosmic-protocols`) rather than D-Bus.  The
+/// protocol extends `ext-foreign-toplevel-list-v1`: the foreign toplevel
+/// handle carries the `app_id`, the COSMIC toplevel handle carries the
+/// state including `activated`.  The probe connects, collects the initial
+/// toplevel batch, and disconnects again.
 fn query_cosmic() -> String {
-    use zbus::blocking::Connection;
-
-    let conn = match Connection::session() {
-        Ok(c) => c,
+    let conn = match Connection::connect_to_env() {
+        Ok(conn) => conn,
         Err(_) => return String::new(),
     };
 
-    // Check if COSMIC is running by attempting to connect to its D-Bus
-    // service.  Current COSMIC builds (com.system76.CosmicComp) do not
-    // expose an active-window interface yet, so this probe is a
-    // best-effort forward-looking query that simply fails until one
-    // appears.
-    let app_id: String = match conn.call_method(
-        Some("com.system76.CosmicDesktop"),
-        "/org/freedesktop/Portal/v1",
-        Some("org.freedesktop.portal.Foreground"),
-        "ActiveWindow",
-        &(),
-    ) {
-        Ok(reply) => match reply.body().deserialize() {
-            Ok(v) => v,
-            Err(_) => return String::new(),
-        },
-        Err(_) => return String::new(),
-    };
+    let mut event_queue = conn.new_event_queue();
+    let qh = event_queue.handle();
+    let display = conn.display();
+    let _registry = display.get_registry(&qh, ());
 
-    if !app_id.is_empty() {
-        return app_id;
+    let mut state = CosmicQueryState::default();
+
+    // Receive the list of compositor globals.
+    if event_queue.roundtrip(&mut state).is_err() {
+        return String::new();
     }
 
-    String::new()
+    // `zcosmic_toplevel_info_v1` is only advertised by COSMIC, so on any
+    // other Wayland compositor this probe is a no-op.
+    let Some(toplevel_info) = state.toplevel_info.clone() else {
+        return String::new();
+    };
+
+    if state.toplevel_info_version < 2 {
+        // Protocol version 1 sends all toplevels eagerly; the `stop`
+        // request ends the batch and triggers the `finished` event.
+        toplevel_info.stop();
+    }
+
+    // Collect the initial toplevel batch.  The protocol explicitly allows
+    // a client that only cares about the current state to perform
+    // roundtrips until the batch is complete.  A bounded number of
+    // roundtrips keeps this probe from hanging on a misbehaving
+    // compositor.
+    for _ in 0..5 {
+        if state.done {
+            break;
+        }
+        if event_queue.roundtrip(&mut state).is_err() {
+            return String::new();
+        }
+    }
+
+    // The `activated` state is only reported by the COSMIC protocol, so
+    // requiring it keeps this probe COSMIC-specific even on wlroots
+    // compositors that also implement the foreign-toplevel-list protocol.
+    state
+        .toplevels
+        .iter()
+        .find(|toplevel| toplevel.activated)
+        .and_then(|toplevel| toplevel.app_id.clone())
+        .filter(|app_id| !app_id.is_empty())
+        .unwrap_or_default()
+}
+
+/// A single toplevel as reported by the COSMIC toplevel-info protocol.
+struct CosmicToplevel {
+    /// Handle from `ext-foreign-toplevel-list-v1`; carries the `app_id`
+    /// (protocol version >= 2).
+    foreign:
+        Option<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1>,
+    /// Handle from `zcosmic_toplevel_info_v1`; carries the `activated`
+    /// state.
+    cosmic: Option<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1>,
+    app_id: Option<String>,
+    activated: bool,
+}
+
+/// Event-loop state for the one-shot COSMIC active-window query.
+#[derive(Default)]
+struct CosmicQueryState {
+    foreign_list:
+        Option<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1>,
+    toplevel_info: Option<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1>,
+    toplevel_info_version: u32,
+    toplevels: Vec<CosmicToplevel>,
+    /// Set once the compositor finished the initial toplevel batch.
+    done: bool,
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for CosmicQueryState {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            match &*interface {
+                // Only needed on protocol version >= 2, where the
+                // toplevels arrive via the foreign-toplevel-list
+                // protocol.
+                "ext_foreign_toplevel_list_v1" => {
+                    state.foreign_list =
+                        Some(registry.bind(name, version.min(1), qh, ()));
+                }
+                "zcosmic_toplevel_info_v1" => {
+                    let version = version.min(3);
+                    state.toplevel_info_version = version;
+                    state.toplevel_info =
+                        Some(registry.bind(name, version, qh, ()));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Dispatch<ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1, ()>
+    for CosmicQueryState
+{
+    fn event(
+        state: &mut Self,
+        _proxy: &ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        event: ext_foreign_toplevel_list_v1::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } =
+            event
+        {
+            // The `activated` state is only reported by the COSMIC
+            // protocol, so every foreign toplevel is wrapped in a
+            // `zcosmic_toplevel_handle_v1`.
+            let cosmic = state
+                .toplevel_info
+                .as_ref()
+                .filter(|_| state.toplevel_info_version >= 2)
+                .map(|info| info.get_cosmic_toplevel(&toplevel, qh, ()));
+            state.toplevels.push(CosmicToplevel {
+                foreign: Some(toplevel),
+                cosmic,
+                app_id: None,
+                activated: false,
+            });
+        }
+    }
+
+    wayland_client::event_created_child!(
+        CosmicQueryState,
+        ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1,
+        [ext_foreign_toplevel_list_v1::EVT_TOPLEVEL_OPCODE => (
+            ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+            ()
+        )]
+    );
+}
+
+impl Dispatch<ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1, ()>
+    for CosmicQueryState
+{
+    fn event(
+        state: &mut Self,
+        handle: &ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+        event: ext_foreign_toplevel_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(toplevel) = state
+            .toplevels
+            .iter_mut()
+            .find(|toplevel| toplevel.foreign.as_ref() == Some(handle))
+        else {
+            return;
+        };
+
+        if let ext_foreign_toplevel_handle_v1::Event::AppId { app_id } = event
+        {
+            toplevel.app_id = Some(app_id);
+        }
+    }
+}
+
+impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()>
+    for CosmicQueryState
+{
+    fn event(
+        state: &mut Self,
+        handle: &zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1,
+        event: zcosmic_toplevel_handle_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some(toplevel) = state
+            .toplevels
+            .iter_mut()
+            .find(|toplevel| toplevel.cosmic.as_ref() == Some(handle))
+        else {
+            return;
+        };
+
+        match event {
+            // Legacy `app_id` (protocol version 1 only; version >= 2
+            // reports it via the foreign toplevel handle).
+            zcosmic_toplevel_handle_v1::Event::AppId { app_id } => {
+                toplevel.app_id.get_or_insert(app_id);
+            }
+            // The state is a list of 32-bit values; only the `activated`
+            // entry is of interest.
+            zcosmic_toplevel_handle_v1::Event::State { state } => {
+                toplevel.activated =
+                    state.as_chunks::<4>().0.iter().any(|chunk| {
+                        zcosmic_toplevel_handle_v1::State::try_from(
+                            u32::from_ne_bytes(*chunk),
+                        )
+                        .is_ok_and(|state| {
+                            state
+                                == zcosmic_toplevel_handle_v1::State::Activated
+                        })
+                    });
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1, ()>
+    for CosmicQueryState
+{
+    fn event(
+        state: &mut Self,
+        _proxy: &zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1,
+        event: zcosmic_toplevel_info_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            // Protocol version >= 2: initial toplevel batch is complete.
+            zcosmic_toplevel_info_v1::Event::Done => state.done = true,
+            // Protocol version 1: the `stop` request was honored.
+            zcosmic_toplevel_info_v1::Event::Finished => state.done = true,
+            // Protocol version 1: a toplevel was created.
+            zcosmic_toplevel_info_v1::Event::Toplevel { toplevel } => {
+                state.toplevels.push(CosmicToplevel {
+                    foreign: None,
+                    cosmic: Some(toplevel),
+                    app_id: None,
+                    activated: false,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(
+        CosmicQueryState,
+        zcosmic_toplevel_info_v1::ZcosmicToplevelInfoV1,
+        [zcosmic_toplevel_info_v1::EVT_TOPLEVEL_OPCODE => (
+            zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1,
+            ()
+        )]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -334,4 +586,24 @@ fn extract_json_string(json: &str, key: &str) -> String {
     }
 
     result
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::query_cosmic;
+
+    /// The probe must fail gracefully instead of panicking, whether or
+    /// not a Wayland compositor is reachable.
+    #[test]
+    fn does_not_panic() {
+        // The probe returns either an empty string or an application id,
+        // never the `"unknown"` sentinel (that is produced by
+        // `get_active_app_name`).
+        let result = query_cosmic();
+        assert_ne!(result, "unknown");
+    }
 }
