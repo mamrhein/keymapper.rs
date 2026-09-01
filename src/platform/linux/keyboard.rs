@@ -29,7 +29,6 @@ fn enumerate_keyboards()
 
     enumerator.match_subsystem("input")?;
     enumerator.match_property("ID_INPUT_KEYBOARD", "1")?;
-    enumerator.scan_devices()?;
 
     let results: Vec<_> = enumerator
         .scan_devices()?
