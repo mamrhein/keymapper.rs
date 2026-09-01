@@ -24,5 +24,5 @@ pub use karabiner_client::{
     OUTPUT_KEYBOARD_IDENTITY,
 };
 pub use keyboard::list_keyboards;
-pub use keycode::{cg_keycode_to_hid_usage, cg_keycode_to_hid_usage_full};
+pub use keycode::keycode_to_hid_usage;
 pub use mapping::start_mapping;

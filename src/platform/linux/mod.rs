@@ -13,5 +13,6 @@ mod keyboard;
 mod mapping;
 
 pub use config_dir::config_dir;
+pub use hid_translate::keycode_to_hid_usage;
 pub use keyboard::list_keyboards;
 pub use mapping::{VIRTUAL_KEYBOARD_NAME, start_mapping};

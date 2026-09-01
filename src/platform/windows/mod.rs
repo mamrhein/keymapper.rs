@@ -24,6 +24,6 @@ pub(crate) mod raw_input;
 pub const CAPTURE_TAG: usize = 0x4B_4D_50_01;
 
 pub use config_dir::config_dir;
-pub use key::Key;
+pub use key::{Key, keycode_to_hid_usage};
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;

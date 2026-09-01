@@ -135,12 +135,13 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
     })
 }
 
-/// Convert a macOS CGKeyCode to a full `HidUsage`.
+/// Convert a macOS CGKeyCode to its canonical `HidUsage`.
 ///
-/// Convenience wrapper over [`cg_keycode_to_hid_usage`] that also resolves the
-/// usage id to a `HidUsage` on the keyboard page.  Returns `None` for codes
-/// with no keyboard-page HID equivalent.
-pub fn cg_keycode_to_hid_usage_full(code: u16) -> Option<HidUsage> {
+/// This is the stable, platform-agnostic entry point exposed through
+/// [`crate::platform`] for code above the platform layer (the `keys probe`
+/// CLI command).  It resolves the CGKeyCode to a keyboard-page `HidUsage`,
+/// returning `None` for codes with no keyboard-page HID equivalent.
+pub fn keycode_to_hid_usage(code: u16) -> Option<HidUsage> {
     cg_keycode_to_hid_usage(code).and_then(HidUsage::keyboard)
 }
 
@@ -232,16 +233,13 @@ mod tests {
     }
 
     #[test]
-    fn full_resolves_delete() {
-        assert_eq!(cg_keycode_to_hid_usage_full(117), Some(HidUsage::Delete));
+    fn keycode_to_hid_usage_resolves_delete() {
+        assert_eq!(keycode_to_hid_usage(117), Some(HidUsage::Delete));
     }
 
     #[test]
-    fn full_resolves_numpad() {
-        assert_eq!(
-            cg_keycode_to_hid_usage_full(76),
-            Some(HidUsage::NumpadEnter)
-        );
-        assert_eq!(cg_keycode_to_hid_usage_full(82), Some(HidUsage::Numpad0));
+    fn keycode_to_hid_usage_resolves_numpad() {
+        assert_eq!(keycode_to_hid_usage(76), Some(HidUsage::NumpadEnter));
+        assert_eq!(keycode_to_hid_usage(82), Some(HidUsage::Numpad0));
     }
 }

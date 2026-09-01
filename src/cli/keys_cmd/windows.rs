@@ -23,7 +23,7 @@ use windows::Win32::{
     },
 };
 
-use crate::platform::Key;
+use crate::platform::keycode_to_hid_usage;
 
 // `HHOOK` wraps a raw `*mut c_void` which is not `Send`.  We store it as
 // a raw pointer in a usize, which is `Send` and `Sync`.  This is safe
@@ -107,9 +107,7 @@ extern "system" fn probe_keyboard_proc(
     // resolved via the shared `HidUsage` type, matching the other
     // platforms' probe output.
     if is_key_down {
-        let (name, code_str) = match Key::from_native(vk_code)
-            .map(Key::to_hid_usage)
-        {
+        let (name, code_str) = match keycode_to_hid_usage(vk_code) {
             Some(usage) => {
                 (usage.as_str().to_string(), format!("0x{:02X}", usage.id()))
             }
