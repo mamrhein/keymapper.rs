@@ -682,6 +682,7 @@ dependencies = [
  "signal-hook",
  "sysinfo",
  "tempfile",
+ "thiserror",
  "udev",
  "wayland-client",
  "windows",

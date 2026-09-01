@@ -27,6 +27,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::common::modifier::ModifierRole;
 
@@ -49,16 +50,12 @@ pub(crate) fn unknown_key_error(s: &str) -> String {
 }
 
 /// Error returned when a string cannot be parsed as a `HidUsage`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HidUsageParseError(pub String);
-
-impl fmt::Display for HidUsageParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", unknown_key_error(&self.0))
-    }
-}
-
-impl std::error::Error for HidUsageParseError {}
+///
+/// The inner string is the formatted message produced by
+/// `unknown_key_error`, so the wording lives in exactly one place.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{0}")]
+pub struct HidUsageParseError(String);
 
 // ---------------------------------------------------------------------------
 // Table-driven generation
@@ -151,7 +148,7 @@ macro_rules! define_hid_usage {
                     // The extra `?` group keeps `$alias` repeating at the same
                     // depth as in the matcher, which `macro_rules` requires.
                     $( $name $( $( | $alias )* )? => Ok(Self::$variant), )*
-                    other => Err(HidUsageParseError(other.to_owned())),
+                    other => Err(HidUsageParseError(unknown_key_error(other))),
                 }
             }
         }
@@ -518,9 +515,9 @@ mod tests {
     fn try_from_unknown_returns_err() {
         assert!(HidUsage::try_from("NonExistent").is_err());
         assert!(HidUsage::try_from("Xspace").is_err());
-        // Error contains the input string
+        // Error message contains the input string.
         let err = HidUsage::try_from("BadKey").unwrap_err();
-        assert_eq!(err.0, "BadKey");
+        assert!(err.to_string().contains("BadKey"));
     }
 
     #[test]
