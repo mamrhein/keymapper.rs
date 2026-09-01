@@ -7,11 +7,15 @@
 // $Source$
 // $Revision$
 
-mod config_dir;
-pub mod hid_translate;
-mod keyboard;
-mod mapping;
+//! macOS per-user configuration base directory resolution.
 
-pub use config_dir::config_dir;
-pub use keyboard::list_keyboards;
-pub use mapping::{VIRTUAL_KEYBOARD_NAME, start_mapping};
+use std::path::PathBuf;
+
+/// Return the OS-specific per-user configuration base directory, without the
+/// application name.
+///
+/// On macOS this is `~/Library/Application Support`.  The directory may not
+/// exist yet.
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join("Library").join("Application Support"))
+}

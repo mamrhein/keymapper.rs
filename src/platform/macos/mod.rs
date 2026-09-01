@@ -7,12 +7,14 @@
 // $Source$
 // $Revision$
 
+mod config_dir;
 mod iokit_hid;
 mod karabiner_client;
 mod keyboard;
 mod keycode;
 mod mapping;
 
+pub use config_dir::config_dir;
 pub use iokit_hid::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
     IOHIDQueue, for_each_hid_value,

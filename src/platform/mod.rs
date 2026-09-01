@@ -8,12 +8,14 @@
 // $Revision$
 
 //! Platform backend: the single public boundary between the platform
-//! layer and the code above it (the daemon, `test_util`, and `cli`).
+//! layer and the code above it (the daemon, `test_util`, `cli`, and — for
+//! [`config_dir`] — `common`).
 //!
-//! The stable public surface that `test_util` and `cli` may depend on
-//! is, per platform:
+//! The stable public surface that the code above may depend on is, per
+//! platform:
 //!
-//! - every platform: `list_keyboards`, `start_mapping`
+//! - every platform: `list_keyboards`, `start_mapping`, and `config_dir` (the
+//!   per-user configuration base directory, consumed by `common::config_path`)
 //! - linux: additionally `hid_translate` (the canonical `HidUsage` and
 //!   evdev-keycode tables) and `VIRTUAL_KEYBOARD_NAME`
 //! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`,
@@ -35,9 +37,13 @@ mod windows;
 // Only the public API surface is re-exported.  Internal helpers (signal
 // handlers, static flags) stay private to the platform module.
 #[cfg(target_os = "linux")]
+pub use linux::config_dir;
+#[cfg(target_os = "linux")]
 pub use linux::hid_translate;
 #[cfg(target_os = "linux")]
 pub use linux::{VIRTUAL_KEYBOARD_NAME, list_keyboards, start_mapping};
+#[cfg(target_os = "macos")]
+pub use macos::config_dir;
 #[cfg(target_os = "macos")]
 pub use macos::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
@@ -47,5 +53,7 @@ pub use macos::{
 };
 #[cfg(target_os = "windows")]
 pub use windows::CAPTURE_TAG;
+#[cfg(target_os = "windows")]
+pub use windows::config_dir;
 #[cfg(target_os = "windows")]
 pub use windows::{Key, list_keyboards, start_mapping};

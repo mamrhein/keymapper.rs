@@ -111,30 +111,14 @@ pub fn print_search_locations() {
 }
 
 // ---------------------------------------------------------------------------
-// Platform-specific config directory resolution
+// Config directory resolution
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "macos")]
+/// Return the platform-specific application config directory: the OS base
+/// directory (resolved by [`crate::platform::config_dir`]) plus the
+/// application name.  The directory may not exist yet.
 fn platform_config_dir() -> Option<PathBuf> {
-    // ~/Library/Application Support/keymapperd
-    dirs::home_dir()
-        .map(|h| h.join("Library").join("Application Support").join(APP_NAME))
-}
-
-#[cfg(target_os = "linux")]
-fn platform_config_dir() -> Option<PathBuf> {
-    // $XDG_CONFIG_HOME/keymapperd  (or ~/.config/keymapperd)
-    std::env::var("XDG_CONFIG_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
-        .map(|d| d.join(APP_NAME))
-}
-
-#[cfg(target_os = "windows")]
-fn platform_config_dir() -> Option<PathBuf> {
-    // %APPDATA%\keymapperd
-    dirs::config_dir().map(|d| d.join(APP_NAME))
+    crate::platform::config_dir().map(|d| d.join(APP_NAME))
 }
 
 // ---------------------------------------------------------------------------

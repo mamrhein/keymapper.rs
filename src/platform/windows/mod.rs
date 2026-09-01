@@ -7,6 +7,7 @@
 // $Source$
 // $Revision$
 
+mod config_dir;
 mod dispatch;
 mod key;
 mod keyboard;
@@ -22,6 +23,7 @@ pub(crate) mod raw_input;
 /// may use.
 pub const CAPTURE_TAG: usize = 0x4B_4D_50_01;
 
+pub use config_dir::config_dir;
 pub use key::Key;
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;
