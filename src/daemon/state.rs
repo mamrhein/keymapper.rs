@@ -57,6 +57,18 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
         keyboard_device_id: Option<&str>,
     ) -> Option<&[NativeKey]>;
 
+    /// Best-effort lookup scoped to the currently active application.
+    ///
+    /// Resolves the active app name internally, so platform callers never
+    /// have to fetch and thread it themselves.  The remaining arguments
+    /// have the same meaning as in [`for_app`](Self::for_app).
+    fn for_active_app(
+        &self,
+        usage: HidUsage,
+        modifiers: u8,
+        keyboard_device_id: Option<&str>,
+    ) -> Option<&[NativeKey]>;
+
     /// Global (application-agnostic) lookup.
     ///
     /// `usage` is the HID identity of the pressed key.  `modifiers` is the
@@ -70,10 +82,6 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
         modifiers: u8,
         keyboard_device_id: Option<&str>,
     ) -> Option<&[NativeKey]>;
-
-    /// Name of the currently foreground application.  Queries the platform
-    /// synchronously and returns the result as an `Arc<str>`.
-    fn active_app(&self) -> Arc<str>;
 }
 
 /// Mutable operations on the runtime state.  Only the daemon internal code
@@ -191,6 +199,17 @@ impl RuntimeState {
 
         filter.iter().any(|spec| spec.matches(kb_info))
     }
+
+    /// Name of the currently foreground application, served from a short-TTL
+    /// cache so per-event lookups stay cheap.
+    fn active_app(&self) -> Arc<str> {
+        let mut cache = self.active_app_cache.lock();
+        if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
+            cache.name = (self.active_app_source)().into();
+            cache.queried_at = Instant::now();
+        }
+        Arc::clone(&cache.name)
+    }
 }
 
 impl Lookup for RuntimeState {
@@ -242,13 +261,13 @@ impl Lookup for RuntimeState {
         )
     }
 
-    fn active_app(&self) -> Arc<str> {
-        let mut cache = self.active_app_cache.lock();
-        if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
-            cache.name = (self.active_app_source)().into();
-            cache.queried_at = Instant::now();
-        }
-        Arc::clone(&cache.name)
+    fn for_active_app(
+        &self,
+        usage: HidUsage,
+        modifiers: u8,
+        keyboard_device_id: Option<&str>,
+    ) -> Option<&[NativeKey]> {
+        self.for_app(&self.active_app(), usage, modifiers, keyboard_device_id)
     }
 }
 
@@ -645,8 +664,8 @@ groups:
     // -----------------------------------------------------------------------
 
     /// A simple [`Lookup`] implementation backed by a [`RuntimeLookupCache`]
-    /// for in-process testing.  Returns the configured app name from
-    /// [`active_app`]() without querying the platform.
+    /// for in-process testing.  Resolves the active app to the configured
+    /// name without querying the platform.
     struct TestLookup {
         cache: RuntimeLookupCache,
         app_name: String,
@@ -699,8 +718,13 @@ groups:
             )
         }
 
-        fn active_app(&self) -> Arc<str> {
-            Arc::from(self.app_name.as_str())
+        fn for_active_app(
+            &self,
+            usage: HidUsage,
+            modifiers: u8,
+            kbd_device_id: Option<&str>,
+        ) -> Option<&[NativeKey]> {
+            self.for_app(&self.app_name, usage, modifiers, kbd_device_id)
         }
     }
 
@@ -736,7 +760,7 @@ groups:
 
             // Perform lookup.
             let active_outputs = lookup
-                .for_app(&lookup.active_app(), usage, lookup_modifiers, None)
+                .for_active_app(usage, lookup_modifiers, None)
                 .or_else(|| lookup.global(usage, lookup_modifiers, None))
                 .map(|v| v.to_vec());
 

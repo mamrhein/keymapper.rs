@@ -356,12 +356,7 @@ fn process_device_events(
         // lookup is keyed by the full page-specific usage.
         let guard = lookup.read();
         let active_outputs = guard
-            .for_app(
-                &guard.active_app(),
-                usage,
-                lookup_modifiers,
-                Some(device_path),
-            )
+            .for_active_app(usage, lookup_modifiers, Some(device_path))
             .or_else(|| {
                 guard.global(usage, lookup_modifiers, Some(device_path))
             })

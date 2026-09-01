@@ -168,12 +168,7 @@ fn process_key_event(
         // usage.
         let guard = context.lookup.read();
         let active_outputs = guard
-            .for_app(
-                &guard.active_app(),
-                hid_usage,
-                lookup_modifiers,
-                device_id,
-            )
+            .for_active_app(hid_usage, lookup_modifiers, device_id)
             .or_else(|| guard.global(hid_usage, lookup_modifiers, device_id))
             .map(|v| v.to_vec());
         drop(guard);
