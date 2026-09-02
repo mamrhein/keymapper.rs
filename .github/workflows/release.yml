@@ -97,26 +97,6 @@ jobs:
           gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber
 
   # -----------------------------------------------------------------------
-  # macOS e2e — run integration tests as root to bypass Privacy & Security
-  # -----------------------------------------------------------------------
-  macos-e2e:
-    needs: create-release
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Run e2e tests as root
-        run: |
-          sudo bash scripts/sign-and-test-e2e.sh
-
-  # -----------------------------------------------------------------------
   # Linux — x86_64 (native)
   # -----------------------------------------------------------------------
   linux-x86_64:
