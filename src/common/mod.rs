@@ -14,6 +14,7 @@
 pub mod app_identity;
 pub mod config;
 pub mod config_path;
+pub mod daemon_token;
 pub mod hid_usage;
 pub mod keyboard;
 pub(crate) mod modifier;

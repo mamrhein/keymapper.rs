@@ -16,8 +16,8 @@ use windows::Win32::{
     Foundation::CloseHandle,
     System::Threading::{
         CREATE_NO_WINDOW, CreateProcessW, OpenProcess, PROCESS_INFORMATION,
-        PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE, STARTUPINFOW,
-        TerminateProcess,
+        PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE,
+        QueryFullProcessImageNameW, STARTUPINFOW, TerminateProcess,
     },
 };
 
@@ -35,6 +35,50 @@ pub fn is_process_alive(pid: u32) -> bool {
                 let _ = CloseHandle(handle);
             }
             true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The daemon binary name, as it appears in the process image path.
+const DAEMON_NAME: &str = "keymapperd.exe";
+
+/// Verify that the process with the given PID is actually `keymapperd.exe` by
+/// querying its full image path via `QueryFullProcessImageNameW`.  Returns
+/// `false` when the process cannot be opened or its image is not named
+/// `keymapperd.exe` (e.g. an unrelated process that reused the PID).
+pub fn verify_daemon_identity(pid: u32) -> bool {
+    let handle =
+        match unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) } {
+            Ok(handle) => handle,
+            Err(_) => return false,
+        };
+
+    let mut buf = [0u16; 1024];
+    let mut size = buf.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR::from_raw(buf.as_mut_ptr()),
+            &mut size,
+        )
+    };
+
+    // Always release the process handle, even if the query failed.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+
+    match result {
+        // On success `size` holds the number of characters written, excluding
+        // the terminating NUL.
+        Ok(()) => {
+            let path = String::from_utf16_lossy(&buf[..size as usize]);
+            std::path::Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == DAEMON_NAME)
         }
         Err(_) => false,
     }

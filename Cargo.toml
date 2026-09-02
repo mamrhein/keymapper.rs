@@ -28,6 +28,7 @@ path = "src/keymapper_monitor.rs"
 clap = { version = "4", features = ["derive"]}
 dirs = "6" # platform config directory resolution
 fs-err = "3"
+getrandom = "0.4" # CSPRNG for the PID-file token
 indexmap = { version = "2", features = ["serde"] }
 notify = "8" # cross-platform file watching
 parking_lot = "0.12"

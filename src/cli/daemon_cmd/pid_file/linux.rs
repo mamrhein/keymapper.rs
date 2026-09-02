@@ -14,6 +14,21 @@
 
 use std::path::Path;
 
+/// The daemon binary name, as it appears in the process table.
+const DAEMON_NAME: &str = "keymapperd";
+
+/// Verify that the process with the given PID is actually `keymapperd` by
+/// reading its name from `/proc/<pid>/comm`.  Returns `false` when the process
+/// does not exist or has a different name (e.g. an unrelated process that
+/// reused the PID).
+pub fn verify_daemon_identity(pid: u32) -> bool {
+    let path = format!("/proc/{pid}/comm");
+    match fs_err::read_to_string(&path) {
+        Ok(name) => name.trim() == DAEMON_NAME,
+        Err(_) => false,
+    }
+}
+
 /// Resolve the path to the `keymapperd` binary as a `CString`.
 ///
 /// Prefers the binary located next to this CLI executable so that a

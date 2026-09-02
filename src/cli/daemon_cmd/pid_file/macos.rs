@@ -14,6 +14,41 @@
 
 use std::path::Path;
 
+/// The daemon binary name, as it appears in the process table.
+const DAEMON_NAME: &str = "keymapperd";
+
+/// Verify that the process with the given PID is actually `keymapperd` by
+/// querying its executable path via `proc_pidpath`.  Returns `false` when the
+/// process does not exist or its executable is not named `keymapperd` (e.g. an
+/// unrelated process that reused the PID).
+pub fn verify_daemon_identity(pid: u32) -> bool {
+    // PATH_MAX on macOS is 1024.
+    let mut buf = [0u8; 1024];
+
+    // Safety: proc_pidpath writes a NUL-terminated path into our buffer and
+    // returns its length (including the terminator), or 0 on error (e.g. the
+    // process does not exist).
+    let len = unsafe {
+        libc::proc_pidpath(
+            pid as i32,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+        )
+    };
+    if len <= 0 {
+        return false;
+    }
+
+    // Stop at the first NUL to be robust against the exact length semantics.
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(len as usize);
+    let path = String::from_utf8_lossy(&buf[..end]).into_owned();
+
+    std::path::Path::new(&path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == DAEMON_NAME)
+}
+
 /// Resolve the path to the `keymapperd` binary as a `CString`.
 ///
 /// Prefers the binary located next to this CLI executable so that a
