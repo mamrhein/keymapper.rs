@@ -12,6 +12,7 @@ use std::path::Path;
 use indexmap::IndexMap;
 use thiserror::Error;
 
+use super::config_io::{ConfigReadError, read_config_content};
 use crate::common::{
     config::AppConfig, hid_usage::HidUsage, keyboard::KeyboardSpecifier,
 };
@@ -88,10 +89,11 @@ impl RuntimeLookupCache {
 /// Error returned when a [`RuntimeLookupCache`] cannot be compiled.
 #[derive(Debug, Error)]
 pub enum CompileError {
-    /// The config file could not be read from disk.  `fs_err` augments the
-    /// io error with the path of the file that failed.
+    /// The config file could not be read safely.  Wraps the hardened-read
+    /// error: missing file, symlink, or a size/ownership/world-writable
+    /// violation.
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    Read(#[from] ConfigReadError),
 
     /// The config content could not be parsed as an `AppConfig`.
     #[error(transparent)]
@@ -100,11 +102,13 @@ pub enum CompileError {
 
 impl RuntimeLookupCache {
     /// Load a YAML config file, parse it, and compile the lookup cache
-    /// in one step.  Used by initialisation.
+    /// in one step.  Used by initialisation.  The file is read through the
+    /// same hardened path as hot-reload (see [`read_config_content`]), so a
+    /// symlink, oversized, or world-writable config is rejected here too.
     pub fn compile_from_path<P: AsRef<Path>>(
         path: P,
     ) -> Result<Self, CompileError> {
-        let content = fs_err::read_to_string(path)?;
+        let content = read_config_content(path.as_ref())?;
         Self::compile_from_str(&content)
     }
 
@@ -363,12 +367,12 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn compile_from_path_missing_file_is_io_error() {
+    fn compile_from_path_missing_file_is_read_error() {
         let err = RuntimeLookupCache::compile_from_path(
             "/nonexistent/path/config.yaml",
         )
         .unwrap_err();
-        assert!(matches!(err, CompileError::Io(_)));
+        assert!(matches!(err, CompileError::Read(ConfigReadError::NotFound)));
     }
 
     #[test]
