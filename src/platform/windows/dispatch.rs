@@ -651,7 +651,9 @@ mod tests {
 
     impl MockLookup {
         fn new() -> Self {
-            Self { global_map: HashMap::new() }
+            Self {
+                global_map: HashMap::new(),
+            }
         }
 
         /// Configure the mock to return *outputs* for global lookups of

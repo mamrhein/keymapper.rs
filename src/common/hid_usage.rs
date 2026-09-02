@@ -748,9 +748,9 @@ mod tests {
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         for usage in HidUsage::ALL.iter().copied() {
-            let code = usage
-                .evdev_keycode()
-                .unwrap_or_else(|| panic!("missing evdev code for {}", usage.as_str()));
+            let code = usage.evdev_keycode().unwrap_or_else(|| {
+                panic!("missing evdev code for {}", usage.as_str())
+            });
             assert!(
                 seen.insert(code),
                 "duplicate evdev code {code} for {}",
