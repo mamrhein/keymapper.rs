@@ -25,12 +25,18 @@
 //!    resolves devices, performs lookups, sends decisions back.
 
 use std::{
-    io::Write,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
+        atomic::{AtomicU8, AtomicU32, Ordering},
     },
 };
+
+// Capture-mode-only imports: the debug log needs `Write`, and the capture
+// flag is an `AtomicBool`.  Both are compiled out of production builds.
+#[cfg(feature = "e2e")]
+use std::io::Write;
+#[cfg(feature = "e2e")]
+use std::sync::atomic::AtomicBool;
 
 use crossbeam_channel;
 use parking_lot::RwLock;
@@ -51,11 +57,15 @@ use windows::Win32::{
 };
 
 use super::{
-    CAPTURE_TAG,
     dispatch::{Decision, HookEvent, spawn_worker},
     key::{Key, hid_to_vk},
     raw_input::start_raw_input_loop,
 };
+
+// The capture tag is only consulted by the (e2e-only) tagged re-emission
+// path; in production builds it is not referenced from this module.
+#[cfg(feature = "e2e")]
+use super::CAPTURE_TAG;
 use crate::{
     common::{
         hid_usage::HidUsage, keyboard::KeyboardSpecifier,
@@ -305,13 +315,16 @@ pub(super) fn emit_key_event(native_key: &NativeKey) {
 // is left untouched.
 
 /// Process start, for capture-debug timestamps.
+#[cfg(feature = "e2e")]
 static CAPTURE_T0: std::sync::OnceLock<std::time::Instant> =
     std::sync::OnceLock::new();
 
 /// Capture-mode debug log, appended to from the hook and worker threads.
+#[cfg(feature = "e2e")]
 static CAPTURE_DEBUG: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
     std::sync::OnceLock::new();
 
+#[cfg(feature = "e2e")]
 pub(super) fn capture_debug(line: &str) {
     let t0 = CAPTURE_T0.get_or_init(std::time::Instant::now);
     let file = CAPTURE_DEBUG.get_or_init(|| {
@@ -342,12 +355,17 @@ pub(super) fn capture_debug(line: &str) {
 static TRACKED_MODIFIERS: AtomicU8 = AtomicU8::new(0);
 
 /// Set once from `start_mapping` to record whether capture mode is active.
+#[cfg(feature = "e2e")]
 static CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Whether capture mode is active (all emission tagged through the virtual
-/// keyboard).
+/// keyboard).  Capture mode only exists in `e2e` builds; in production it is
+/// always disabled, so the flag is a compile-time `false` there.
 pub(super) fn capture_enabled() -> bool {
-    CAPTURE_MODE.load(Ordering::Relaxed)
+    #[cfg(feature = "e2e")]
+    { CAPTURE_MODE.load(Ordering::Relaxed) }
+    #[cfg(not(feature = "e2e"))]
+    { false }
 }
 
 /// Record the capture-mode flag determined at startup.
@@ -363,6 +381,7 @@ fn set_capture_mode(enabled: bool) {
 /// [`CAPTURE_TAG`] so the monitor's hook can recognize it.  No
 /// `INJECTED_KEYS` tracking is needed: the tag alone identifies daemon
 /// re-emissions.
+#[cfg(feature = "e2e")]
 fn simulate_key_event_tagged(vk: VIRTUAL_KEY, is_key_up: bool) {
     if capture_enabled() {
         capture_debug(&format!("emit vk={:#04x} up={}", vk.0, is_key_up));
@@ -392,6 +411,7 @@ fn simulate_key_event_tagged(vk: VIRTUAL_KEY, is_key_up: bool) {
 /// Emit a complete mapped-output chord (modifiers + base + modifiers) via
 /// `SendInput`, tagged with [`CAPTURE_TAG`].  Mirrors [`emit_key_event`] but
 /// is used in capture mode.
+#[cfg(feature = "e2e")]
 fn emit_key_event_tagged(native_key: &NativeKey) {
     let mut pressed_modifiers: Vec<VIRTUAL_KEY> = Vec::new();
 
@@ -438,16 +458,21 @@ fn emit_key_event_tagged(native_key: &NativeKey) {
 /// emission entry point shared by the hook proc (mapped keyboard outputs)
 /// and the worker (standalone consumer outputs).
 pub(super) fn emit_mapped_output(native_key: &NativeKey) {
+    // In capture mode (e2e only) the output is re-emitted through the
+    // virtual keyboard, tagged; in normal mode it goes out via a direct
+    // `SendInput`.
+    #[cfg(feature = "e2e")]
     if capture_enabled() {
         emit_key_event_tagged(native_key);
-    } else {
-        emit_key_event(native_key);
+        return;
     }
+    emit_key_event(native_key);
 }
 
 /// Forward a single (unmapped) key through the virtual keyboard in capture
 /// mode.  In normal mode unmapped keys pass straight through the OS, so this
 /// is a no-op.
+#[cfg(feature = "e2e")]
 pub(super) fn emit_forwarded_key(vk: u16, is_key_up: bool) {
     if capture_enabled() {
         simulate_key_event_tagged(VIRTUAL_KEY(vk), is_key_up);
@@ -465,6 +490,7 @@ pub(super) fn emit_forwarded_key(vk: u16, is_key_up: bool) {
 /// modifiers are marked so their physical release is swallowed rather than
 /// forwarded a second time.  Mirrors the `consumed_modifiers` bookkeeping
 /// of the Linux and macOS backends.
+#[cfg(feature = "e2e")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct CaptureModifierState {
     /// Bitmask of modifier keys that were forwarded (pass-through) and are
@@ -476,6 +502,7 @@ struct CaptureModifierState {
     consumed: u8,
 }
 
+#[cfg(feature = "e2e")]
 impl CaptureModifierState {
     /// Record a forwarded (pass-through) modifier press.
     ///
@@ -516,6 +543,7 @@ impl CaptureModifierState {
 
 /// Process-global forwarded-modifier state, mutated only by the worker
 /// thread (the sole emitter in capture mode).
+#[cfg(feature = "e2e")]
 static CAPTURE_MODIFIER_STATE: parking_lot::Mutex<CaptureModifierState> =
     parking_lot::Mutex::new(CaptureModifierState {
         forwarded: 0,
@@ -523,6 +551,7 @@ static CAPTURE_MODIFIER_STATE: parking_lot::Mutex<CaptureModifierState> =
     });
 
 /// Record a forwarded (pass-through) modifier press in capture mode.
+#[cfg(feature = "e2e")]
 pub(super) fn capture_record_forwarded_down(bit: u8) {
     CAPTURE_MODIFIER_STATE.lock().record_forwarded_down(bit);
 }
@@ -531,6 +560,7 @@ pub(super) fn capture_record_forwarded_down(bit: u8) {
 ///
 /// Returns `true` when the release must be swallowed because the modifier
 /// was already released on the virtual keyboard when a trigger fired.
+#[cfg(feature = "e2e")]
 pub(super) fn capture_record_forwarded_up(bit: u8) -> bool {
     CAPTURE_MODIFIER_STATE.lock().record_forwarded_up(bit)
 }
@@ -538,6 +568,7 @@ pub(super) fn capture_record_forwarded_up(bit: u8) -> bool {
 /// Release the fired trigger's forwarded modifiers on the virtual keyboard
 /// (tagged releases), so the output is emitted as a clean tap, and mark
 /// them consumed so their physical releases are swallowed.
+#[cfg(feature = "e2e")]
 pub(super) fn capture_release_triggered_modifiers(modifiers: u8) {
     let consumed = CAPTURE_MODIFIER_STATE.lock().consume_triggered(modifiers);
     if consumed == 0 {
@@ -581,6 +612,7 @@ extern "system" fn low_level_keyboard_proc(
     // In capture mode the daemon re-emits every key through the virtual
     // keyboard, tagged with [`CAPTURE_TAG`].  Let those tagged re-emissions
     // flow on to the monitor's hook without re-mapping them.
+    #[cfg(feature = "e2e")]
     if capture_enabled() && kbd_struct.dwExtraInfo == CAPTURE_TAG {
         capture_debug(&format!(
             "hook tagged vk={:#04x} msg={:#06x}",
@@ -629,6 +661,7 @@ extern "system" fn low_level_keyboard_proc(
     // the concurrent modifier set.
     let mut pressed_modifiers = TRACKED_MODIFIERS.load(Ordering::Relaxed);
 
+    #[cfg(feature = "e2e")]
     if capture_enabled() {
         capture_debug(&format!(
             "hook vk={:#04x} up={} msg={:#06x} extra={:#010x} mods={:#04x} \
@@ -703,6 +736,7 @@ extern "system" fn low_level_keyboard_proc(
             // In capture mode the worker forwarded the original key through
             // the virtual keyboard, so swallow the real one to avoid double
             // delivery.  In normal mode there is no mapping — pass through.
+            #[cfg(feature = "e2e")]
             if capture_enabled() {
                 return LRESULT(1);
             }
@@ -869,6 +903,7 @@ mod tests {
         let _ = was_none;
     }
 
+    #[cfg(feature = "e2e")]
     #[test]
     fn capture_state_forwarded_down_up_round_trip() {
         // A forwarded (pass-through) modifier press is tracked, and its
@@ -881,6 +916,7 @@ mod tests {
         assert_eq!(state.consumed, 0);
     }
 
+    #[cfg(feature = "e2e")]
     #[test]
     fn capture_state_consume_releases_and_swallows_releases() {
         // A trigger firing while both modifiers are held consumes them;
@@ -899,6 +935,7 @@ mod tests {
         assert_eq!(state.consumed, 0);
     }
 
+    #[cfg(feature = "e2e")]
     #[test]
     fn capture_state_consume_partial_subset() {
         // Only the modifiers that were actually forwarded are consumed;
@@ -915,6 +952,7 @@ mod tests {
         assert!(!state.record_forwarded_up(3)); // never forwarded: forward
     }
 
+    #[cfg(feature = "e2e")]
     #[test]
     fn capture_state_consume_without_forwarded_modifiers() {
         // A trigger firing with no forwarded modifiers consumes nothing.
@@ -924,6 +962,7 @@ mod tests {
         assert_eq!(state.consumed, 0);
     }
 
+    #[cfg(feature = "e2e")]
     #[test]
     fn capture_state_late_release_after_consume_is_forwarded() {
         // A modifier pressed again after being consumed (e.g. a fresh

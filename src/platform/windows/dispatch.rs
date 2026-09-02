@@ -50,13 +50,18 @@ use crate::{
     common::hid_usage::{HidUsage, PAGE_CONSUMER},
     daemon::state::Lookup,
     platform::windows::{
-        mapping::{
-            capture_enabled, capture_record_forwarded_down,
-            capture_record_forwarded_up, capture_release_triggered_modifiers,
-            emit_forwarded_key, emit_mapped_output, extract_modifier_bits,
-        },
+        mapping::{emit_mapped_output, extract_modifier_bits},
         raw_input::RawInputEvent,
     },
+};
+
+// Capture-mode emission helpers.  Only compiled in with the `e2e` feature;
+// in production builds the worker never performs capture-mode emission.
+#[cfg(feature = "e2e")]
+use crate::platform::windows::mapping::{
+    capture_enabled, capture_record_forwarded_down,
+    capture_record_forwarded_up, capture_release_triggered_modifiers,
+    emit_forwarded_key,
 };
 
 /// Result of a mapping lookup sent from the worker back to the hook thread.
@@ -258,6 +263,7 @@ fn worker_loop(
             recv(raw_rx) -> raw_result => {
                 match raw_result {
                     Ok(event) => {
+                        #[cfg(feature = "e2e")]
                         if capture_enabled() {
                             crate::platform::windows::mapping::capture_debug(&format!(
                                 "raw {:?}", event
@@ -382,6 +388,7 @@ fn process_hook_event(
     // outputs are emitted as complete taps; an unmapped (pass-through) key
     // is forwarded as-is.  Emission completes before the reply is sent, so
     // the hook proc only returns once the output has gone out.
+    #[cfg(feature = "e2e")]
     if capture_enabled() {
         crate::platform::windows::mapping::capture_debug(&format!(
             "decide vk={:#04x} up={} mods={:#04x} usage={:?} -> {:?}",
