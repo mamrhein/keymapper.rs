@@ -30,7 +30,8 @@ pub fn default_config_path() -> Option<PathBuf> {
 /// Search standard platform directories for the user configuration file.
 ///
 /// Searches the locations from [`search_dirs`] in priority order: current
-/// working directory first (development convenience), then the
+/// working directory first (e2e builds only, where the test harness runs
+/// from a scratch directory with a planted config), then the
 /// platform-specific application config directory.
 ///
 /// Symbolic links are rejected; `config.yaml` must be a regular file.
@@ -85,8 +86,20 @@ fn search_dirs() -> impl Iterator<Item = PathBuf> {
 }
 
 /// Return the current working directory, or `None` if it cannot be determined.
+///
+/// The CWD is only part of the search path in e2e builds, where the test
+/// harness runs the daemon from a scratch directory with a planted config.
+/// Production builds never search the CWD, so a daemon started from an
+/// attacker-writable directory cannot load a planted `config.yaml`.
+#[cfg(feature = "e2e")]
 fn cwd_path() -> Option<PathBuf> {
     std::env::current_dir().ok()
+}
+
+/// The CWD is not searched in production builds (see the e2e variant).
+#[cfg(not(feature = "e2e"))]
+fn cwd_path() -> Option<PathBuf> {
+    None
 }
 
 /// Print the directories searched and the expected file name so that the
@@ -129,8 +142,9 @@ fn platform_config_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// CWD is searched before the platform config directory.  All lookup
-    /// functions and `print_search_locations` drive off this order.
+    /// CWD is searched before the platform config directory in e2e builds.
+    /// All lookup functions and `print_search_locations` drive off this order.
+    #[cfg(feature = "e2e")]
     #[test]
     fn search_dirs_prioritises_cwd_over_platform_dir() {
         let cwd = std::env::current_dir().unwrap();
@@ -143,5 +157,17 @@ mod tests {
         } else {
             assert_eq!(dirs.len(), 1);
         }
+    }
+
+    /// The CWD is not part of the search path in production builds, so a
+    /// daemon started from an attacker-writable directory cannot load a
+    /// planted `config.yaml`.
+    #[cfg(not(feature = "e2e"))]
+    #[test]
+    fn search_dirs_excludes_cwd_in_production_builds() {
+        let cwd = std::env::current_dir().unwrap();
+        let dirs: Vec<PathBuf> = search_dirs().collect();
+
+        assert!(!dirs.iter().any(|d| d == &cwd));
     }
 }

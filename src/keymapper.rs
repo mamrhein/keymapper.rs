@@ -135,8 +135,9 @@ enum ConfigCommands {
     Check {
         /// Path to a config file or directory containing `config.yaml`.
         ///
-        /// When omitted, the standard search locations are used (CWD, then
-        /// the platform-specific application config directory).
+        /// When omitted, the standard search locations are used (the
+        /// platform-specific application config directory; the current
+        /// working directory is also searched in e2e builds).
         path: Option<PathBuf>,
     },
 

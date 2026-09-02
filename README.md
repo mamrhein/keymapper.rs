@@ -68,7 +68,6 @@ Create `config.yaml` in one of the following locations:
 | Linux    | `$XDG_CONFIG_HOME/keymapperd/config.yaml` (defaults to `~/.config/keymapperd/`) |
 | macOS    | `~/Library/Application Support/keymapperd/config.yaml`                          |
 | Windows  | `%APPDATA%\keymapperd\config.yaml`                                              |
-| Any      | Current working directory (development convenience)                             |
 
 Search order is CWD first, then the platform-specific application config directory. Symbolic links are rejected; `config.yaml` must be a regular file.
 

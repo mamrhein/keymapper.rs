@@ -346,6 +346,9 @@ fn check_with_empty_directory_path() {
 // config list subcommand
 // ---------------------------------------------------------------------------
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_list_prints_content() {
     let content = r#"
@@ -466,6 +469,9 @@ fn config_create_already_exists() {
 // config add subcommand
 // ---------------------------------------------------------------------------
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_add_after_create() {
     let dir = env::temp_dir().join("keymapper_test_create_add");
@@ -540,6 +546,9 @@ fn config_add_fails_without_config() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_add_to_existing_file() {
     let dir = write_config_dir(
@@ -577,6 +586,9 @@ fn config_add_to_existing_file() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_add_creates_new_group() {
     let dir = write_config_dir(
@@ -668,6 +680,9 @@ fn config_add_invalid_output_fails() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_add_with_apps() {
     let dir = write_config_dir("add_apps", "groups: []");
@@ -700,6 +715,9 @@ fn config_add_with_apps() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_add_with_keyboard() {
     let dir = write_config_dir("add_keyboard", "groups: []");
@@ -733,6 +751,9 @@ fn config_add_with_keyboard() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_add_with_keyboards_global() {
     let dir = write_config_dir("add_kb_global", "groups: []");
@@ -764,6 +785,9 @@ fn config_add_with_keyboards_global() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+// Requires CWD config search, which is only compiled in with the `e2e`
+// feature (see `config_path::search_dirs`).
+#[cfg(feature = "e2e")]
 #[test]
 fn config_add_with_multiple_keyboards() {
     let dir = write_config_dir("add_multi_kb", "groups: []");
