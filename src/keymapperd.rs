@@ -16,6 +16,7 @@ use keymapper::daemon::test_hooks::{active_app_name, signal_ready};
 use keymapper::{
     common::{
         config_path::find_config_path_strict,
+        daemon_token,
         keyboard::{
             KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
         },
@@ -39,6 +40,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // parent directory components are resolved here; the config file itself
     // was already verified to not be a symlink.
     let config_path = config_path.canonicalize().unwrap_or(config_path);
+
+    // In PID-file (development) mode the CLI passes a random token via an
+    // environment variable and sets our working directory to the config
+    // directory.  Record the token there (next to the PID file) so `stop` can
+    // later confirm it is signaling this exact instance rather than a process
+    // that reused the PID.  In production (service) mode the variable is unset
+    // and this is a no-op.
+    if let Ok(config_dir) = std::env::current_dir() {
+        daemon_token::record_token(&config_dir);
+    }
 
     let initial_cache = RuntimeLookupCache::compile_from_path(&config_path)?;
 
