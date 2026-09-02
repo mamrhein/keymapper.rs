@@ -988,6 +988,38 @@ fn read_daemon_log(config_dir: &Path) -> String {
         .unwrap_or_else(|_| "<no daemon log found>".to_string())
 }
 
+/// Wait until the monitor's event log holds at least *expected_len* events.
+///
+/// The last injected event can still be in flight (injector -> daemon ->
+/// virtual keyboard -> monitor) when the phase loop finishes.  Tearing down
+/// the daemon at that point drops it, because shutdown releases the virtual
+/// keyboard before the event is emitted.  Polling the log (which the monitor
+/// flushes after every write) until it holds all expected events closes that
+/// race deterministically.
+///
+/// On timeout we do not panic: this wait is only a synchronization aid, and
+/// the final assertion reports any real mismatch with full context.
+fn wait_for_expected_events(log_path: &Path, expected_len: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(events) = event_log::parse(log_path)
+            && events.len() >= expected_len
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let captured =
+                event_log::parse(log_path).map(|e| e.len()).unwrap_or(0);
+            eprintln!(
+                "warning: only {captured} of {expected_len} expected events \
+                 captured within 5s; proceeding to teardown"
+            );
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Integration tests
 // ---------------------------------------------------------------------------
@@ -1142,16 +1174,21 @@ fn run_e2e(configs: &[&str], label: &str) {
         expected_combined.extend(sequences.expected.iter().cloned());
     }
 
-    // j. Stop the daemon.
+    // j. Wait for the monitor to capture every expected event before tearing
+    //    down, so the last in-flight event is not dropped by the daemon's
+    //    shutdown (see `wait_for_expected_events`).
+    wait_for_expected_events(&events_log, expected_combined.len());
+
+    // k. Stop the daemon.
     daemon.stop();
 
-    // k. Stop the monitor.
+    // l. Stop the monitor.
     monitor.kill();
 
-    // l. Teardown the injector.
+    // m. Teardown the injector.
     injector.teardown();
 
-    // m. Parse the event log.
+    // n. Parse the event log.
     let actual = event_log::parse(&events_log).unwrap_or_else(|e| {
         panic!("failed to parse event log {:?}: {e}", events_log)
     });
@@ -1171,7 +1208,7 @@ fn run_e2e(configs: &[&str], label: &str) {
         );
     }
 
-    // n. Assert the event log matches the combined expected sequence (canary
+    // o. Assert the event log matches the combined expected sequence (canary
     //    + all phases).
     if actual != expected_combined {
         // The temp dir (and thus the daemon log) is removed when the test
@@ -1188,7 +1225,7 @@ fn run_e2e(configs: &[&str], label: &str) {
         "event log does not match expected sequence",
     );
 
-    // o. Clean up.
+    // p. Clean up.
     dir_guard.remove();
 
     eprintln!("{label} PASSED");
