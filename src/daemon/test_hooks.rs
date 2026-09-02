@@ -10,8 +10,10 @@
 //! E2e-only test hooks.
 //!
 //! This module is the single home for the test-specific behaviour compiled
-//! into the daemon.  Every hook is gated on an environment variable that
-//! only the e2e harness sets, so all of them are inert in production:
+//! into the daemon.  The whole module sits behind the `e2e` cargo feature,
+//! so none of it is present in production builds at all.  Within the module
+//! each hook is additionally gated on an environment variable that only the
+//! e2e harness sets:
 //!
 //! - [`signal_ready`]: the daemon touches a readiness file once it can process
 //!   events; the harness waits for it before injecting keys (e.g. the

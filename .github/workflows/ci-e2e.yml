@@ -51,8 +51,10 @@ jobs:
       - name: Build daemon and e2e test binary
         # The e2e tests spawn keymapperd as a subprocess and resolve it from
         # target/debug/keymapperd relative to the test binary's location.
+        # The daemon is built with the `e2e` feature so the test hooks
+        # (readiness file, active-app override, capture mode) are compiled in.
         run: |
-          cargo build --bin keymapperd
+          cargo build --features e2e --bin keymapperd
           cargo nextest run --test e2e_tests --no-run
 
       - name: Run e2e tests as root (for /dev/uinput access)
@@ -104,7 +106,7 @@ jobs:
 
   #     - name: Build daemon and e2e test binary
   #       run: |
-  #         cargo build --bin keymapperd
+  #         cargo build --features e2e --bin keymapperd
   #         cargo nextest run --test e2e_tests --no-run
 
   #     - name: Run e2e tests

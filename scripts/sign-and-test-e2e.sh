@@ -44,8 +44,10 @@ setup_karabiner_driver() {
 }
 
 # Build the daemon binary.  E2E tests spawn keymapperd as a subprocess and
-# resolve it relative to their own location in target/debug/.
-cargo build --bin keymapperd "$@"
+# resolve it relative to their own location in target/debug/.  The `e2e`
+# feature compiles the test hooks (readiness file, active-app override,
+# capture mode) into the daemon so the harness can drive it.
+cargo build --features e2e --bin keymapperd "$@"
 
 # Build and sign the test binary without running it.
 cargo nextest run --test e2e_tests --no-run "$@"

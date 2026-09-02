@@ -24,6 +24,12 @@ path = "src/keymapperd.rs"
 name = "keymapper_monitor"
 path = "src/keymapper_monitor.rs"
 
+[features]
+# Compile the e2e test hooks (readiness file, active-app override, and the
+# Windows capture / test-output modes) into the daemon.  Off by default so
+# the production binary ships with no env-gated test behaviour at all.
+e2e = []
+
 [dependencies]
 clap = { version = "4", features = ["derive"]}
 dirs = "6" # platform config directory resolution

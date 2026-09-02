@@ -278,7 +278,7 @@ pub fn stop(config_dir: &Path) -> Result<(), String> {
 
     // Clean up the PID file and the daemon's token file.
     let _ = fs_err::remove_file(&pid_path);
-    let _ = fs_err::remove_file(&daemon_token::token_file_path(config_dir));
+    let _ = fs_err::remove_file(daemon_token::token_file_path(config_dir));
 
     Ok(())
 }

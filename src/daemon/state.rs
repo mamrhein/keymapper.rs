@@ -106,10 +106,10 @@ pub struct RuntimeState {
     /// performed on every key event.
     active_app_cache: Mutex<CachedActiveApp>,
     /// Injectable source for the active application name.  The daemon binary
-    /// wires this to [`super::test_hooks::active_app_name`], which honors the
-    /// e2e override and falls back to the platform query; tests can supply a
-    /// fixed value.  Kept as a closure so the state struct never references
-    /// test-specific code directly.
+    /// wires this to the e2e override (`test_hooks::active_app_name`) when
+    /// built with the `e2e` feature, and to the plain platform query
+    /// otherwise; tests can supply a fixed value.  Kept as a closure so the
+    /// state struct never references test-specific code directly.
     active_app_source: Box<dyn Fn() -> String + Send + Sync>,
 }
 

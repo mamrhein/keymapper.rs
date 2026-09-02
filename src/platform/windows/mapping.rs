@@ -201,7 +201,9 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
     // `SendInput`. This avoids the issue where `SendInput` from within a
     // `WH_KEYBOARD_LL` hook callback does not trigger other hooks (Windows
     // prevents recursive hook invocation). The e2e test reads this file to
-    // verify outputs.
+    // verify outputs.  Compiled in only with the `e2e` feature, so the
+    // production binary has no env-gated file-write path here.
+    #[cfg(feature = "e2e")]
     if let Ok(path) = std::env::var("KEYMAPPER_TEST_OUTPUT") {
         let line = if is_down {
             format!("DOWN {}\n", vk.0)
@@ -349,6 +351,10 @@ pub(super) fn capture_enabled() -> bool {
 }
 
 /// Record the capture-mode flag determined at startup.
+///
+/// Only compiled in with the `e2e` feature: without it, capture mode can
+/// never be enabled, so the writer is dead code in production builds.
+#[cfg(feature = "e2e")]
 fn set_capture_mode(enabled: bool) {
     CAPTURE_MODE.store(enabled, Ordering::Relaxed);
 }
@@ -749,6 +755,9 @@ pub fn start_mapping(
     // the output without depending on a focused window.  In this mode the
     // worker performs all emission on its own (non-hook) thread — `SendInput`
     // from within a `WH_KEYBOARD_LL` callback would not reach other hooks.
+    // Compiled in only with the `e2e` feature, so production builds can never
+    // be switched into capture mode via the environment.
+    #[cfg(feature = "e2e")]
     if std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty()) {
         set_capture_mode(true);
         eprintln!("Windows: capture mode enabled (KEYMAPPER_CAPTURE).");
