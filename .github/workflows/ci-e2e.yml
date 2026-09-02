@@ -92,24 +92,24 @@ jobs:
   # -----------------------------------------------------------------------
   # Windows — e2e sandbox tests (no elevation required)
   # -----------------------------------------------------------------------
-  # windows-e2e:
-  #   runs-on: windows-latest
+  windows-e2e:
+    runs-on: windows-latest
 
-  #   steps:
-  #     - uses: actions/checkout@v5
+    steps:
+      - uses: actions/checkout@v5
 
-  #     - name: Install Rust stable
-  #       uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-  #     - name: Install cargo-nextest
-  #       uses: taiki-e/install-action@nextest
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
-  #     - name: Build daemon and e2e test binary
-  #       run: |
-  #         cargo build --features e2e --bin keymapperd
-  #         cargo nextest run --test e2e_tests --no-run
+      - name: Build daemon and e2e test binary
+        run: |
+          cargo build --features e2e --bin keymapperd
+          cargo nextest run --test e2e_tests --no-run
 
-  #     - name: Run e2e tests
-  #       # SendInput and WH_KEYBOARD_LL work at session level; no elevation
-  #       # is required.
-  #       run: cargo nextest run --no-capture --test e2e_tests
+      - name: Run e2e tests
+        # SendInput and WH_KEYBOARD_LL work at session level; no elevation
+        # is required.
+        run: cargo nextest run --no-capture --test e2e_tests
