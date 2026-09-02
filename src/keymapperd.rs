@@ -9,6 +9,10 @@
 
 use std::sync::Arc;
 
+#[cfg(not(feature = "e2e"))]
+use keymapper::common::app_identity;
+#[cfg(feature = "e2e")]
+use keymapper::daemon::test_hooks::{active_app_name, signal_ready};
 use keymapper::{
     common::{
         config_path::find_config_path_strict,
@@ -17,9 +21,7 @@ use keymapper::{
         },
     },
     daemon::{
-        mapping_cache::RuntimeLookupCache,
-        state::RuntimeState,
-        test_hooks::{active_app_name, signal_ready},
+        mapping_cache::RuntimeLookupCache, state::RuntimeState,
         watcher::start_config_watcher,
     },
     platform::{list_keyboards, start_mapping},
@@ -75,17 +77,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // Inject the active-app source.  The e2e override is only compiled in
+    // with the `e2e` feature; production builds query the platform directly.
+    #[cfg(feature = "e2e")]
+    let active_app_source: Box<dyn Fn() -> String + Send + Sync> =
+        Box::new(active_app_name);
+    #[cfg(not(feature = "e2e"))]
+    let active_app_source: Box<dyn Fn() -> String + Send + Sync> =
+        Box::new(app_identity::get_active_app_name);
+
     // Keep the concrete type so both trait objects below are produced by a
     // safe, compiler-checked unsized coercion (MutableLookup: Lookup).  Both
     // Arcs share the same allocation.
     let state = Arc::new(RwLock::new(RuntimeState::new(
         initial_cache,
         all_keyboards,
-        // Inject the active-app source.  It honors the e2e override and
-        // falls back to the platform query, so production runs pay
-        // nothing for it and the state struct stays free of
-        // test-specific code.
-        Box::new(active_app_name),
+        active_app_source,
     )));
 
     // Start hot-reloader thread.  The watcher needs the mutable interface to
@@ -105,13 +112,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `KEYMAPPER_READY_FILE` branch is absent from the binary entirely.
     #[cfg(feature = "e2e")]
     let ready_signal: Option<Box<dyn FnOnce() + Send>> =
-        Some(Box::new(keymapper::daemon::test_hooks::signal_ready));
+        Some(Box::new(signal_ready));
     #[cfg(not(feature = "e2e"))]
     let ready_signal: Option<Box<dyn FnOnce() + Send>> = None;
 
-    keymapper::platform::start_mapping(
-        platform_state,
-        global_filter,
-        ready_signal,
-    )
+    start_mapping(platform_state, global_filter, ready_signal)
 }
