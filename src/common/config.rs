@@ -11,8 +11,12 @@ use std::fmt;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, de};
+use thiserror::Error;
 
-use super::{KeyboardSpecifier, hid_usage::HidUsage};
+use super::{
+    KeyboardSpecifier,
+    hid_usage::{HidUsage, HidUsageParseError},
+};
 
 /// A key event: modifiers held together with a base key press.
 ///
@@ -32,6 +36,22 @@ pub struct KeyEvent {
     /// The base key that is pressed (may itself be a modifier key, e.g.
     /// CapsLock).
     pub base: HidUsage,
+}
+
+/// Error returned when a string cannot be parsed as a [`KeyEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum KeyEventParseError {
+    /// The event string is empty or contains only whitespace.
+    #[error("empty key event string")]
+    Empty,
+
+    /// A `+`-separated token is empty (e.g. `"Ctrl+"` or `"Ctrl++A"`).
+    #[error("empty key token in event string")]
+    EmptyToken,
+
+    /// A key name is not a known `HidUsage`.
+    #[error(transparent)]
+    UnknownKey(#[from] HidUsageParseError),
 }
 
 impl<'de> Deserialize<'de> for KeyEvent {
@@ -78,12 +98,12 @@ impl KeyEvent {
     /// The last token is the base key; all preceding tokens are modifiers.
     /// A single token (e.g. `"CapsLock"`) is a bare key press with no
     /// modifiers held, even if the token itself names a modifier key.
-    pub fn parse(s: &str) -> Result<Self, String> {
+    pub fn parse(s: &str) -> Result<Self, KeyEventParseError> {
         let parts: Vec<&str> = s.split('+').collect();
 
         if parts.is_empty() || (parts.len() == 1 && parts[0].trim().is_empty())
         {
-            return Err("empty key event string".to_string());
+            return Err(KeyEventParseError::Empty);
         }
 
         if parts.len() == 1 {
@@ -112,13 +132,13 @@ impl KeyEvent {
 /// Parse a single token from the config string into a `HidUsage`.
 ///
 /// Key names are matched case-sensitively.
-fn parse_key(token: &str) -> Result<HidUsage, String> {
+fn parse_key(token: &str) -> Result<HidUsage, KeyEventParseError> {
     let trimmed = token.trim();
     if trimmed.is_empty() {
-        return Err("empty key token in event string".to_string());
+        return Err(KeyEventParseError::EmptyToken);
     }
 
-    HidUsage::try_from(trimmed).map_err(|e| e.to_string())
+    HidUsage::try_from(trimmed).map_err(KeyEventParseError::UnknownKey)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,29 +405,70 @@ impl Serialize for AppConfig {
     }
 }
 
+/// A single finding from [`AppConfig::check`].
+///
+/// Diagnostics are non-fatal: a config with findings still compiles, but
+/// each finding describes a rule that is likely a mistake.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConfigDiagnostic {
+    /// The config defines no rule groups at all.
+    #[error("no rule groups defined")]
+    NoRuleGroups,
+
+    /// A global keyboard specifier has no fields set.
+    #[error(
+        "global keyboard specifier at index {index} has no fields set (at \
+         least one of name, vendor, model, or port is required)"
+    )]
+    EmptyGlobalKeyboardSpecifier { index: usize },
+
+    /// A rule group contains no mappings.
+    #[error("'{group}' has no mappings")]
+    EmptyGroup { group: String },
+
+    /// A per-group keyboard specifier has no fields set.
+    #[error(
+        "'{group}': keyboard specifier at index {index} has no fields set \
+         (at least one of name, vendor, model, or port is required)"
+    )]
+    EmptyGroupKeyboardSpecifier { group: String, index: usize },
+
+    /// A rule's only output is identical to its trigger.
+    #[error("'{group}': {trigger} remaps to itself (no-op)")]
+    NoOpMapping { group: String, trigger: KeyEvent },
+
+    /// The same trigger appears in more than one group.
+    #[error("trigger {trigger} appears in multiple groups: {groups}")]
+    DuplicateTrigger { trigger: KeyEvent, groups: String },
+
+    /// Two single-output rules map each other's triggers (a swap).
+    #[error("{first} and {second} form a circular pair (swap)")]
+    CircularPair { first: KeyEvent, second: KeyEvent },
+}
+
 impl AppConfig {
     pub fn load_from_str(yaml_str: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml_str)
     }
 
     /// Analyse the parsed configuration and return a list of diagnostic
-    /// findings.  Each finding is a human-readable message.
-    pub fn check(&self) -> Vec<String> {
+    /// findings.
+    pub fn check(&self) -> Vec<ConfigDiagnostic> {
         let mut diagnostics = Vec::new();
 
         if self.groups.is_empty() {
-            diagnostics.push("no rule groups defined".to_string());
+            diagnostics.push(ConfigDiagnostic::NoRuleGroups);
         }
 
         // Validate global keyboard specifiers.
         if let Some(ref kbs) = self.keyboards {
             for (i, spec) in kbs.iter().enumerate() {
                 if spec.is_empty() {
-                    diagnostics.push(format!(
-                        "global keyboard specifier at index {i} has no \
-                         fields set (at least one of name, vendor, model, or \
-                         port is required)"
-                    ));
+                    diagnostics.push(
+                        ConfigDiagnostic::EmptyGlobalKeyboardSpecifier {
+                            index: i,
+                        },
+                    );
                 }
             }
         }
@@ -427,18 +488,20 @@ impl AppConfig {
                 .unwrap_or_else(|| format!("group {}", group_idx + 1));
 
             if group.mappings.is_empty() {
-                diagnostics.push(format!("'{}' has no mappings", label));
+                diagnostics.push(ConfigDiagnostic::EmptyGroup {
+                    group: label.clone(),
+                });
             }
 
             // Validate per-group keyboard specifiers.
             for (i, spec) in group.keyboards.iter().enumerate() {
                 if spec.is_empty() {
-                    diagnostics.push(format!(
-                        "'{}': keyboard specifier at index {i} has no fields \
-                         set (at least one of name, vendor, model, or port \
-                         is required)",
-                        label
-                    ));
+                    diagnostics.push(
+                        ConfigDiagnostic::EmptyGroupKeyboardSpecifier {
+                            group: label.clone(),
+                            index: i,
+                        },
+                    );
                 }
             }
 
@@ -450,9 +513,10 @@ impl AppConfig {
 
                 // No-op: the only output is identical to the trigger.
                 if outputs.len() == 1 && outputs[0] == *trigger {
-                    diagnostics.push(format!(
-                        "'{label}': {trigger} remaps to itself (no-op)"
-                    ));
+                    diagnostics.push(ConfigDiagnostic::NoOpMapping {
+                        group: label.clone(),
+                        trigger: trigger.clone(),
+                    });
                 }
             }
         }
@@ -462,10 +526,10 @@ impl AppConfig {
             if locations.len() > 1 {
                 let names: Vec<&str> =
                     locations.iter().map(|(_, name)| name.as_str()).collect();
-                diagnostics.push(format!(
-                    "trigger {trigger} appears in multiple groups: {}",
-                    names.join(", ")
-                ));
+                diagnostics.push(ConfigDiagnostic::DuplicateTrigger {
+                    trigger: trigger.clone(),
+                    groups: names.join(", "),
+                });
             }
         }
 
@@ -498,10 +562,10 @@ impl AppConfig {
                     };
                     if !reported_pairs.contains(&pair) {
                         reported_pairs.push(pair.clone());
-                        diagnostics.push(format!(
-                            "{} and {} form a circular pair (swap)",
-                            pair.0, pair.1
-                        ));
+                        diagnostics.push(ConfigDiagnostic::CircularPair {
+                            first: pair.0,
+                            second: pair.1,
+                        });
                     }
                 }
             }
@@ -829,6 +893,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_error_variants() {
+        assert!(matches!(
+            KeyEvent::parse(""),
+            Err(KeyEventParseError::Empty)
+        ));
+        assert!(matches!(
+            KeyEvent::parse("   "),
+            Err(KeyEventParseError::Empty)
+        ));
+        assert!(matches!(
+            KeyEvent::parse("Ctrl+"),
+            Err(KeyEventParseError::EmptyToken)
+        ));
+        assert!(matches!(
+            KeyEvent::parse("Ctrl++H"),
+            Err(KeyEventParseError::EmptyToken)
+        ));
+        assert!(matches!(
+            KeyEvent::parse("XyZ123"),
+            Err(KeyEventParseError::UnknownKey(_))
+        ));
+    }
+
+    #[test]
     fn error_output_value_not_string() {
         // An integer output is invalid.
         let yaml = r#"
@@ -970,7 +1058,11 @@ unknown_field:
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         let issues = config.check();
-        assert!(issues.iter().any(|i| i.contains("remaps to itself")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("remaps to itself"))
+        );
     }
 
     #[test]
@@ -987,7 +1079,7 @@ unknown_field:
         assert!(
             issues
                 .iter()
-                .any(|i| i.contains("appears in multiple groups"))
+                .any(|i| i.to_string().contains("appears in multiple groups"))
         );
     }
 
@@ -998,7 +1090,11 @@ unknown_field:
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         let issues = config.check();
-        assert!(issues.iter().any(|i| i.contains("has no mappings")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("has no mappings"))
+        );
     }
 
     #[test]
@@ -1010,7 +1106,11 @@ unknown_field:
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         let issues = config.check();
-        assert!(issues.iter().any(|i| i.contains("circular pair")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("circular pair"))
+        );
     }
 
     #[test]
@@ -1022,15 +1122,27 @@ unknown_field:
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
         let issues = config.check();
-        assert!(!issues.iter().any(|i| i.contains("circular pair")));
-        assert!(issues.iter().any(|i| i.contains("remaps to itself")));
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.to_string().contains("circular pair"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("remaps to itself"))
+        );
     }
 
     #[test]
     fn check_detects_empty_config() {
         let config = AppConfig::load_from_str("groups: []").unwrap();
         let issues = config.check();
-        assert!(issues.iter().any(|i| i.contains("no rule groups")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("no rule groups"))
+        );
     }
 
     #[test]
@@ -1049,14 +1161,26 @@ unknown_field:
         let config = AppConfig::load_from_str(yaml).unwrap();
         let issues = config.check();
 
-        assert!(issues.iter().any(|i| i.contains("has no mappings")));
-        assert!(issues.iter().any(|i| i.contains("remaps to itself")));
         assert!(
             issues
                 .iter()
-                .any(|i| i.contains("appears in multiple groups"))
+                .any(|i| i.to_string().contains("has no mappings"))
         );
-        assert!(issues.iter().any(|i| i.contains("circular pair")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("remaps to itself"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("appears in multiple groups"))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("circular pair"))
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1199,7 +1323,7 @@ groups:
         assert!(
             issues
                 .iter()
-                .any(|i| i.contains("global keyboard specifier")),
+                .any(|i| i.to_string().contains("global keyboard specifier")),
             "should reject empty global keyboard specifier"
         );
     }
@@ -1216,7 +1340,9 @@ groups:
         let config = AppConfig::load_from_str(yaml).unwrap();
         let issues = config.check();
         assert!(
-            issues.iter().any(|i| i.contains("keyboard specifier")),
+            issues
+                .iter()
+                .any(|i| i.to_string().contains("keyboard specifier")),
             "should reject empty group keyboard specifier"
         );
     }
@@ -1236,7 +1362,11 @@ groups:
         let config = AppConfig::load_from_str(yaml).unwrap();
         let issues = config.check();
         // Should only have the no-mappings issue absent (there IS a mapping).
-        assert!(!issues.iter().any(|i| i.contains("keyboard specifier")));
+        assert!(
+            !issues
+                .iter()
+                .any(|i| i.to_string().contains("keyboard specifier"))
+        );
     }
 
     #[test]

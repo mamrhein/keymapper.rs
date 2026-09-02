@@ -51,8 +51,9 @@ use crate::{
     daemon::state::Lookup,
     platform::windows::{
         mapping::{
-            capture_enabled, emit_forwarded_key, emit_mapped_output,
-            extract_modifier_bits,
+            capture_enabled, capture_record_forwarded_down,
+            capture_record_forwarded_up, capture_release_triggered_modifiers,
+            emit_forwarded_key, emit_mapped_output, extract_modifier_bits,
         },
         raw_input::RawInputEvent,
     },
@@ -390,14 +391,40 @@ fn process_hook_event(
             event.usage,
             decision
         ));
+        // The modifier bit of the event's own key, if it is a modifier
+        // key.
+        let own_bit =
+            event.usage.and_then(HidUsage::hid_usage_to_modifier_bit);
         match &decision {
             Decision::Swallow(outputs) => {
+                if !event.is_key_up {
+                    // The trigger's modifiers were forwarded when pressed.
+                    // Release them on the virtual keyboard now so the
+                    // output is emitted as a clean tap; mark them consumed
+                    // so their physical release is swallowed rather than
+                    // forwarded a second time.
+                    capture_release_triggered_modifiers(event.modifiers);
+                }
                 for native_key in outputs {
                     emit_mapped_output(native_key);
                 }
             }
             Decision::PassThrough => {
-                emit_forwarded_key(event.vk_code.0, event.is_key_up);
+                if event.is_key_up
+                    && let Some(bit) = own_bit
+                    && capture_record_forwarded_up(bit)
+                {
+                    // The modifier was already released on the virtual
+                    // keyboard when its trigger fired; swallow the physical
+                    // release.
+                } else {
+                    if !event.is_key_up
+                        && let Some(bit) = own_bit
+                    {
+                        capture_record_forwarded_down(bit);
+                    }
+                    emit_forwarded_key(event.vk_code.0, event.is_key_up);
+                }
             }
         }
     }
@@ -420,7 +447,7 @@ fn decide(
 ) -> Decision {
     let guard = lookup.read();
     let outputs = guard
-        .for_app(&guard.active_app(), usage, modifiers, device_id)
+        .for_active_app(usage, modifiers, device_id)
         .or_else(|| guard.global(usage, modifiers, device_id))
         .map(|v| v.to_vec());
     drop(guard);
@@ -451,12 +478,7 @@ fn process_consumer_event(
 
     let guard = lookup.read();
     let outputs = guard
-        .for_app(
-            &guard.active_app(),
-            usage,
-            modifiers,
-            device_path.as_deref(),
-        )
+        .for_active_app(usage, modifiers, device_path.as_deref())
         .or_else(|| guard.global(usage, modifiers, device_path.as_deref()))
         .map(|v| v.to_vec());
     drop(guard);
@@ -623,17 +645,13 @@ mod tests {
 
     /// A [`Lookup`] implementation that returns configurable outputs.
     struct MockLookup {
-        app_name: String,
         /// Map of (usage, modifiers, device_id_option) -> outputs.
         global_map: HashMap<(HidUsage, u8, Option<String>), Vec<NativeKey>>,
     }
 
     impl MockLookup {
         fn new() -> Self {
-            Self {
-                app_name: "test_app".to_string(),
-                global_map: HashMap::new(),
-            }
+            Self { global_map: HashMap::new() }
         }
 
         /// Configure the mock to return *outputs* for global lookups of
@@ -683,8 +701,13 @@ mod tests {
                 .map(|v| v.as_slice())
         }
 
-        fn active_app(&self) -> Arc<str> {
-            Arc::from(self.app_name.as_str())
+        fn for_active_app(
+            &self,
+            _usage: HidUsage,
+            _modifiers: u8,
+            _device_id: Option<&str>,
+        ) -> Option<&[NativeKey]> {
+            None
         }
     }
 

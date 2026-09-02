@@ -8,8 +8,7 @@
 // $Revision$
 
 use std::{
-    fs::File,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
@@ -21,12 +20,10 @@ use notify::{
 };
 use parking_lot::RwLock;
 
-use super::{mapping_cache::RuntimeLookupCache, state::MutableLookup};
-
-/// Maximum config file size in bytes (1 MB).  A key-mapping configuration
-/// should never approach this limit; a larger file indicates either a write
-/// gone wrong or an adversarial payload.
-const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
+use super::{
+    config_io::read_config_content, mapping_cache::RuntimeLookupCache,
+    state::MutableLookup,
+};
 
 /// Debounce interval: wait this long after the last filesystem event before
 /// attempting a reload.  Editors that write atomically (write-to-temp +
@@ -125,175 +122,18 @@ fn spawn_reload_thread(
     tx
 }
 
-/// Attempt a single reload of the configuration file, performing security
-/// checks before parsing.  On Unix the file is opened with O_NOFOLLOW and
-/// all checks are done on the same file descriptor, eliminating TOCTOU races
-/// between metadata inspection and content read.
+/// Attempt a single reload of the configuration file.  The file is read via
+/// [`read_config_content`], which applies the same security checks as the
+/// initial load (symlink, regular-file, size, ownership, world-writable) on a
+/// single open descriptor.  On success the compiled cache is swapped in.
 fn attempt_reload(
     config_path: &Path,
     state: &Arc<RwLock<dyn MutableLookup>>,
 ) -> ReloadResult {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        // Security check: verify the file is not a symlink.  This is an extra
-        // guard beyond O_NOFOLLOW below, covering edge cases such as parent
-        // directory components being replaced with symlinks.
-        let sym_meta = match std::fs::symlink_metadata(config_path) {
-            Ok(m) => m,
-            Err(_) => {
-                return ReloadResult::Err("config file not found".to_string());
-            }
-        };
-        if sym_meta.file_type().is_symlink() {
-            return ReloadResult::Err(
-                "config file is now a symlink".to_string(),
-            );
-        }
-
-        // Open with O_NOFOLLOW so we never follow a symlink, and we can do
-        // metadata checks + read on the same file descriptor.
-        let mut file = match std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(config_path)
-        {
-            Ok(f) => f,
-            Err(_) => {
-                return ReloadResult::Err("config file not found".to_string());
-            }
-        };
-
-        let metadata = match file.metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                return ReloadResult::Err(
-                    "failed to read config file metadata".to_string(),
-                );
-            }
-        };
-
-        validate_and_reload(&mut file, &metadata, state)
-    }
-
-    #[cfg(not(unix))]
-    {
-        // Security check: verify the file is not a symlink.
-        let sym_meta = match std::fs::symlink_metadata(config_path) {
-            Ok(m) => m,
-            Err(_) => {
-                return ReloadResult::Err("config file not found".to_string());
-            }
-        };
-        if sym_meta.file_type().is_symlink() {
-            return ReloadResult::Err(
-                "config file is now a symlink".to_string(),
-            );
-        }
-
-        let mut file = match File::open(config_path) {
-            Ok(f) => f,
-            Err(_) => {
-                return ReloadResult::Err("config file not found".to_string());
-            }
-        };
-
-        let metadata = match file.metadata() {
-            Ok(m) => m,
-            Err(_) => {
-                return ReloadResult::Err(
-                    "failed to read config file metadata".to_string(),
-                );
-            }
-        };
-
-        validate_and_reload(&mut file, &metadata, state)
-    }
-}
-
-/// Validate security constraints and perform the hot-reload.  The file must
-/// be open and its metadata already fetched from the same handle, so there is
-/// no race between checking and reading.
-#[cfg(unix)]
-fn validate_and_reload(
-    file: &mut File,
-    metadata: &std::fs::Metadata,
-    state: &Arc<RwLock<dyn MutableLookup>>,
-) -> ReloadResult {
-    use std::os::unix::fs::MetadataExt;
-
-    if !metadata.is_file() {
-        return ReloadResult::Err(
-            "config path is not a regular file".to_string(),
-        );
-    }
-
-    // Security check: file size is within acceptable bounds.
-    if metadata.len() > MAX_CONFIG_SIZE {
-        return ReloadResult::Err(format!(
-            "config file is too large ({} bytes, limit {})",
-            metadata.len(),
-            MAX_CONFIG_SIZE,
-        ));
-    }
-
-    // Security check: file is owned by the current user.  Skipped when
-    // running as root: a root daemon legitimately reads configs owned by
-    // regular users (the production layout keeps the config in the user's
-    // home directory), and the world-writable check below is the meaningful
-    // tamper guard in that case.
-    let current_uid = unsafe { libc::getuid() };
-    let uid = metadata.uid();
-    if current_uid != 0 && uid != current_uid {
-        return ReloadResult::Err(format!(
-            "config file is owned by uid {} (current user: {})",
-            uid, current_uid,
-        ));
-    }
-
-    // Security check: file is not world-writable (prevents other users on the
-    // same system from tampering with it).
-    let mode = metadata.mode() as libc::mode_t;
-    if (mode & libc::S_IWOTH) != 0 {
-        return ReloadResult::Err("config file is world-writable".to_string());
-    }
-
-    // Read content from the already-open handle — no race with metadata.
-    let mut content = String::new();
-    if file.read_to_string(&mut content).is_err() {
-        return ReloadResult::Err("failed to read config file".to_string());
-    }
-
-    reload_from_str(&content, state)
-}
-
-#[cfg(not(unix))]
-fn validate_and_reload(
-    file: &mut File,
-    metadata: &std::fs::Metadata,
-    state: &Arc<RwLock<dyn MutableLookup>>,
-) -> ReloadResult {
-    if !metadata.is_file() {
-        return ReloadResult::Err(
-            "config path is not a regular file".to_string(),
-        );
-    }
-
-    // Security check: file size is within acceptable bounds.
-    if metadata.len() > MAX_CONFIG_SIZE {
-        return ReloadResult::Err(format!(
-            "config file is too large ({} bytes, limit {})",
-            metadata.len(),
-            MAX_CONFIG_SIZE,
-        ));
-    }
-
-    // Read content from the already-open handle.
-    let mut content = String::new();
-    if file.read_to_string(&mut content).is_err() {
-        return ReloadResult::Err("failed to read config file".to_string());
-    }
+    let content = match read_config_content(config_path) {
+        Ok(content) => content,
+        Err(err) => return ReloadResult::Err(err.to_string()),
+    };
 
     reload_from_str(&content, state)
 }

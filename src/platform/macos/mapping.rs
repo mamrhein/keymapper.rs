@@ -41,9 +41,14 @@ use crate::{common::keyboard::KeyboardSpecifier, daemon::state::Lookup};
 /// the DriverKit virtual HID keyboard: mapped keys as their mapped output,
 /// unmapped keys forwarded unchanged.  The CFRunLoop is polled until a
 /// shutdown signal (SIGINT or SIGTERM) is received.
+///
+/// `ready_signal` is invoked once the daemon can process events; it is
+/// injected by the caller so this module stays free of test-specific side
+/// effects.
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
     keyboard_filter: Option<Vec<KeyboardSpecifier>>,
+    ready_signal: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Register signal handlers for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -102,8 +107,9 @@ pub fn start_mapping(
     .map_err(|e| format!("IOKit HID device seizure failed: {e}"))?;
 
     // The seizure mapping is live, so the daemon can now process events.
-    // Signal readiness for the e2e harness.
-    crate::daemon::test_hooks::signal_ready();
+    if let Some(signal) = ready_signal {
+        signal();
+    }
 
     run_event_loop(handle, shutdown)
 }

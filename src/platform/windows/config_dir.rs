@@ -7,12 +7,14 @@
 // $Source$
 // $Revision$
 
-mod config_dir;
-pub mod hid_translate;
-mod keyboard;
-mod mapping;
+//! Windows per-user configuration base directory resolution.
 
-pub use config_dir::config_dir;
-pub use hid_translate::keycode_to_hid_usage;
-pub use keyboard::list_keyboards;
-pub use mapping::{VIRTUAL_KEYBOARD_NAME, start_mapping};
+use std::path::PathBuf;
+
+/// Return the OS-specific per-user configuration base directory, without the
+/// application name.
+///
+/// On Windows this is `%APPDATA%`.  The directory may not exist yet.
+pub fn config_dir() -> Option<PathBuf> {
+    dirs::config_dir()
+}

@@ -13,9 +13,7 @@ use std::time::Duration;
 
 use evdev::{Device, EventType, MiscCode};
 
-use crate::{
-    common::hid_usage::HidUsage, platform::hid_translate::keycode_to_hid_usage,
-};
+use crate::{common::hid_usage::HidUsage, platform::keycode_to_hid_usage};
 
 /// Probe for key presses by reading from an evdev keyboard device.
 ///

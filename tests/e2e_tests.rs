@@ -1025,7 +1025,7 @@ fn run_e2e(configs: &[&str], label: &str) {
     if !can_run_e2e() {
         eprintln!(
             "skipping e2e test: injector not available in this environment. \
-             Set CI=1 and ensure required permissions are granted."
+             Ensure required permissions are granted."
         );
         return;
     }

@@ -8,16 +8,19 @@
 // $Revision$
 
 //! Platform backend: the single public boundary between the platform
-//! layer and the code above it (the daemon, `test_util`, and `cli`).
+//! layer and the code above it (the daemon, `test_util`, `cli`, and — for
+//! [`config_dir`] — `common`).
 //!
-//! The stable public surface that `test_util` and `cli` may depend on
-//! is, per platform:
+//! The stable public surface that the code above may depend on is, per
+//! platform:
 //!
-//! - every platform: `list_keyboards`, `start_mapping`
+//! - every platform: `list_keyboards`, `start_mapping`, `config_dir` (the
+//!   per-user configuration base directory, consumed by
+//!   `common::config_path`), and `keycode_to_hid_usage` (the native-keycode to
+//!   `HidUsage` translation used by the `keys probe` CLI command)
 //! - linux: additionally `hid_translate` (the canonical `HidUsage` and
 //!   evdev-keycode tables) and `VIRTUAL_KEYBOARD_NAME`
-//! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`,
-//!   `cg_keycode_to_hid_usage`
+//! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`
 //! - windows: additionally `Key`
 //!
 //! Layering rule: `test_util` and `cli` may depend only on this
@@ -35,17 +38,24 @@ mod windows;
 // Only the public API surface is re-exported.  Internal helpers (signal
 // handlers, static flags) stay private to the platform module.
 #[cfg(target_os = "linux")]
+pub use linux::config_dir;
+#[cfg(target_os = "linux")]
 pub use linux::hid_translate;
 #[cfg(target_os = "linux")]
-pub use linux::{VIRTUAL_KEYBOARD_NAME, list_keyboards, start_mapping};
+pub use linux::{
+    VIRTUAL_KEYBOARD_NAME, keycode_to_hid_usage, list_keyboards, start_mapping,
+};
+#[cfg(target_os = "macos")]
+pub use macos::config_dir;
 #[cfg(target_os = "macos")]
 pub use macos::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
     INJECTION_KEYBOARD_IDENTITY, IOHIDQueue, KarabinerClient,
-    cg_keycode_to_hid_usage, cg_keycode_to_hid_usage_full, for_each_hid_value,
-    list_keyboards, start_mapping,
+    for_each_hid_value, keycode_to_hid_usage, list_keyboards, start_mapping,
 };
 #[cfg(target_os = "windows")]
 pub use windows::CAPTURE_TAG;
 #[cfg(target_os = "windows")]
-pub use windows::{Key, list_keyboards, start_mapping};
+pub use windows::config_dir;
+#[cfg(target_os = "windows")]
+pub use windows::{Key, keycode_to_hid_usage, list_keyboards, start_mapping};

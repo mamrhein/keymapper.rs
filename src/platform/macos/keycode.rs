@@ -71,12 +71,12 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         49 => 0x2C,  // Space
         // Modifiers
         59 => 0xE0, // LeftControl
-        62 => 0xE1, // RightControl
-        56 => 0xE2, // LeftShift
-        60 => 0xE3, // RightShift
-        58 => 0xE4, // LeftAlt
-        61 => 0xE5, // RightAlt
-        55 => 0xE6, // LeftCommand
+        62 => 0xE4, // RightControl
+        56 => 0xE1, // LeftShift
+        60 => 0xE5, // RightShift
+        58 => 0xE2, // LeftAlt
+        61 => 0xE6, // RightAlt
+        55 => 0xE3, // LeftCommand
         54 => 0xE7, // RightCommand
         57 => 0x39, // CapsLock
         // Navigation
@@ -129,18 +129,19 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         87 => 0x5D, // Numpad5
         88 => 0x5E, // Numpad6
         89 => 0x5F, // Numpad7
-        91 => 0x60, // Numpad8
-        92 => 0x61, // Numpad9
+        90 => 0x60, // Numpad8
+        91 => 0x61, // Numpad9
         _ => return None,
     })
 }
 
-/// Convert a macOS CGKeyCode to a full `HidUsage`.
+/// Convert a macOS CGKeyCode to its canonical `HidUsage`.
 ///
-/// Convenience wrapper over [`cg_keycode_to_hid_usage`] that also resolves the
-/// usage id to a `HidUsage` on the keyboard page.  Returns `None` for codes
-/// with no keyboard-page HID equivalent.
-pub fn cg_keycode_to_hid_usage_full(code: u16) -> Option<HidUsage> {
+/// This is the stable, platform-agnostic entry point exposed through
+/// [`crate::platform`] for code above the platform layer (the `keys probe`
+/// CLI command).  It resolves the CGKeyCode to a keyboard-page `HidUsage`,
+/// returning `None` for codes with no keyboard-page HID equivalent.
+pub fn keycode_to_hid_usage(code: u16) -> Option<HidUsage> {
     cg_keycode_to_hid_usage(code).and_then(HidUsage::keyboard)
 }
 
@@ -163,7 +164,13 @@ mod tests {
         assert_eq!(cg_keycode_to_hid_usage(0), Some(0x04)); // A
         assert_eq!(cg_keycode_to_hid_usage(12), Some(0x14)); // Q
         assert_eq!(cg_keycode_to_hid_usage(59), Some(0xE0)); // LeftControl
-        assert_eq!(cg_keycode_to_hid_usage(55), Some(0xE6)); // LeftCommand
+        assert_eq!(cg_keycode_to_hid_usage(62), Some(0xE4)); // RightControl
+        assert_eq!(cg_keycode_to_hid_usage(56), Some(0xE1)); // LeftShift
+        assert_eq!(cg_keycode_to_hid_usage(60), Some(0xE5)); // RightShift
+        assert_eq!(cg_keycode_to_hid_usage(58), Some(0xE2)); // LeftAlt
+        assert_eq!(cg_keycode_to_hid_usage(61), Some(0xE6)); // RightAlt
+        assert_eq!(cg_keycode_to_hid_usage(55), Some(0xE3)); // LeftCommand
+        assert_eq!(cg_keycode_to_hid_usage(54), Some(0xE7)); // RightCommand
         assert_eq!(cg_keycode_to_hid_usage(57), Some(0x39)); // CapsLock
     }
 
@@ -190,8 +197,8 @@ mod tests {
         assert_eq!(cg_keycode_to_hid_usage(87), Some(0x5D)); // Numpad5
         assert_eq!(cg_keycode_to_hid_usage(88), Some(0x5E)); // Numpad6
         assert_eq!(cg_keycode_to_hid_usage(89), Some(0x5F)); // Numpad7
-        assert_eq!(cg_keycode_to_hid_usage(91), Some(0x60)); // Numpad8
-        assert_eq!(cg_keycode_to_hid_usage(92), Some(0x61)); // Numpad9
+        assert_eq!(cg_keycode_to_hid_usage(90), Some(0x60)); // Numpad8
+        assert_eq!(cg_keycode_to_hid_usage(91), Some(0x61)); // Numpad9
     }
 
     #[test]
@@ -226,16 +233,13 @@ mod tests {
     }
 
     #[test]
-    fn full_resolves_delete() {
-        assert_eq!(cg_keycode_to_hid_usage_full(117), Some(HidUsage::Delete));
+    fn keycode_to_hid_usage_resolves_delete() {
+        assert_eq!(keycode_to_hid_usage(117), Some(HidUsage::Delete));
     }
 
     #[test]
-    fn full_resolves_numpad() {
-        assert_eq!(
-            cg_keycode_to_hid_usage_full(76),
-            Some(HidUsage::NumpadEnter)
-        );
-        assert_eq!(cg_keycode_to_hid_usage_full(82), Some(HidUsage::Numpad0));
+    fn keycode_to_hid_usage_resolves_numpad() {
+        assert_eq!(keycode_to_hid_usage(76), Some(HidUsage::NumpadEnter));
+        assert_eq!(keycode_to_hid_usage(82), Some(HidUsage::Numpad0));
     }
 }

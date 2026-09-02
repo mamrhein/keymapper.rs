@@ -9,6 +9,7 @@
 
 //! Daemon runtime: mapping cache, state management, and config hot-reload.
 
+pub mod config_io;
 pub mod mapping_cache;
 pub mod state;
 pub mod test_hooks;

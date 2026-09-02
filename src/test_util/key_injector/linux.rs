@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn is_injectable_covers_all_usages() {
-        for usage in HidUsage::ALL {
+        for &usage in HidUsage::ALL {
             assert!(
                 is_injectable(usage),
                 "expected {usage} to be injectable on linux"

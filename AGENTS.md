@@ -39,7 +39,8 @@ where {YEAR} is to be replaced by the current year.
 ### Rust edition and formatting
 
 - Use Rust 2024 edition.
-- Format with `rustfmt +nightly`.
+- Rust formatting rule are stored in `../rustfmt.toml`.
+- Formatting with `rustfmt +nightly` is run automatically after each commit.
 
 ### Type system patterns
 

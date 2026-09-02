@@ -88,3 +88,37 @@ fn compile_from_path_utf8_content() {
 
     assert!(result.is_ok());
 }
+
+#[cfg(unix)]
+#[test]
+fn compile_from_path_rejects_symlink() {
+    let dir = env::temp_dir();
+    let target = dir.join("keymapperd_test_symlink_target.yaml");
+    let link = dir.join("keymapperd_test_symlink_link.yaml");
+    std::fs::write(&target, "groups: []").expect("failed to write target");
+    std::os::unix::fs::symlink(&target, &link)
+        .expect("failed to create symlink");
+
+    let result = RuntimeLookupCache::compile_from_path(&link);
+    std::fs::remove_file(&link).ok();
+    std::fs::remove_file(&target).ok();
+
+    assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn compile_from_path_rejects_world_writable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = env::temp_dir();
+    let path = dir.join("keymapperd_test_world_writable.yaml");
+    std::fs::write(&path, "groups: []").expect("failed to write temp config");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+        .expect("failed to chmod");
+
+    let result = RuntimeLookupCache::compile_from_path(&path);
+    std::fs::remove_file(&path).ok();
+
+    assert!(result.is_err());
+}

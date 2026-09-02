@@ -57,6 +57,18 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
         keyboard_device_id: Option<&str>,
     ) -> Option<&[NativeKey]>;
 
+    /// Best-effort lookup scoped to the currently active application.
+    ///
+    /// Resolves the active app name internally, so platform callers never
+    /// have to fetch and thread it themselves.  The remaining arguments
+    /// have the same meaning as in [`for_app`](Self::for_app).
+    fn for_active_app(
+        &self,
+        usage: HidUsage,
+        modifiers: u8,
+        keyboard_device_id: Option<&str>,
+    ) -> Option<&[NativeKey]>;
+
     /// Global (application-agnostic) lookup.
     ///
     /// `usage` is the HID identity of the pressed key.  `modifiers` is the
@@ -70,10 +82,6 @@ pub trait Lookup: Send + Sync + std::fmt::Debug {
         modifiers: u8,
         keyboard_device_id: Option<&str>,
     ) -> Option<&[NativeKey]>;
-
-    /// Name of the currently foreground application.  Queries the platform
-    /// synchronously and returns the result as an `Arc<str>`.
-    fn active_app(&self) -> Arc<str>;
 }
 
 /// Mutable operations on the runtime state.  Only the daemon internal code
@@ -88,7 +96,6 @@ pub trait MutableLookup: Lookup {
 
 /// Live runtime state shared between the config hot-reloader and the
 /// platform-specific event tap.
-#[derive(Debug)]
 pub struct RuntimeState {
     lookup_cache: RuntimeLookupCache,
     /// Maps platform device identifiers to full keyboard metadata.  Populated
@@ -98,12 +105,30 @@ pub struct RuntimeState {
     /// Short-TTL cache for the expensive active-app platform query, which is
     /// performed on every key event.
     active_app_cache: Mutex<CachedActiveApp>,
+    /// Injectable source for the active application name.  The daemon binary
+    /// wires this to [`super::test_hooks::active_app_name`], which honors the
+    /// e2e override and falls back to the platform query; tests can supply a
+    /// fixed value.  Kept as a closure so the state struct never references
+    /// test-specific code directly.
+    active_app_source: Box<dyn Fn() -> String + Send + Sync>,
+}
+
+impl std::fmt::Debug for RuntimeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeState")
+            .field("lookup_cache", &self.lookup_cache)
+            .field("keyboard_registry", &self.keyboard_registry)
+            .field("active_app_cache", &self.active_app_cache)
+            .field("active_app_source", &"<fn>")
+            .finish()
+    }
 }
 
 impl RuntimeState {
     pub fn new(
         cache: RuntimeLookupCache,
         keyboards: Vec<KeyboardInfo>,
+        active_app_source: Box<dyn Fn() -> String + Send + Sync>,
     ) -> Self {
         Self {
             lookup_cache: cache,
@@ -118,6 +143,7 @@ impl RuntimeState {
                 name: Arc::from("unknown"),
                 queried_at: Instant::now(),
             }),
+            active_app_source,
         }
     }
 
@@ -173,6 +199,17 @@ impl RuntimeState {
 
         filter.iter().any(|spec| spec.matches(kb_info))
     }
+
+    /// Name of the currently foreground application, served from a short-TTL
+    /// cache so per-event lookups stay cheap.
+    fn active_app(&self) -> Arc<str> {
+        let mut cache = self.active_app_cache.lock();
+        if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
+            cache.name = (self.active_app_source)().into();
+            cache.queried_at = Instant::now();
+        }
+        Arc::clone(&cache.name)
+    }
 }
 
 impl Lookup for RuntimeState {
@@ -224,13 +261,13 @@ impl Lookup for RuntimeState {
         )
     }
 
-    fn active_app(&self) -> Arc<str> {
-        let mut cache = self.active_app_cache.lock();
-        if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
-            cache.name = super::test_hooks::active_app_name().into();
-            cache.queried_at = Instant::now();
-        }
-        Arc::clone(&cache.name)
+    fn for_active_app(
+        &self,
+        usage: HidUsage,
+        modifiers: u8,
+        keyboard_device_id: Option<&str>,
+    ) -> Option<&[NativeKey]> {
+        self.for_app(&self.active_app(), usage, modifiers, keyboard_device_id)
     }
 }
 
@@ -290,7 +327,14 @@ mod tests {
     fn build_state(yaml: &str, keyboards: Vec<KeyboardInfo>) -> RuntimeState {
         let config = AppConfig::load_from_str(yaml).unwrap();
         let cache = RuntimeLookupCache::compile_from_config(&config);
-        RuntimeState::new(cache, keyboards)
+        // Fixed source: these unit tests exercise rule matching and keyboard
+        // filtering, never the active-app query, so a constant keeps them
+        // deterministic and free of platform round-trips.
+        RuntimeState::new(
+            cache,
+            keyboards,
+            Box::new(|| "test_app".to_string()),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -620,8 +664,8 @@ groups:
     // -----------------------------------------------------------------------
 
     /// A simple [`Lookup`] implementation backed by a [`RuntimeLookupCache`]
-    /// for in-process testing.  Returns the configured app name from
-    /// [`active_app`]() without querying the platform.
+    /// for in-process testing.  Resolves the active app to the configured
+    /// name without querying the platform.
     struct TestLookup {
         cache: RuntimeLookupCache,
         app_name: String,
@@ -674,8 +718,13 @@ groups:
             )
         }
 
-        fn active_app(&self) -> Arc<str> {
-            Arc::from(self.app_name.as_str())
+        fn for_active_app(
+            &self,
+            usage: HidUsage,
+            modifiers: u8,
+            kbd_device_id: Option<&str>,
+        ) -> Option<&[NativeKey]> {
+            self.for_app(&self.app_name, usage, modifiers, kbd_device_id)
         }
     }
 
@@ -711,7 +760,7 @@ groups:
 
             // Perform lookup.
             let active_outputs = lookup
-                .for_app(&lookup.active_app(), usage, lookup_modifiers, None)
+                .for_active_app(usage, lookup_modifiers, None)
                 .or_else(|| lookup.global(usage, lookup_modifiers, None))
                 .map(|v| v.to_vec());
 

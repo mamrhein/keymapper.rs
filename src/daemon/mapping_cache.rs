@@ -7,10 +7,12 @@
 // $Source$
 // $Revision$
 
-use std::{fs, path::Path};
+use std::path::Path;
 
 use indexmap::IndexMap;
+use thiserror::Error;
 
+use super::config_io::{ConfigReadError, read_config_content};
 use crate::common::{
     config::AppConfig, hid_usage::HidUsage, keyboard::KeyboardSpecifier,
 };
@@ -84,21 +86,35 @@ impl RuntimeLookupCache {
     }
 }
 
+/// Error returned when a [`RuntimeLookupCache`] cannot be compiled.
+#[derive(Debug, Error)]
+pub enum CompileError {
+    /// The config file could not be read safely.  Wraps the hardened-read
+    /// error: missing file, symlink, or a size/ownership/world-writable
+    /// violation.
+    #[error(transparent)]
+    Read(#[from] ConfigReadError),
+
+    /// The config content could not be parsed as an `AppConfig`.
+    #[error(transparent)]
+    Parse(#[from] serde_yaml::Error),
+}
+
 impl RuntimeLookupCache {
     /// Load a YAML config file, parse it, and compile the lookup cache
-    /// in one step.  Used by initialisation.
+    /// in one step.  Used by initialisation.  The file is read through the
+    /// same hardened path as hot-reload (see [`read_config_content`]), so a
+    /// symlink, oversized, or world-writable config is rejected here too.
     pub fn compile_from_path<P: AsRef<Path>>(
         path: P,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = fs::read_to_string(path)?;
+    ) -> Result<Self, CompileError> {
+        let content = read_config_content(path.as_ref())?;
         Self::compile_from_str(&content)
     }
 
     /// Compile a lookup cache from a YAML config string.  Used by hot-reload
     /// to accept content read from an already-open file handle.
-    pub fn compile_from_str(
-        content: &str,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn compile_from_str(content: &str) -> Result<Self, CompileError> {
         let parsed = AppConfig::load_from_str(content)?;
         Ok(Self::compile_from_config(&parsed))
     }
@@ -344,6 +360,27 @@ mod tests {
     fn compile_modifier_bits_non_modifier_ignored() {
         // Non-modifiers don't contribute a bit.
         assert_eq!(compile_modifier_bits(&[HidUsage::A]), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // compile error variants
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compile_from_path_missing_file_is_read_error() {
+        let err = RuntimeLookupCache::compile_from_path(
+            "/nonexistent/path/config.yaml",
+        )
+        .unwrap_err();
+        assert!(matches!(err, CompileError::Read(ConfigReadError::NotFound)));
+    }
+
+    #[test]
+    fn compile_from_str_invalid_config_is_parse_error() {
+        // A plain scalar is valid YAML but not a valid AppConfig.
+        let err =
+            RuntimeLookupCache::compile_from_str("just a string").unwrap_err();
+        assert!(matches!(err, CompileError::Parse(_)));
     }
 
     // -----------------------------------------------------------------------

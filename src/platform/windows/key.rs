@@ -9,9 +9,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::common::
-    hid_usage::{HidUsage, PAGE_CONSUMER, PAGE_KEYBOARD}
-;
+use crate::common::hid_usage::{HidUsage, PAGE_CONSUMER, PAGE_KEYBOARD};
 
 // ---------------------------------------------------------------------------
 // Platform-specific Key enum — discriminants ARE the VK_* codes
@@ -390,6 +388,15 @@ pub fn hid_to_vk(usage: HidUsage) -> Option<u16> {
         (PAGE_CONSUMER, 0xB7) => Some(0xB2), // VK_MEDIA_STOP
         _ => None,
     }
+}
+
+/// Convert a Windows virtual-key code to its canonical `HidUsage`.
+///
+/// This is the stable, platform-agnostic entry point exposed through
+/// [`crate::platform`] for code above the platform layer (the `keys probe`
+/// CLI command).  Returns `None` for codes that are not defined in [`Key`].
+pub fn keycode_to_hid_usage(vk_code: u16) -> Option<HidUsage> {
+    Key::from_native(vk_code).map(Key::to_hid_usage)
 }
 
 impl Key {

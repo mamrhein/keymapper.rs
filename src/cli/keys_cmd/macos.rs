@@ -19,7 +19,7 @@ use objc2_core_graphics::{
     CGEventTapOptions, CGEventTapPlacement, CGEventType, CGKeyCode,
 };
 
-use crate::{common::hid_usage::HidUsage, platform::cg_keycode_to_hid_usage};
+use crate::platform::keycode_to_hid_usage;
 
 /// Probe for key presses using a CGEventTap.
 pub fn probe() {
@@ -145,11 +145,9 @@ fn is_modifier_keycode(code: u16) -> bool {
 /// Uses HID usage codes as the primary display format.  Falls back to
 /// raw CGKeyCode for unrecognized keys.
 fn cg_keycode_to_description(code: u16) -> (String, String) {
-    // Try to convert CGKeyCode to a HID usage id.
-    if let Some(usage_id) = cg_keycode_to_hid_usage(code)
-        && let Some(hu) = HidUsage::keyboard(usage_id)
-    {
-        return (hu.as_str().to_string(), format!("0x{usage_id:02X}"));
+    // Try to convert CGKeyCode to a HID usage.
+    if let Some(hu) = keycode_to_hid_usage(code) {
+        return (hu.as_str().to_string(), format!("0x{:02X}", hu.id()));
     }
 
     (format!("Unknown({code})"), format!("{code}"))

@@ -63,6 +63,7 @@ impl ModifierRole {
     }
 
     /// Returns the HID modifier usage id (keyboard page) for this role.
+    #[allow(dead_code)] // currently only used by linux-specific code
     pub(crate) const fn hid_id(self) -> u16 {
         0xE0 + self as u16
     }

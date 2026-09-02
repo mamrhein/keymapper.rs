@@ -61,7 +61,7 @@ fi
 # explicitly so the e2e tests run even when the caller's environment was
 # sanitized by an outer `sudo` (which strips CI by default).
 if [ "$(uname -s)" = "Darwin" ]; then
-    sudo -E PATH="$PATH" env CI=1 $(which cargo) nextest run --no-capture --test e2e_tests "$@"
+    sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests "$@"
 else
-    CI=1 cargo nextest run --no-capture --test e2e_tests "$@"
+    cargo nextest run --no-capture --test e2e_tests "$@"
 fi

@@ -7,12 +7,14 @@
 // $Source$
 // $Revision$
 
+mod config_dir;
 mod iokit_hid;
 mod karabiner_client;
 mod keyboard;
 mod keycode;
 mod mapping;
 
+pub use config_dir::config_dir;
 pub use iokit_hid::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
     IOHIDQueue, for_each_hid_value,
@@ -22,5 +24,5 @@ pub use karabiner_client::{
     OUTPUT_KEYBOARD_IDENTITY,
 };
 pub use keyboard::list_keyboards;
-pub use keycode::{cg_keycode_to_hid_usage, cg_keycode_to_hid_usage_full};
+pub use keycode::keycode_to_hid_usage;
 pub use mapping::start_mapping;
