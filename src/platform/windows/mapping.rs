@@ -448,6 +448,107 @@ pub(super) fn emit_forwarded_key(vk: u16, is_key_up: bool) {
     }
 }
 
+/// Tracks forwarded-modifier state for capture-mode emission.
+///
+/// In capture mode the daemon re-emits every pass-through key through the
+/// virtual keyboard, so a forwarded modifier key is held on that keyboard
+/// until its physical release is forwarded.  When a trigger fires while such
+/// a modifier is held, the modifier must be released first, or the emitted
+/// output becomes an unintended chord (e.g. the rule
+/// `Ctrl+Semicolon -> C` would emit `Ctrl+C`, i.e. SIGINT).  Consumed
+/// modifiers are marked so their physical release is swallowed rather than
+/// forwarded a second time.  Mirrors the `consumed_modifiers` bookkeeping
+/// of the Linux and macOS backends.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct CaptureModifierState {
+    /// Bitmask of modifier keys that were forwarded (pass-through) and are
+    /// still held on the virtual keyboard.
+    forwarded: u8,
+    /// Bitmask of modifier keys that were part of a fired trigger and have
+    /// already been released on the virtual keyboard.  Their physical
+    /// release is swallowed so it is not forwarded a second time.
+    consumed: u8,
+}
+
+impl CaptureModifierState {
+    /// Record a forwarded (pass-through) modifier press.
+    ///
+    /// A fresh press clears any consumed mark: the early release belongs to
+    /// the previous press, so the release of this one must forward.
+    fn record_forwarded_down(&mut self, bit: u8) {
+        let mask = 1 << bit;
+        self.forwarded |= mask;
+        self.consumed &= !mask;
+    }
+
+    /// Record the physical release of a forwarded modifier.
+    ///
+    /// Returns `true` when the release must be swallowed because the
+    /// modifier was already released on the virtual keyboard when a trigger
+    /// fired, and `false` when it should be forwarded.
+    fn record_forwarded_up(&mut self, bit: u8) -> bool {
+        let mask = 1 << bit;
+        if self.consumed & mask != 0 {
+            self.consumed &= !mask;
+            true
+        } else {
+            self.forwarded &= !mask;
+            false
+        }
+    }
+
+    /// Consume the modifiers of a fired trigger: the subset that was
+    /// forwarded is moved from the forwarded mask to the consumed mask and
+    /// returned, so the caller can release it on the virtual keyboard.
+    fn consume_triggered(&mut self, modifiers: u8) -> u8 {
+        let consumed = modifiers & self.forwarded;
+        self.forwarded &= !consumed;
+        self.consumed |= consumed;
+        consumed
+    }
+}
+
+/// Process-global forwarded-modifier state, mutated only by the worker
+/// thread (the sole emitter in capture mode).
+static CAPTURE_MODIFIER_STATE: parking_lot::Mutex<CaptureModifierState> =
+    parking_lot::Mutex::new(CaptureModifierState {
+        forwarded: 0,
+        consumed: 0,
+    });
+
+/// Record a forwarded (pass-through) modifier press in capture mode.
+pub(super) fn capture_record_forwarded_down(bit: u8) {
+    CAPTURE_MODIFIER_STATE.lock().record_forwarded_down(bit);
+}
+
+/// Record the physical release of a forwarded modifier in capture mode.
+///
+/// Returns `true` when the release must be swallowed because the modifier
+/// was already released on the virtual keyboard when a trigger fired.
+pub(super) fn capture_record_forwarded_up(bit: u8) -> bool {
+    CAPTURE_MODIFIER_STATE.lock().record_forwarded_up(bit)
+}
+
+/// Release the fired trigger's forwarded modifiers on the virtual keyboard
+/// (tagged releases), so the output is emitted as a clean tap, and mark
+/// them consumed so their physical releases are swallowed.
+pub(super) fn capture_release_triggered_modifiers(modifiers: u8) {
+    let consumed = CAPTURE_MODIFIER_STATE.lock().consume_triggered(modifiers);
+    if consumed == 0 {
+        return;
+    }
+
+    // Release in ascending bit order, mirroring the output tap's modifier
+    // order.
+    for bit in 0..8 {
+        if consumed & (1 << bit) != 0
+            && let Some(vk) = modifier_bit_to_vk(bit)
+        {
+            simulate_key_event_tagged(vk, true);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Low-level keyboard hook procedure
 // ---------------------------------------------------------------------------
@@ -757,5 +858,74 @@ mod tests {
         let was_none = get_hook_tx().is_none();
         // We don't assert because other tests may have populated it.
         let _ = was_none;
+    }
+
+    #[test]
+    fn capture_state_forwarded_down_up_round_trip() {
+        // A forwarded (pass-through) modifier press is tracked, and its
+        // physical release is forwarded (not swallowed).
+        let mut state = CaptureModifierState::default();
+        state.record_forwarded_down(0);
+        assert_eq!(state.forwarded, 0b0000_0001);
+        assert!(!state.record_forwarded_up(0));
+        assert_eq!(state.forwarded, 0);
+        assert_eq!(state.consumed, 0);
+    }
+
+    #[test]
+    fn capture_state_consume_releases_and_swallows_releases() {
+        // A trigger firing while both modifiers are held consumes them;
+        // their physical releases are then swallowed.
+        let mut state = CaptureModifierState::default();
+        state.record_forwarded_down(0);
+        state.record_forwarded_down(1);
+
+        let consumed = state.consume_triggered(0b0000_0011);
+        assert_eq!(consumed, 0b0000_0011);
+        assert_eq!(state.forwarded, 0);
+        assert_eq!(state.consumed, 0b0000_0011);
+
+        assert!(state.record_forwarded_up(0));
+        assert!(state.record_forwarded_up(1));
+        assert_eq!(state.consumed, 0);
+    }
+
+    #[test]
+    fn capture_state_consume_partial_subset() {
+        // Only the modifiers that were actually forwarded are consumed;
+        // the others are untouched and their releases still forward.
+        let mut state = CaptureModifierState::default();
+        state.record_forwarded_down(2);
+
+        let consumed = state.consume_triggered(0b0000_1100);
+        assert_eq!(consumed, 0b0000_0100);
+        assert_eq!(state.forwarded, 0);
+        assert_eq!(state.consumed, 0b0000_0100);
+
+        assert!(state.record_forwarded_up(2)); // consumed: swallow
+        assert!(!state.record_forwarded_up(3)); // never forwarded: forward
+    }
+
+    #[test]
+    fn capture_state_consume_without_forwarded_modifiers() {
+        // A trigger firing with no forwarded modifiers consumes nothing.
+        let mut state = CaptureModifierState::default();
+        assert_eq!(state.consume_triggered(0b0000_0011), 0);
+        assert_eq!(state.forwarded, 0);
+        assert_eq!(state.consumed, 0);
+    }
+
+    #[test]
+    fn capture_state_late_release_after_consume_is_forwarded() {
+        // A modifier pressed again after being consumed (e.g. a fresh
+        // physical press) is tracked as forwarded once more, so its
+        // release forwards instead of being swallowed.
+        let mut state = CaptureModifierState::default();
+        state.record_forwarded_down(0);
+        assert_eq!(state.consume_triggered(0b0000_0001), 0b0000_0001);
+        state.record_forwarded_down(0);
+        assert!(!state.record_forwarded_up(0));
+        assert_eq!(state.forwarded, 0);
+        assert_eq!(state.consumed, 0);
     }
 }
