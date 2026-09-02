@@ -961,7 +961,13 @@ fn daemon_alive(config_dir: &Path) -> bool {
     else {
         return false;
     };
-    let Ok(pid) = pid_str.trim().parse::<u32>() else {
+    // The PID file is two lines (the PID, then the stop-verification token),
+    // so only the first line is parsed.
+    let Some(pid) = pid_str
+        .lines()
+        .next()
+        .and_then(|line| line.trim().parse::<u32>().ok())
+    else {
         return false;
     };
     // Safety: signal 0 is a pure liveness probe; no signal is delivered.
