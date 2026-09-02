@@ -68,6 +68,14 @@ jobs:
           # Running tests as root grants the required write access.
           sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
 
+      - name: Run CLI integration tests (e2e)
+        # The `keymapper_tests` that locate their config via the CWD are only
+        # compiled in with the `e2e` feature, so build the CLI binary with e2e
+        # and run them here.  They need no root access or input device.
+        run: |
+          cargo build --features e2e --bin keymapper
+          cargo nextest run --features e2e --test keymapper_tests
+
   # -----------------------------------------------------------------------
   # macOS — e2e sandbox tests (root bypasses TCC Accessibility)
   # -----------------------------------------------------------------------
@@ -88,6 +96,14 @@ jobs:
         # Accessibility permission.  Ad-hoc signing (codesign --sign -) is
         # sufficient; no certificate is needed.
         run: bash scripts/sign-and-test-e2e.sh
+
+      - name: Run CLI integration tests (e2e)
+        # The `keymapper_tests` that locate their config via the CWD are only
+        # compiled in with the `e2e` feature, so build the CLI binary with e2e
+        # and run them here.  They need no root access or input device.
+        run: |
+          cargo build --features e2e --bin keymapper
+          cargo nextest run --features e2e --test keymapper_tests
 
   # -----------------------------------------------------------------------
   # Windows — e2e sandbox tests (no elevation required)
@@ -113,3 +129,11 @@ jobs:
         # SendInput and WH_KEYBOARD_LL work at session level; no elevation
         # is required.
         run: cargo nextest run --no-capture --test e2e_tests
+
+      - name: Run CLI integration tests (e2e)
+        # The `keymapper_tests` that locate their config via the CWD are only
+        # compiled in with the `e2e` feature, so build the CLI binary with e2e
+        # and run them here.  They need no root access or input device.
+        run: |
+          cargo build --features e2e --bin keymapper
+          cargo nextest run --features e2e --test keymapper_tests
