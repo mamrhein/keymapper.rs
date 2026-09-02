@@ -49,11 +49,13 @@ signal-hook = "0.4"
 
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
+cosmic-protocols = { version = "0.2", default-features = false, features = ["client"] } # COSMIC active-window query
 evdev = "0.13"
 nix = { version = "0.31.3", features = ["event"] }
 sysinfo = "0.39" # process enumeration for `keymapper appnames`
 udev = "0.9"
 wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] } # ext-foreign-toplevel-list protocol
 x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
 zbus = { version = "5", features = ["blocking"] }
 

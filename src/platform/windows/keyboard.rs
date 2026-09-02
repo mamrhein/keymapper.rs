@@ -237,7 +237,9 @@ fn get_device_property(
     if success.is_ok() {
         // Convert the bytes to u16 for the wstring helper.
         let buf_u16: Vec<u16> = buf
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
             .collect();
         Some(wstring(&buf_u16))
@@ -536,7 +538,9 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
         // Convert the remaining bytes to u16 (wide chars).
         let path_bytes = &detail_buf[DEVICE_PATH_OFFSET..];
         let interface_path: Vec<u16> = path_bytes
-            .as_chunks::<2>().0.iter()
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| u16::from_ne_bytes([chunk[0], chunk[1]]))
             .collect();
         let interface_path_str = wstring(&interface_path);
