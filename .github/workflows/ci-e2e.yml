@@ -71,7 +71,7 @@ jobs:
       - name: Run CLI integration tests (e2e)
         # The `keymapper_tests` that locate their config via the CWD are only
         # compiled in with the `e2e` feature, so build the CLI binary with e2e
-        # and run them here.  They need no input device, but they do need to be
+        # and run them here. They need no input device, but they do need to be
         # run as root to acces the lock file created by the previous test.
         run: |
           cargo build --features e2e --bin keymapper
@@ -92,16 +92,14 @@ jobs:
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
-      - name: Run e2e tests
-        # Build, ad-hoc sign the test binary, and run as root to bypass TCC
-        # Accessibility permission.  Ad-hoc signing (codesign --sign -) is
-        # sufficient; no certificate is needed.
-        run: bash scripts/sign-and-test-e2e.sh
+      # The Karabiner Driver Kit extension requires a one-time user approval
+      # that a headless runner cannot give. So, the e2e tests cannot run in
+      # this workflow.
 
-      - name: Run CLI integration tests (e2e)
+      - name: Run CLI integration tests
         # The `keymapper_tests` that locate their config via the CWD are only
         # compiled in with the `e2e` feature, so build the CLI binary with e2e
-        # and run them here.  They need no root access or input device.
+        # and run them here. They need no input device and no root acces.
         run: |
           cargo build --features e2e --bin keymapper
           cargo nextest run --features e2e --test keymapper_tests
