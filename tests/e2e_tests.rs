@@ -1231,11 +1231,20 @@ fn run_e2e(configs: &[&str], label: &str) {
     eprintln!("{label} PASSED");
 }
 
+/// Run the e2e test with no user config: an empty config is written so the
+/// daemon starts with no rules, and only passthrough keys are exercised.
+#[test]
+#[cfg(feature = "e2e")]
+fn e2e_no_config() {
+    run_e2e(&[], "e2e_no_config");
+}
+
 /// Run the full e2e test against the comprehensive config fixture.
 ///
 /// Parses the config to derive injection and expected sequences, then
 /// validates that the daemon remaps keys correctly.
 #[test]
+#[cfg(feature = "e2e")]
 fn e2e_comprehensive_config() {
     run_e2e(&[CONFIG_COMPREHENSIVE], "e2e_comprehensive_config");
 }
@@ -1245,16 +1254,10 @@ fn e2e_comprehensive_config() {
 /// Starts with `config_comprehensive.yaml`, then hot-reloads to
 /// `config_reloaded.yaml` and validates the new mappings.
 #[test]
+#[cfg(feature = "e2e")]
 fn e2e_config_hot_reload() {
     run_e2e(
         &[CONFIG_COMPREHENSIVE, CONFIG_RELOADED],
         "e2e_config_hot_reload",
     );
-}
-
-/// Run the e2e test with no user config: an empty config is written so the
-/// daemon starts with no rules, and only passthrough keys are exercised.
-#[test]
-fn e2e_no_config() {
-    run_e2e(&[], "e2e_no_config");
 }
