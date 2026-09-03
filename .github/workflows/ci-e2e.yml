@@ -71,10 +71,11 @@ jobs:
       - name: Run CLI integration tests (e2e)
         # The `keymapper_tests` that locate their config via the CWD are only
         # compiled in with the `e2e` feature, so build the CLI binary with e2e
-        # and run them here.  They need no root access or input device.
+        # and run them here.  They need no input device, but they do need to be
+        # run as root to acces the lock file created by the previous test.
         run: |
           cargo build --features e2e --bin keymapper
-          cargo nextest run --features e2e --test keymapper_tests
+          sudo -E PATH="$PATH" $(which cargo) nextest run --features e2e --test keymapper_tests
 
   # -----------------------------------------------------------------------
   # macOS — e2e sandbox tests (root bypasses TCC Accessibility)
