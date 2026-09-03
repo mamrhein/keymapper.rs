@@ -11,9 +11,9 @@
 name: ci-e2e
 
 on:
-#  push:
-#    branches:
-#      - main
+  #  push:
+  #    branches:
+  #      - main
   pull_request:
     branches:
       - main
@@ -55,7 +55,7 @@ jobs:
         # (readiness file, active-app override, capture mode) are compiled in.
         run: |
           cargo build --features e2e --bin keymapperd
-          cargo nextest run --test e2e_tests --no-run
+          cargo nextest run --features e2e --test e2e_tests --no-run
 
       - name: Run e2e tests as root (for /dev/uinput access)
         # Running as root is required because the sandbox needs write access
@@ -66,7 +66,7 @@ jobs:
           sudo modprobe uinput || true
           # The ubuntu-latest runner has /dev/uinput with root:root 0660.
           # Running tests as root grants the required write access.
-          sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
+          sudo -E PATH="$PATH" $(which cargo) nextest run --features e2e --no-capture --test e2e_tests
 
       - name: Run CLI integration tests (e2e)
         # The `keymapper_tests` that locate their config via the CWD are only
@@ -123,12 +123,12 @@ jobs:
       - name: Build daemon and e2e test binary
         run: |
           cargo build --features e2e --bin keymapperd
-          cargo nextest run --test e2e_tests --no-run
+          cargo nextest run --features e2e --test e2e_tests --no-run
 
       - name: Run e2e tests
         # SendInput and WH_KEYBOARD_LL work at session level; no elevation
         # is required.
-        run: cargo nextest run --no-capture --test e2e_tests
+        run: cargo nextest run --features e2e --no-capture --test e2e_tests
 
       - name: Run CLI integration tests (e2e)
         # The `keymapper_tests` that locate their config via the CWD are only
