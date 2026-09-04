@@ -15,9 +15,9 @@ This is the final architecture for Windows: there is no virtual HID driver, and 
 
 1. **Hook thread** — installs the `WH_KEYBOARD_LL` hook (session-global) and runs the `GetMessageW` message loop. For each key event it sends a `HookEvent` to the worker thread and waits for the decision on a one-shot reply channel, polling with 1 ms sleeps. If no decision arrives within about 50 ms, the event is passed through — the input chain must never be blocked.
 2. **Raw input thread** — owns a message-only window registered for raw input (`RIDEV_INPUTSINK`) on both keyboard and consumer control devices, so events arrive even when the daemon is not in the foreground. It pumps `WM_INPUT` messages and forwards decoded events to the worker.
-3. **Worker thread** — listens on both channels with `crossbeam_channel::select!`. It matches hook events against recent raw input events to identify the source keyboard, performs the mapping lookup, and replies with `swallow` (carrying the resolved outputs) or `pass through`.
+3. **Worker thread** — listens on both channels with `crossbeam_channel::select!`. It matches hook events against recent raw input events to identify the source keyboard, performs the mapping lookup, emits the resolved outputs, and replies with `swallow` (carrying the resolved outputs) or `pass through`.
 
-The hook procedure itself performs no mapping: the worker decides with device identification, and the hook thread only applies the decision. This avoids a mismatch where the hook would look up without device context.
+The hook procedure itself performs no mapping or emission: the worker decides with device identification and performs the `SendInput`, and the hook thread only applies the decision (swallow or pass through). This avoids a mismatch where the hook would look up without device context, and keeps the `SendInput` off the hook thread — a `SendInput` issued from within a low-level hook callback does not reach the target application.
 
 ### Device identification (raw input)
 
@@ -45,7 +45,7 @@ The hook thread maintains the pressed-modifier state from its own event stream r
 
 ### Emission and self-exclusion
 
-A mapped output is emitted as a complete tap via `SendInput`: modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
+A mapped output is emitted as a complete tap via `SendInput`, always on the worker thread (never inside the hook callback, where a `SendInput` would not reach the target): modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
 
 Because the low-level hook is session-global, the daemon's own `SendInput` events reach it. A static set of `(vk_code, is_key_down)` pairs tracks the daemon's active injections; the hook procedure skips and clears them so its own output is never processed as new input.
 
@@ -65,7 +65,7 @@ These are accepted trade-offs of the final architecture:
 
 ## Capture mode (e2e)
 
-For end-to-end testing, an `e2e` build can be started with the `KEYMAPPER_CAPTURE` environment variable set. In capture mode the daemon swallows every key and re-emits it through `SendInput` tagged with a magic value in `dwExtraInfo`, so the e2e monitor's own `WH_KEYBOARD_LL` hook can capture exactly the daemon's output without depending on a focused window. All emission happens on the worker thread — a `SendInput` issued from within a low-level hook callback does not reach other hooks. Capture mode is compiled out of production builds, so the environment variable has no effect there.
+For end-to-end testing, an `e2e` build can be started with the `KEYMAPPER_CAPTURE` environment variable set. In capture mode the daemon swallows every key and re-emits it through `SendInput` tagged with a magic value in `dwExtraInfo`, so the e2e monitor's own `WH_KEYBOARD_LL` hook can capture exactly the daemon's output without depending on a focused window. As in normal mode, all emission happens on the worker thread — a `SendInput` issued from within a low-level hook callback does not reach other hooks. Capture mode is compiled out of production builds, so the environment variable has no effect there.
 
 ## Source files
 

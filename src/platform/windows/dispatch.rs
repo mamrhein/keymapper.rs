@@ -55,24 +55,31 @@ use crate::{
     },
 };
 
+// The capture flag gates the normal-mode emission block below, which is
+// compiled into every non-test build (production and e2e alike) and only
+// references the flag in non-test and e2e builds.
+#[cfg(any(feature = "e2e", not(test)))]
+use crate::platform::windows::mapping::capture_enabled;
+
 // Capture-mode emission helpers.  Only compiled in with the `e2e` feature;
 // in production builds the worker never performs capture-mode emission.
 #[cfg(feature = "e2e")]
 use crate::platform::windows::mapping::{
-    capture_enabled, capture_record_forwarded_down,
-    capture_record_forwarded_up, capture_release_triggered_modifiers,
-    emit_forwarded_key,
+    capture_record_forwarded_down, capture_record_forwarded_up,
+    capture_release_triggered_modifiers, emit_forwarded_key,
 };
 
 /// Result of a mapping lookup sent from the worker back to the hook thread.
 ///
-/// The \`Swallow\` variant carries the resolved output events so that the hook
-/// proc can emit them directly without performing its own lookup.  This avoids
-/// a mismatch: the worker decides with device identification, but the hook
-/// proc would lookup without it.
+/// The \`Swallow\` variant carries the resolved output events.  The worker
+/// emits them on its own thread — a \`SendInput\` issued from within the
+/// low-level hook callback would not reach the target application — and the
+/// hook proc only swallows the original key.  Keeping the emission in the
+/// worker also keeps it the sole lookup site, so it can decide with device
+/// identification while the hook proc would not.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
-    /// Swallow the event and emit the given output keys.
+    /// Swallow the event; the worker emits the given output keys.
     Swallow(Vec<crate::daemon::mapping_cache::NativeKey>),
     /// Pass the event through to the next hook / default handler.
     PassThrough,
@@ -433,6 +440,24 @@ fn process_hook_event(
                     emit_forwarded_key(event.vk_code.0, event.is_key_up);
                 }
             }
+        }
+    }
+
+    // Normal (non-capture) mode: the worker emits the mapped key-downs on
+    // this non-hook thread.  A `SendInput` issued from within the low-level
+    // hook callback does not reach the target application, so the emission
+    // must happen here rather than in the hook proc.  Only mapped key-downs
+    // are emitted — a key-up carries no outputs, and unmapped keys pass
+    // straight through the OS.  Emission completes before the reply is sent,
+    // so the hook proc only returns once the output has gone out.  The block
+    // is compiled out of unit tests so they never drive a real `SendInput`.
+    #[cfg(not(test))]
+    if !capture_enabled()
+        && !event.is_key_up
+        && let Decision::Swallow(outputs) = &decision
+    {
+        for native_key in outputs {
+            emit_mapped_output(native_key);
         }
     }
 

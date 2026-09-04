@@ -360,7 +360,10 @@ static CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Whether capture mode is active (all emission tagged through the virtual
 /// keyboard).  Capture mode only exists in `e2e` builds; in production it is
-/// always disabled, so the flag is a compile-time `false` there.
+/// always disabled, so the flag is a compile-time `false` there.  Only
+/// compiled in where it is referenced: the worker's normal-mode emission
+/// block (every non-test build) and the capture-mode paths (e2e builds).
+#[cfg(any(feature = "e2e", not(test)))]
 pub(super) fn capture_enabled() -> bool {
     #[cfg(feature = "e2e")]
     { CAPTURE_MODE.load(Ordering::Relaxed) }
@@ -719,17 +722,13 @@ extern "system" fn low_level_keyboard_proc(
     REPLY_COUNTER.store(0, Ordering::Relaxed);
 
     match decision {
-        Decision::Swallow(outputs) => {
-            // In capture mode the worker already re-emitted the mapped
-            // outputs through the virtual keyboard, so the hook proc must
-            // not emit them again.  In normal mode emission happens here,
-            // where the hook context still reaches the focused window.
-            if !capture_enabled() {
-                for native_key in &outputs {
-                    emit_key_event(native_key);
-                }
-            }
-            // Swallow in both modes: the daemon fully owns the output.
+        Decision::Swallow(_) => {
+            // The worker already emitted the mapped outputs on its own
+            // thread (normal mode: a plain `SendInput`; capture mode: tagged
+            // through the virtual keyboard).  A `SendInput` issued from
+            // within this low-level hook callback would not reach the target
+            // application, so the hook proc never emits — it only swallows
+            // the original key, which the daemon fully owns in both modes.
             return LRESULT(1);
         }
         Decision::PassThrough => {
