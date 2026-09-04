@@ -58,7 +58,7 @@ brew services start keymapper
 cargo build --release
 
 # Install the LaunchDaemon and the Karabiner DriverKit driver
-sudo scripts/install-macos.sh target/debug/keymapperd
+sudo scripts/install-macos.sh target/release/keymapperd
 ```
 
 The install script registers the keymapperd LaunchDaemon, then installs the pinned Karabiner DriverKit package (downloading it from the pqrs GitHub releases if no local copy is available), activates the DriverKit extension, and registers the Karabiner daemon LaunchDaemon.

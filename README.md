@@ -2,25 +2,20 @@
 
 Cross-platform key-remapping daemon and CLI utility for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, hot-reload, and macros.
 
-The project ships three binaries:
+The project ships two binaries:
 
 - **`keymapperd`** — the background daemon that intercepts keyboard events and applies remapping rules.
 - **`keymapper`** — a CLI utility for managing configuration, inspecting keys, and controlling the daemon.
-- **`keymapper_monitor`** — a keyboard event monitor used by the end-to-end tests to capture the daemon's output (a test tool, not meant for daily use).
 
 ## Installation
 
-Requires Rust 1.88+ (edition 2024).
+Building from source requires Rust 1.95+ (edition 2024).
 
-```bash
-cargo install --path .
-```
+### macOS
 
-Alternatively, download a pre-built DMG from the [releases page](https://github.com/mamrhein/keymapper.rs/releases), mount it, and run `install.sh`.
+The daemon must run as root (required for IOKit device seizure), and remapped keys are emitted through the Karabiner DriverKit VirtualHIDDevice driver.
 
-Run `keymapperd` as root on macOS (required for IOKit device seizure), or with appropriate privileges for keyboard interception on other platforms (`/dev/input` access on Linux).
-
-### macOS — Homebrew
+**Homebrew:**
 
 ```bash
 brew install keymapper
@@ -28,11 +23,53 @@ brew install keymapper
 
 This builds the Rust binaries from source and installs the Karabiner DriverKit VirtualHIDDevice driver (via a cask dependency). The driver setup requires sudo.
 
-The driver must be enabled in System Settings > General > Login Items & Extensions > Driver Extensions on first run. No reboot is required. See [macos-driver.md](docs/macos-driver.md) for details.
+The driver must be enabled in System Settings > General > Login Items & Extensions > Driver Extensions on first run. No reboot is required. See [macos-architecture.md](docs/macos-architecture.md) for details.
+
+Start the service:
+
+```bash
+brew services start keymapper
+```
+
+**Pre-built DMG:**
+
+Download a pre-built DMG from the [releases page](https://github.com/mamrhein/keymapper.rs/releases), mount it, and run:
+
+```bash
+sudo ./install.sh
+```
+
+This installs the binaries to `/usr/local/bin`, registers the LaunchDaemon, and installs the Karabiner DriverKit driver.
+
+**From source:**
+
+```bash
+cargo install --path .
+sudo scripts/install-macos.sh /usr/local/bin/keymapperd
+```
+
+The script registers the LaunchDaemon and installs the Karabiner DriverKit driver.
+
+### Linux
+
+```bash
+cargo install --path .
+scripts/install-linux.sh
+```
+
+The script installs the systemd user service, enables it at login, and starts keymapperd. The daemon needs access to `/dev/input`; if it reports "no keyboard device found", see [Troubleshooting](#troubleshooting).
+
+### Windows
+
+```bash
+cargo install --path .
+```
+
+Run `keymapperd` directly; there is no service-manager integration on Windows. Input capture uses a low-level keyboard hook, and event emission uses `SendInput` (see [windows-architecture.md](docs/windows-architecture.md)).
 
 ## Quick start
 
-````bash
+```bash
 # Create an empty configuration file
 keymapper config create
 
@@ -44,20 +81,7 @@ keymapper config add CapsLock LeftControl
 
 # Validate your configuration
 keymapper config check
-
-Run `keymapperd` as root. On macOS, install the LaunchDaemon:
-
-```bash
-sudo scripts/install-macos.sh /usr/local/bin/keymapperd
-````
-
-Or, if installed via Homebrew, start the service:
-
-```bash
-brew services start keymapper
 ```
-
-````
 
 ## Configuration
 
@@ -69,7 +93,7 @@ Create `config.yaml` in one of the following locations:
 | macOS    | `~/Library/Application Support/keymapperd/config.yaml`                          |
 | Windows  | `%APPDATA%\keymapperd\config.yaml`                                              |
 
-Search order is CWD first, then the platform-specific application config directory. Symbolic links are rejected; `config.yaml` must be a regular file.
+The daemon searches the platform-specific application config directory. Symbolic links are rejected; `config.yaml` must be a regular file.
 
 The daemon exits with an error if no configuration file is found in any search location.
 
@@ -109,13 +133,30 @@ The daemon exits with an error if no configuration file is found in any search l
 
 The document is a YAML sequence of rule groups. Each group has:
 
-| Field      | Required | Description                                                                        |
-| ---------- | -------- | ---------------------------------------------------------------------------------- |
-| `name`     | No       | Human-readable label (ignored at runtime)                                          |
-| `apps`     | No       | List of application names to scope the group. Omit or leave empty for global rules |
-| `mappings` | Yes      | Key-value pairs mapping triggers to outputs                                        |
+| Field       | Required | Description                                                                        |
+| ----------- | -------- | ---------------------------------------------------------------------------------- |
+| `name`      | No       | Human-readable label (ignored at runtime)                                          |
+| `apps`      | No       | List of application names to scope the group. Omit or leave empty for global rules |
+| `keyboards` | No       | List of keyboard filters to scope the group. Omit or leave empty for all keyboards |
+| `mappings`  | Yes      | Key-value pairs mapping triggers to outputs                                        |
 
 Groups are evaluated in definition order. Within each group, mappings are evaluated top-to-bottom; the first matching trigger wins.
+
+### Keyboard filters
+
+Groups can be scoped to specific keyboards with the `keyboards` field. Each filter is a mapping of one or more of `name`, `vendor`, `model`, and `port`; a keyboard matches when all provided fields match (case-insensitive), and multiple filters form an OR set. Omit `keyboards` or leave it empty to apply to all keyboards.
+
+```yaml
+# Only apply this group when the event comes from an Apple Magic Keyboard
+- name: "magic keyboard only"
+  keyboards:
+    - name: Magic Keyboard
+      vendor: Apple
+  mappings:
+    CapsLock: LeftControl
+```
+
+A document-level `keyboards` filter (in the mapping form, alongside `groups`) restricts which keyboards are processed at all. Use `keymapper keyboards` to list the available values.
 
 ### Mappings
 
@@ -152,7 +193,9 @@ All key names are case-sensitive and use TitleCase. Use `keymapper keys list` to
 - **Letters:** `A` through `Z`
 - **Numbers:** `0` through `9` (also `Number0` through `Number9`)
 - **Numpad:** `Numpad0`–`Numpad9`, `NumpadDecimal`, `NumpadMultiply`, `NumpadPlus`, `NumpadClear`, `NumpadDivide`, `NumpadEnter`, `NumpadMinus`, `NumpadEqual`
-- **Symbols:** `Minus`, `Equal`, `BracketLeft`, `BracketRight`, `Backslash`, `Semicolon`, `Quote`, `Comma`, `Period`, `Slash`, `Grave`, `IsoExtra`
+- **Symbols:** `Minus`, `Equal`, `BracketLeft`, `BracketRight`, `Backslash`, `Semicolon`, `Quote`, `Comma`, `Period`, `Slash`, `Grave`, `IsoExtra`, `IsoHash`
+- **Media:** `PlayPause`, `VolumeUp`, `VolumeDown`, `Mute`, `NextTrack`, `PreviousTrack`, `Stop`
+- **Display:** `BrightnessUp`, `BrightnessDown`
 
 ### Common aliases
 
@@ -174,6 +217,10 @@ The following aliases resolve to the same platform key:
 | `PgUp`, `PgDn`                                                  | PageUp, PageDown                       |
 | `KP_Multiply`, `KP_Add`, `KP_Divide`, `KP_Enter`, `KP_Subtract` | numpad operator keys                   |
 | `NonUSBackslash`                                                | IsoExtra key (international keyboards) |
+| `Hash`                                                          | IsoHash key (international keyboards)  |
+| `Play`                                                          | PlayPause                              |
+| `VolUp`, `VolDown`, `VolMute`                                   | VolumeUp, VolumeDown, Mute             |
+| `ScanNext`, `ScanPrev`, `MediaStop`                             | NextTrack, PreviousTrack, Stop         |
 
 ## CLI reference
 
@@ -188,7 +235,7 @@ Keyboard Maestro Engine
 Activity Monitor
 ```
 
-The match is case-sensitive. On Wayland, this command prints compositor-specific alternatives (e.g. `hyprctl`, `swaymsg`) since there is no universal window-enumeration API.
+The match is case-sensitive. On Linux, the names are `.desktop` application ids (e.g. `org.mozilla.firefox`), resolved uniformly across X11 and Wayland.
 
 ### `keymapper config`
 
@@ -199,11 +246,11 @@ Manage the configuration file.
 | `list`               | Print the configuration file to stdout                                                                                                                                                              |
 | `check [path]`       | Validate and diagnose the configuration. Detects no-op rules, duplicate triggers, empty groups, and circular pairs. Accepts an optional path to a config file or directory containing `config.yaml` |
 | `create [dir]`       | Create an empty configuration file at the given directory or the default platform-specific location                                                                                                 |
-| `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names)                                                                        |
+| `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names), `--keyboard SPEC` and `--keyboards-global SPEC` (keyboard filters, key=value pairs)                                                                        |
 
 ### `keymapper keyboards`
 
-List all connected keyboard devices, printing each keyboard's name, vendor, model, port type, and device identifier. The identifier can be used in the `--keyboard` / `--keyboards-global` filters to scope rules to a specific device.
+List all connected keyboard devices, printing each keyboard's name, vendor, model, port type, and device identifier. The name, vendor, model, and port values can be used in the `--keyboard` / `--keyboards-global` filters (as key=value pairs) to scope rules to specific devices.
 
 ### `keymapper keys`
 
@@ -238,18 +285,18 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 **macOS — daemon not capturing keys:** the daemon must run as root to seize HID devices via IOKit. Verify it is running: `launchctl print system/de.adrhinum.keymapperd`. If it is not loaded, install the LaunchDaemon: `sudo ./install-macos.sh /usr/local/bin/keymapperd`.
 
-**macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-driver.md](docs/macos-driver.md) for full troubleshooting.
+**macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-architecture.md](docs/macos-architecture.md) for full troubleshooting.
 
 **Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
 
 **Rules don't take effect:** check that the `apps` value matches the actual application name. Run `keymapper appnames` to find the correct value. Omit `apps` for global rules.
 
-**Config file not found:** the daemon searches CWD first, then the platform-specific application config directory. Use `keymapper config create` to generate a default configuration. Note that symbolic links are not followed.
+**Config file not found:** the daemon searches the platform-specific application config directory. Use `keymapper config create` to generate a default configuration. Note that symbolic links are not followed.
 
 ## How it works
 
-| Platform | Mechanism                                                                                                                                                               |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                                         |
-| macOS    | IOKit device seizure for input capture, Karabiner DriverKit daemon for event emission                                                                                   |
-| Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (a VHF virtual HID driver is planned, see [windows-driver.md](docs/windows-driver.md)) |
+| Platform | Mechanism                                                                                                                                                                       |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                                                 |
+| macOS    | IOKit device seizure for input capture, Karabiner DriverKit daemon for event emission                                                                                           |
+| Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (see [windows-architecture.md](docs/windows-architecture.md))                                  |

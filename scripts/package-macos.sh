@@ -52,7 +52,7 @@ cp "${PROJECT_ROOT}/LICENSE.TXT" "${VOLUME_DIR}/"
 
 # Copy platform-specific docs.
 mkdir -p "${VOLUME_DIR}/docs"
-cp "${PROJECT_ROOT}/docs/macos-driver.md" "${VOLUME_DIR}/docs/"
+cp "${PROJECT_ROOT}/docs/macos-architecture.md" "${VOLUME_DIR}/docs/"
 
 # Download and bundle the pinned Karabiner DriverKit package (the driver
 # through which keymapperd emits remapped keys).
@@ -155,7 +155,7 @@ Virtual HID driver:
   karabiner/ directory) is installed automatically by install.sh.
   On first run, the driver extension may need to be enabled once in:
   System Settings > General > Login Items & Extensions > Driver Extensions.
-  No reboot is required.  See docs/macos-driver.md for troubleshooting.
+  No reboot is required.  See docs/macos-architecture.md for troubleshooting.
 
 Then:
   keymapper config create    # create a configuration file
