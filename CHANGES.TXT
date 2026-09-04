@@ -2,3 +2,16 @@
 Version   Changes
 --------  ----------------------------------------------------------------------
    0.1.0  First public version
+
+   0.2.0  New features:
+           - Cross-platform **active app detection**: macOS via objc2, Linux via
+             Wayland toplevel-info / X11 (x11rb) / sysinfo, Windows via
+             `get_active_app_name`.
+           - Keyboard enumeration and filtering: new `keyboards` CLI command,
+             cross-platform device listing with port type, keyboard specifiers
+             in config and rule groups, compiled into the mapping cache.
+           - HID usage unification: `HidUsage` and evdev codes now generated
+             from a single table (`common/hid_usage.rs`).
+           - Daemon management: `keymapperd` now managed via systemd (Linux)
+             and launchd (macOS).
+          Platform architecture overhaul
