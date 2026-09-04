@@ -93,7 +93,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          DMG="keymapper-${{ github.ref_name }}-${{ matrix.target }}.dmg"
+          DMG="keymapper-${GITHUB_REF_NAME#v}-${{ matrix.target }}.dmg"
           gh release upload "$GITHUB_REF_NAME" "$DMG" --clobber
 
   # -----------------------------------------------------------------------
