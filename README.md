@@ -70,7 +70,7 @@ cargo install --path .
 scripts/install-linux.sh
 ```
 
-The script installs the systemd user service, enables it at login, and starts keymapperd. The daemon needs access to `/dev/input`; if it reports "no keyboard device found", see [Troubleshooting](#troubleshooting).
+The script installs the systemd user service, enables it at login, and starts keymapperd. The daemon needs read access to `/dev/input/event*` (usually via the `input` group) and write access to `/dev/uinput`; if it reports "no keyboard device found", see [Troubleshooting](#troubleshooting).
 
 ### Windows
 
@@ -301,6 +301,14 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 **macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-architecture.md](docs/macos-architecture.md) for full troubleshooting.
 
 **Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
+
+**Linux — daemon exits at startup with a permission error:** creating the virtual keyboard requires write access to `/dev/uinput`. Grant it with a udev rule, ensure the user is in the `input` group, and relogin:
+
+```bash
+echo 'KERNEL=="uinput", MODE="0660", GROUP="input"' | sudo tee /etc/udev/rules.d/99-keymapper.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+sudo usermod -aG input $USER
+```
 
 **Rules don't take effect:** check that the `apps` value matches the actual application name. Run `keymapper appnames` to find the correct value. Omit `apps` for global rules.
 
