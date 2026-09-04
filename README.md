@@ -52,6 +52,19 @@ The script registers the LaunchDaemon and installs the Karabiner DriverKit drive
 
 ### Linux
 
+**Pre-built archive:**
+
+Download the pre-built tar.xz for your architecture from the [releases page](https://github.com/mamrhein/keymapper.rs/releases), extract it, and copy the binaries to a directory on your `PATH`:
+
+```bash
+tar -xJf keymapper-vX.Y.Z-x86_64-unknown-linux-gnu.tar.xz
+cd keymapper/vX.Y.Z
+install -m 755 keymapper keymapperd ~/.local/bin/
+./install-linux.sh ~/.local/bin/keymapperd
+```
+
+**From source:**
+
 ```bash
 cargo install --path .
 scripts/install-linux.sh

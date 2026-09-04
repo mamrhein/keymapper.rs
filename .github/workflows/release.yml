@@ -134,9 +134,11 @@ jobs:
         run: |
           ARCHIVE="keymapper-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.xz"
           STAGING="dist/keymapper/${{ github.ref_name }}"
-          mkdir -p "$STAGING"
+          mkdir -p "$STAGING/resources/systemd"
           cp "target/x86_64-unknown-linux-gnu/release/keymapper" "$STAGING/"
           cp "target/x86_64-unknown-linux-gnu/release/keymapperd" "$STAGING/"
+          cp scripts/install-linux.sh "$STAGING/"
+          cp resources/systemd/keymapperd.service "$STAGING/resources/systemd/"
           cp LICENSE.TXT README.md "$STAGING/"
           tar -cJf "$ARCHIVE" --sort=name "$STAGING"
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
@@ -179,9 +181,11 @@ jobs:
         run: |
           ARCHIVE="keymapper-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.xz"
           STAGING="dist/keymapper/${{ github.ref_name }}"
-          mkdir -p "$STAGING"
+          mkdir -p "$STAGING/resources/systemd"
           cp "target/aarch64-unknown-linux-gnu/release/keymapper" "$STAGING/"
           cp "target/aarch64-unknown-linux-gnu/release/keymapperd" "$STAGING/"
+          cp scripts/install-linux.sh "$STAGING/"
+          cp resources/systemd/keymapperd.service "$STAGING/resources/systemd/"
           cp LICENSE.TXT README.md "$STAGING/"
           tar -cJf "$ARCHIVE" --sort=name "$STAGING"
           gh release upload "$GITHUB_REF_NAME" "$ARCHIVE" --clobber
