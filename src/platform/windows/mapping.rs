@@ -17,8 +17,10 @@
 //!
 //! Thread layout:
 //!
-//! 1. **Hook thread** — \`WH_KEYBOARD_LL\` hook + \`GetMessageW\` loop. Sends
-//!    \`HookEvent\` to worker, blocks on reply.
+//! 1. **Hook thread** — \`WH_KEYBOARD_LL\` hook + message loop
+//!    (\`MsgWaitForMultipleObjects\` + \`PeekMessageW\`).  Sends \`HookEvent\`
+//!    to worker, blocks on reply, and drains queued emissions after each
+//!    wait.
 //! 2. **Raw input thread** — Message-only window + \`GetMessageW\` loop for
 //!    \`WM_INPUT\`.  Sends \`RawInputEvent\` to worker.
 //! 3. **Worker thread** — Receives from both channels, matches events,
@@ -41,20 +43,31 @@ use std::sync::atomic::AtomicBool;
 use crossbeam_channel;
 use parking_lot::RwLock;
 use windows::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
-    System::LibraryLoader::GetModuleHandleW,
+    Foundation::{
+        GetLastError, HINSTANCE, LPARAM, LRESULT, WAIT_FAILED, WPARAM,
+    },
+    System::{
+        LibraryLoader::GetModuleHandleW,
+        Threading::{GetCurrentThreadId, INFINITE},
+    },
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
             KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG,
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+            CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, PeekMessageW,
+            MsgWaitForMultipleObjects, PM_REMOVE, QS_ALLINPUT,
+            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_QUIT,
             WM_KEYDOWN, WM_SYSKEYDOWN,
         },
     },
 };
+
+// The drain wake post is only compiled into non-test builds (see
+// `queue_emission`); unit tests never queue an emission.
+#[cfg(not(test))]
+use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
 
 use super::{
     dispatch::{Decision, HookEvent, spawn_worker},
@@ -117,32 +130,27 @@ fn hook_handle() -> HHOOK {
 /// would process its own injection as a new key press, creating duplicate or
 /// incorrect mappings.  This set stores `(vk_code, is_key_down)` pairs while
 /// the injected key is active.
-static INJECTED_KEYS: std::sync::Mutex<Vec<(u16, bool)>> =
-    std::sync::Mutex::new(Vec::new());
+static INJECTED_KEYS: parking_lot::Mutex<Vec<(u16, bool)>> =
+    parking_lot::Mutex::new(Vec::new());
 
 /// Registers an injected key so the hook proc can skip it.
 fn mark_injected(vk: u16, is_down: bool) {
-    INJECTED_KEYS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push((vk, is_down));
+    INJECTED_KEYS.lock().push((vk, is_down));
 }
 
 /// Checks if the given key event was injected by the daemon itself.
 fn is_injected_key(vk: u16, is_down: bool) -> bool {
     INJECTED_KEYS
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
         .iter()
         .any(|(v, d)| *v == vk && *d == is_down)
 }
 
 /// Removes a single matching entry from the injected key tracker.
 fn clear_injected(vk: u16, is_down: bool) {
-    let keys = INJECTED_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut keys = INJECTED_KEYS.lock();
     if let Some(pos) = keys.iter().position(|(v, d)| *v == vk && *d == is_down)
     {
-        let mut keys = INJECTED_KEYS.lock().unwrap_or_else(|e| e.into_inner());
         keys.remove(pos);
     }
 }
@@ -300,6 +308,65 @@ pub(super) fn emit_key_event(native_key: &NativeKey) {
     for vk in pressed_modifiers.into_iter().rev() {
         simulate_key_event(vk, true);
         std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deferred emission
+// ---------------------------------------------------------------------------
+
+/// Outputs the worker has decided to emit, queued for the main message loop
+/// to send via `SendInput`.
+///
+/// A `SendInput` must not be issued from inside the low-level hook callback
+/// (nor while a hook chain is in progress): the input system drops injected
+/// events that arrive while the hook thread is busy processing a chain, and
+/// they never reach the target window.  The worker therefore queues the
+/// outputs here, and the always-pumping message loop performs the actual
+/// `SendInput` once the hook chain has completed.
+static PENDING_EMISSIONS: parking_lot::Mutex<Vec<Vec<NativeKey>>> =
+    parking_lot::Mutex::new(Vec::new());
+
+/// The main message loop's thread id, recorded in `start_mapping` so the
+/// worker can post the drain wake message.
+static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+/// Records the main loop's thread id for the drain wake post.
+fn set_main_thread_id(tid: u32) {
+    MAIN_THREAD_ID.store(tid, Ordering::Relaxed);
+}
+
+/// Queue a set of mapped outputs for emission by the main message loop and
+/// wake the loop so it drains the queue.
+///
+/// The worker thread calls this when a key-down resolves to a mapping.  A
+/// swallowed hook event produces no message of its own, so the posted
+/// `WM_APP` message is what makes the blocked `MsgWaitForMultipleObjects`
+/// return and the loop body (the drain) run.  If the wake is posted while a
+/// hook chain is still in progress it simply waits in the queue: the loop
+/// returns from the wait only once the chain has completed, so the drain
+/// always runs with the chain idle.
+#[cfg(not(test))]
+pub(super) fn queue_emission(outputs: Vec<NativeKey>) {
+    PENDING_EMISSIONS.lock().push(outputs);
+    let tid = MAIN_THREAD_ID.load(Ordering::Relaxed);
+    if tid != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_APP, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Emit all queued outputs via `SendInput`.  The main message loop calls this
+/// from the loop body, after the hook chain has completed, so the
+/// `SendInput` is issued from a thread that is neither inside the hook
+/// callback nor blocked in its reply wait.
+fn drain_and_emit_emissions() {
+    let pending = std::mem::take(&mut *PENDING_EMISSIONS.lock());
+    for outputs in pending {
+        for native_key in &outputs {
+            emit_mapped_output(native_key);
+        }
     }
 }
 
@@ -706,6 +773,11 @@ extern "system" fn low_level_keyboard_proc(
     // Wait for the worker's decision without blocking the input chain for too
     // long.  Use a polling loop with short sleeps to avoid deadlocking the
     // Windows message pump while still giving the worker time to respond.
+    //
+    // Note: the mapped output is NOT emitted here.  It is queued for the main
+    // message loop (see [`drain_and_emit_emissions`]), because a `SendInput`
+    // issued while this hook thread is blocked in the wait is dropped by the
+    // input system and never reaches the target.
     let decision = loop {
         if let Ok(decision) = reply_rx.try_recv() {
             break decision;
@@ -723,12 +795,13 @@ extern "system" fn low_level_keyboard_proc(
 
     match decision {
         Decision::Swallow(_) => {
-            // The worker already emitted the mapped outputs on its own
-            // thread (normal mode: a plain `SendInput`; capture mode: tagged
-            // through the virtual keyboard).  A `SendInput` issued from
-            // within this low-level hook callback would not reach the target
-            // application, so the hook proc never emits — it only swallows
-            // the original key, which the daemon fully owns in both modes.
+            // The worker has already handled the mapped outputs: in capture
+            // mode it emitted them directly, in normal mode it queued them
+            // for the main message loop (posting the wake message that
+            // triggers the drain).  A `SendInput` issued while this hook
+            // callback is on the stack is dropped by the input system, so
+            // the hook proc never emits — it only swallows the original
+            // key, which the daemon fully owns in both modes.
             return LRESULT(1);
         }
         Decision::PassThrough => {
@@ -796,6 +869,11 @@ pub fn start_mapping(
         eprintln!("Windows: capture mode enabled (KEYMAPPER_CAPTURE).");
     }
 
+    // Record this thread's id so the worker can post the drain wake message
+    // to the message loop (done before the worker starts, so no emission
+    // can be queued before the id is recorded).
+    set_main_thread_id(unsafe { GetCurrentThreadId() });
+
     // Spawn the worker thread.
     let hook_tx = spawn_worker(Arc::clone(&lookup), raw_rx);
     set_hook_tx(hook_tx);
@@ -825,10 +903,45 @@ pub fn start_mapping(
         signal();
     }
 
-    // Run the message loop.  This blocks until WM_QUIT is received.
+    // Run the message loop until WM_QUIT.  The low-level hook callback runs
+    // re-entrantly inside the blocked `MsgWaitForMultipleObjects` call, and
+    // a swallowed hook event yields no message of its own, so the wake for
+    // the drain is the `WM_APP` message the worker posts through
+    // `queue_emission` when it queues mapped outputs.  The loop blocks in
+    // `MsgWaitForMultipleObjects` (which returns for any posted message),
+    // then drains the queue with the non-blocking `PeekMessageW` — a
+    // blocking `GetMessageW` here would
+    // consume the wake message and then block on the next one, starving the
+    // drain.  The drain runs in the loop body, where the hook chain is
+    // idle, so the `SendInput` reaches the target.  Messages are removed
+    // but neither translated nor dispatched: the hook callback performs all
+    // processing.
     unsafe {
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+        loop {
+            let wait =
+                MsgWaitForMultipleObjects(None, false, INFINITE, QS_ALLINPUT);
+            if wait == WAIT_FAILED {
+                eprintln!(
+                    "Windows: MsgWaitForMultipleObjects failed: {:?}",
+                    GetLastError()
+                );
+                break;
+            }
+            let mut quit = false;
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    quit = true;
+                    break;
+                }
+                // Consumed without dispatch; the hook callback already
+                // handled it.
+            }
+            drain_and_emit_emissions();
+            if quit {
+                break;
+            }
+        }
         UnhookWindowsHookEx(handle)?;
     }
 

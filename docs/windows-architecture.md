@@ -13,11 +13,13 @@ This is the final architecture for Windows: there is no virtual HID driver, and 
 
 `keymapperd` runs three threads:
 
-1. **Hook thread** — installs the `WH_KEYBOARD_LL` hook (session-global) and runs the `GetMessageW` message loop. For each key event it sends a `HookEvent` to the worker thread and waits for the decision on a one-shot reply channel, polling with 1 ms sleeps. If no decision arrives within about 50 ms, the event is passed through — the input chain must never be blocked.
-2. **Raw input thread** — owns a message-only window registered for raw input (`RIDEV_INPUTSINK`) on both keyboard and consumer control devices, so events arrive even when the daemon is not in the foreground. It pumps `WM_INPUT` messages and forwards decoded events to the worker.
-3. **Worker thread** — listens on both channels with `crossbeam_channel::select!`. It matches hook events against recent raw input events to identify the source keyboard, performs the mapping lookup, emits the resolved outputs, and replies with `swallow` (carrying the resolved outputs) or `pass through`.
+1. **Hook thread** — installs the `WH_KEYBOARD_LL` hook (session-global) and runs the message loop. For each key event it sends a `HookEvent` to the worker thread and waits for the decision on a one-shot reply channel, polling with 1 ms sleeps. If no decision arrives within about 50 ms, the event is passed through — the input chain must never be blocked.
 
-The hook procedure itself performs no mapping or emission: the worker decides with device identification and performs the `SendInput`, and the hook thread only applies the decision (swallow or pass through). This avoids a mismatch where the hook would look up without device context, and keeps the `SendInput` off the hook thread — a `SendInput` issued from within a low-level hook callback does not reach the target application.
+   The hook callback runs re-entrantly inside the blocked message wait, and a swallowed hook event produces no message of its own — a bare `GetMessageW` loop would block forever and never run its body. The loop therefore blocks in `MsgWaitForMultipleObjects` on the input queue, drains the queue with the non-blocking `PeekMessageW`, and then runs the emission drain (see [Emission and self-exclusion](#emission-and-self-exclusion)).
+2. **Raw input thread** — owns a message-only window registered for raw input (`RIDEV_INPUTSINK`) on both keyboard and consumer control devices, so events arrive even when the daemon is not in the foreground. It pumps `WM_INPUT` messages and forwards decoded events to the worker.
+3. **Worker thread** — listens on both channels with `crossbeam_channel::select!`. It matches hook events against recent raw input events to identify the source keyboard, performs the mapping lookup, queues the resolved outputs for emission, and replies with `swallow` (carrying the resolved outputs) or `pass through`.
+
+The hook procedure itself performs no mapping or emission: the worker decides with device identification, and the hook thread only applies the decision (swallow or pass through). This avoids a mismatch where the hook would look up without device context, and keeps the `SendInput` off the hook callback — see [Emission and self-exclusion](#emission-and-self-exclusion).
 
 ### Device identification (raw input)
 
@@ -45,13 +47,17 @@ The hook thread maintains the pressed-modifier state from its own event stream r
 
 ### Emission and self-exclusion
 
-A mapped output is emitted as a complete tap via `SendInput`, always on the worker thread (never inside the hook callback, where a `SendInput` would not reach the target): modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
+In normal mode the `SendInput` is performed by the hook thread's message loop, never by the worker: the input system drops injected events that arrive while a low-level hook chain is in progress (the worker is busy in that chain's reply wait when it decides), so emission must wait until the chain has completed. The worker therefore queues the resolved outputs and posts a wake message to the message loop's queue — the wake is what makes the blocked `MsgWaitForMultipleObjects` return, because a swallowed hook event produces no message of its own. The loop drains the queue in its body, where the hook chain is idle, and the `SendInput` then reaches the target.
+
+A mapped output is emitted as a complete tap via `SendInput`: modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
+
+In capture mode (e2e only) the worker emits the tagged outputs directly on its own thread, since the e2e monitor observes the session's hook chain and the tagged re-emission must not be queued.
 
 Because the low-level hook is session-global, the daemon's own `SendInput` events reach it. A static set of `(vk_code, is_key_down)` pairs tracks the daemon's active injections; the hook procedure skips and clears them so its own output is never processed as new input.
 
 ### Standalone consumer control
 
-Media keys from standalone consumer control devices (e.g. a USB media keypad) do not produce a virtual-key code and therefore never reach the low-level hook. The worker processes their raw input events directly: it performs the lookup and emits the mapped output itself.
+Media keys from standalone consumer control devices (e.g. a USB media keypad) do not produce a virtual-key code and therefore never reach the low-level hook. The worker processes their raw input events directly: it performs the lookup and queues the mapped output for the message loop (emitting it directly in capture mode), so standalone consumer emission is subject to the same delivery constraints as keyboard emission.
 
 The original media action cannot be suppressed: Windows delivers consumer control input to the shell as `WM_APPCOMMAND`, which no keyboard-level hook intercepts. A mapped media key therefore produces both the original action and the remapped output. (Media keys on keyboards that expose a VK code, e.g. `VK_MEDIA_PLAY_PAUSE`, go through the normal hook path and can be swallowed.)
 

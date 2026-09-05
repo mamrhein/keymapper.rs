@@ -49,10 +49,7 @@ use windows::Win32::{
 use crate::{
     common::hid_usage::{HidUsage, PAGE_CONSUMER},
     daemon::state::Lookup,
-    platform::windows::{
-        mapping::{emit_mapped_output, extract_modifier_bits},
-        raw_input::RawInputEvent,
-    },
+    platform::windows::{mapping::extract_modifier_bits, raw_input::RawInputEvent},
 };
 
 // The capture flag gates the normal-mode emission block below, which is
@@ -66,17 +63,19 @@ use crate::platform::windows::mapping::capture_enabled;
 #[cfg(feature = "e2e")]
 use crate::platform::windows::mapping::{
     capture_record_forwarded_down, capture_record_forwarded_up,
-    capture_release_triggered_modifiers, emit_forwarded_key,
+    capture_release_triggered_modifiers, emit_forwarded_key, emit_mapped_output,
 };
 
 /// Result of a mapping lookup sent from the worker back to the hook thread.
 ///
-/// The \`Swallow\` variant carries the resolved output events.  The worker
-/// emits them on its own thread — a \`SendInput\` issued from within the
-/// low-level hook callback would not reach the target application — and the
-/// hook proc only swallows the original key.  Keeping the emission in the
-/// worker also keeps it the sole lookup site, so it can decide with device
-/// identification while the hook proc would not.
+/// The `Swallow` variant carries the resolved output events.  In normal mode
+/// the worker queues them for the main message loop — the `SendInput` must
+/// be issued after the hook chain has completed, because the input system
+/// drops injected events that arrive while a chain is in progress — while in
+/// capture mode it emits the tagged outputs directly.  The hook proc only
+/// swallows the original key.  Keeping the decision in the worker also keeps
+/// it the sole lookup site, so it can decide with device identification
+/// while the hook proc would not.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Decision {
     /// Swallow the event; the worker emits the given output keys.
@@ -443,22 +442,20 @@ fn process_hook_event(
         }
     }
 
-    // Normal (non-capture) mode: the worker emits the mapped key-downs on
-    // this non-hook thread.  A `SendInput` issued from within the low-level
-    // hook callback does not reach the target application, so the emission
-    // must happen here rather than in the hook proc.  Only mapped key-downs
-    // are emitted — a key-up carries no outputs, and unmapped keys pass
-    // straight through the OS.  Emission completes before the reply is sent,
-    // so the hook proc only returns once the output has gone out.  The block
-    // is compiled out of unit tests so they never drive a real `SendInput`.
+    // Normal (non-capture) mode: queue the mapped key-downs for emission by
+    // the main message loop.  The `SendInput` must not be issued here (or
+    // from the hook proc): while this hook chain is in progress, the input
+    // system drops injected events and they never reach the target.  The
+    // message loop emits them once the chain has completed.  Only mapped
+    // key-downs are queued — a key-up carries no outputs, and unmapped keys
+    // pass straight through the OS.  Compiled out of unit tests so they
+    // never drive a real `SendInput`.
     #[cfg(not(test))]
     if !capture_enabled()
         && !event.is_key_up
         && let Decision::Swallow(outputs) = &decision
     {
-        for native_key in outputs {
-            emit_mapped_output(native_key);
-        }
+        crate::platform::windows::mapping::queue_emission(outputs.clone());
     }
 
     // Drop the sender if the receiver was already dropped (hook proc timed
@@ -496,7 +493,8 @@ fn decide(
 ///
 /// These events do not pass through the low-level keyboard hook, so there
 /// is no hook event to reply to: the worker performs the lookup itself and
-/// emits the mapped outputs directly.  Note that the original media action
+/// queues the mapped outputs for the main message loop (in capture mode it
+/// emits the tagged outputs directly).  Note that the original media action
 /// cannot be suppressed — Windows delivers Consumer Control input to the
 /// shell as `WM_APPCOMMAND`, which no keyboard-level hook can intercept.
 fn process_consumer_event(
@@ -515,11 +513,31 @@ fn process_consumer_event(
         .map(|v| v.to_vec());
     drop(guard);
 
-    if let Some(outputs) = outputs {
+    let Some(outputs) = outputs else {
+        return;
+    };
+
+    // Capture mode (e2e only): the worker emits the tagged output directly,
+    // as with mapped keyboard events.
+    #[cfg(feature = "e2e")]
+    if capture_enabled() {
         for native_key in &outputs {
             emit_mapped_output(native_key);
         }
+        return;
     }
+
+    // Normal mode: queue for the main message loop.  A `SendInput` issued
+    // directly from this worker thread can race a keyboard hook chain in
+    // progress and be dropped by the input system.  Compiled out of unit
+    // tests so they never drive a real `SendInput`.
+    #[cfg(not(test))]
+    {
+        crate::platform::windows::mapping::queue_emission(outputs);
+    }
+
+    #[cfg(test)]
+    let _ = outputs;
 }
 
 /// Attempts to find a match with a short delay for raw input to arrive.
