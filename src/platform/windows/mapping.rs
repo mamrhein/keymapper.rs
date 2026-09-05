@@ -75,10 +75,7 @@ use super::{
     raw_input::start_raw_input_loop,
 };
 
-// The capture tag is only consulted by the (e2e-only) tagged re-emission
-// path; in production builds it is not referenced from this module.
-#[cfg(feature = "e2e")]
-use super::CAPTURE_TAG;
+use super::INJECTED_TAG;
 use crate::{
     common::{
         hid_usage::HidUsage, keyboard::KeyboardSpecifier,
@@ -121,38 +118,6 @@ fn set_hook_handle(handle: HHOOK) {
 
 fn hook_handle() -> HHOOK {
     HHOOK(*HOOK_HANDLE.lock() as *mut std::ffi::c_void)
-}
-
-/// Tracks keys currently injected by the daemon itself via `SendInput`.
-///
-/// When the daemon emits a mapped output key (e.g., LeftControl down), the
-/// hook procedure sees this injected event.  Without tracking, the daemon
-/// would process its own injection as a new key press, creating duplicate or
-/// incorrect mappings.  This set stores `(vk_code, is_key_down)` pairs while
-/// the injected key is active.
-static INJECTED_KEYS: parking_lot::Mutex<Vec<(u16, bool)>> =
-    parking_lot::Mutex::new(Vec::new());
-
-/// Registers an injected key so the hook proc can skip it.
-fn mark_injected(vk: u16, is_down: bool) {
-    INJECTED_KEYS.lock().push((vk, is_down));
-}
-
-/// Checks if the given key event was injected by the daemon itself.
-fn is_injected_key(vk: u16, is_down: bool) -> bool {
-    INJECTED_KEYS
-        .lock()
-        .iter()
-        .any(|(v, d)| *v == vk && *d == is_down)
-}
-
-/// Removes a single matching entry from the injected key tracker.
-fn clear_injected(vk: u16, is_down: bool) {
-    let mut keys = INJECTED_KEYS.lock();
-    if let Some(pos) = keys.iter().position(|(v, d)| *v == vk && *d == is_down)
-    {
-        keys.remove(pos);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -213,8 +178,6 @@ fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
 }
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
-    let is_down = !is_key_up;
-
     // In test mode, write output events to a file instead of calling
     // `SendInput`. This avoids the issue where `SendInput` from within a
     // `WH_KEYBOARD_LL` hook callback does not trigger other hooks (Windows
@@ -223,10 +186,10 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
     // production binary has no env-gated file-write path here.
     #[cfg(feature = "e2e")]
     if let Ok(path) = std::env::var("KEYMAPPER_TEST_OUTPUT") {
-        let line = if is_down {
-            format!("DOWN {}\n", vk.0)
-        } else {
+        let line = if is_key_up {
             format!("UP {}\n", vk.0)
+        } else {
+            format!("DOWN {}\n", vk.0)
         };
         std::fs::OpenOptions::new()
             .create(true)
@@ -238,14 +201,18 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
         return;
     }
 
-    // Mark this key as injected so the hook proc can skip it.
-    mark_injected(vk.0, is_down);
+    #[cfg(feature = "e2e")]
+    if capture_enabled() {
+        capture_debug(&format!("emit vk={:#04x} up={}", vk.0, is_key_up));
+    }
 
     let mut flags: u32 = if is_key_up { KEYEVENTF_KEYUP.0 } else { 0 };
     if is_extended_key(vk) {
         flags |= KEYEVENTF_EXTENDEDKEY.0;
     }
 
+    // Stamp the daemon tag so the hook proc recognizes the event as our own
+    // injection and passes it through without re-mapping.
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -254,7 +221,7 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
                 wScan: 0,
                 dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: INJECTED_TAG,
             },
         },
     };
@@ -365,7 +332,7 @@ fn drain_and_emit_emissions() {
     let pending = std::mem::take(&mut *PENDING_EMISSIONS.lock());
     for outputs in pending {
         for native_key in &outputs {
-            emit_mapped_output(native_key);
+            emit_key_event(native_key);
         }
     }
 }
@@ -375,7 +342,7 @@ fn drain_and_emit_emissions() {
 // ---------------------------------------------------------------------------
 //
 // Capture mode makes the daemon re-emit every key through its virtual
-// keyboard, tagged with [`CAPTURE_TAG`], so the e2e monitor's
+// keyboard, tagged with [`INJECTED_TAG`], so the e2e monitor's
 // `WH_KEYBOARD_LL` hook can capture the daemon's output without depending on
 // a focused window.  It is gated on the `KEYMAPPER_CAPTURE` environment
 // variable so production behaviour (unmapped keys passing straight through)
@@ -447,105 +414,13 @@ fn set_capture_mode(enabled: bool) {
     CAPTURE_MODE.store(enabled, Ordering::Relaxed);
 }
 
-/// Emit a single key-press or key-release via `SendInput`, tagged with
-/// [`CAPTURE_TAG`] so the monitor's hook can recognize it.  No
-/// `INJECTED_KEYS` tracking is needed: the tag alone identifies daemon
-/// re-emissions.
-#[cfg(feature = "e2e")]
-fn simulate_key_event_tagged(vk: VIRTUAL_KEY, is_key_up: bool) {
-    if capture_enabled() {
-        capture_debug(&format!("emit vk={:#04x} up={}", vk.0, is_key_up));
-    }
-    let mut flags: u32 = if is_key_up { KEYEVENTF_KEYUP.0 } else { 0 };
-    if is_extended_key(vk) {
-        flags |= KEYEVENTF_EXTENDEDKEY.0;
-    }
-
-    let input = INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
-                dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
-                time: 0,
-                dwExtraInfo: CAPTURE_TAG,
-            },
-        },
-    };
-    unsafe {
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
-    }
-}
-
-/// Emit a complete mapped-output chord (modifiers + base + modifiers) via
-/// `SendInput`, tagged with [`CAPTURE_TAG`].  Mirrors [`emit_key_event`] but
-/// is used in capture mode.
-#[cfg(feature = "e2e")]
-fn emit_key_event_tagged(native_key: &NativeKey) {
-    let mut pressed_modifiers: Vec<VIRTUAL_KEY> = Vec::new();
-
-    for bit in 0..8 {
-        if (native_key.modifiers >> bit) & 1 == 1
-            && let Some(vk) = modifier_bit_to_vk(bit)
-        {
-            simulate_key_event_tagged(vk, false);
-            pressed_modifiers.push(vk);
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-
-    let base_vk = Key::from_hid_usage(native_key.usage)
-        .map(Key::as_native)
-        .or_else(|| hid_to_vk(native_key.usage));
-
-    let Some(base_vk) = base_vk else {
-        eprintln!(
-            "Windows: no VK code for output HID usage {:?}",
-            native_key.usage
-        );
-        for vk in pressed_modifiers.into_iter().rev() {
-            simulate_key_event_tagged(vk, true);
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        return;
-    };
-
-    simulate_key_event_tagged(VIRTUAL_KEY(base_vk), false);
-    std::thread::sleep(std::time::Duration::from_millis(1));
-
-    simulate_key_event_tagged(VIRTUAL_KEY(base_vk), true);
-    std::thread::sleep(std::time::Duration::from_millis(1));
-
-    for vk in pressed_modifiers.into_iter().rev() {
-        simulate_key_event_tagged(vk, true);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-}
-
-/// Emit a mapped output, routing it through the virtual keyboard in capture
-/// mode and via a direct `SendInput` in normal mode.  This is the single
-/// emission entry point shared by the hook proc (mapped keyboard outputs)
-/// and the worker (standalone consumer outputs).
-pub(super) fn emit_mapped_output(native_key: &NativeKey) {
-    // In capture mode (e2e only) the output is re-emitted through the
-    // virtual keyboard, tagged; in normal mode it goes out via a direct
-    // `SendInput`.
-    #[cfg(feature = "e2e")]
-    if capture_enabled() {
-        emit_key_event_tagged(native_key);
-        return;
-    }
-    emit_key_event(native_key);
-}
-
 /// Forward a single (unmapped) key through the virtual keyboard in capture
 /// mode.  In normal mode unmapped keys pass straight through the OS, so this
 /// is a no-op.
 #[cfg(feature = "e2e")]
 pub(super) fn emit_forwarded_key(vk: u16, is_key_up: bool) {
     if capture_enabled() {
-        simulate_key_event_tagged(VIRTUAL_KEY(vk), is_key_up);
+        simulate_key_event(VIRTUAL_KEY(vk), is_key_up);
     }
 }
 
@@ -651,7 +526,7 @@ pub(super) fn capture_release_triggered_modifiers(modifiers: u8) {
         if consumed & (1 << bit) != 0
             && let Some(vk) = modifier_bit_to_vk(bit)
         {
-            simulate_key_event_tagged(vk, true);
+            simulate_key_event(vk, true);
         }
     }
 }
@@ -679,35 +554,34 @@ extern "system" fn low_level_keyboard_proc(
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
 
-    // In capture mode the daemon re-emits every key through the virtual
-    // keyboard, tagged with [`CAPTURE_TAG`].  Let those tagged re-emissions
-    // flow on to the monitor's hook without re-mapping them.
-    #[cfg(feature = "e2e")]
-    if capture_enabled() && kbd_struct.dwExtraInfo == CAPTURE_TAG {
-        capture_debug(&format!(
-            "hook tagged vk={:#04x} msg={:#06x}",
-            kbd_struct.vkCode, w_param.0
-        ));
+    // Every key the daemon injects through `SendInput` is stamped with
+    // [`INJECTED_TAG`].  Let those flow on without re-mapping them: in
+    // capture mode the monitor's hook captures them, in normal mode the
+    // target window receives them.  Matching on the tag is exact, so a
+    // physical press of the same key can never be swallowed as one of our
+    // own injections.
+    if kbd_struct.dwExtraInfo == INJECTED_TAG {
+        #[cfg(feature = "e2e")]
+        if capture_enabled() {
+            capture_debug(&format!(
+                "hook tagged vk={:#04x} msg={:#06x}",
+                kbd_struct.vkCode, w_param.0
+            ));
+        }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
     }
 
-    let is_key_down =
-        w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
-    let is_key_up = !is_key_down;
+    let is_key_up = !matches!(
+        w_param.0 as u32,
+        WM_KEYDOWN | WM_SYSKEYDOWN
+    );
 
     // Derive the HID identity of the key — the lookup key space of the
     // compiled rules.  `None` for virtual-key codes without a `HidUsage`
     // (e.g. Print Screen); such keys always pass through.
     let usage = Key::from_native(vk_code.0).map(Key::to_hid_usage);
-
-    // Skip keys injected by the daemon itself to avoid processing our own
-    // output as new input, which would create duplicate or recursive mappings.
-    if is_injected_key(vk_code.0, is_key_down) {
-        clear_injected(vk_code.0, is_key_down);
-        return unsafe { CallNextHookEx(None, code, w_param, l_param) };
-    }
 
     // Maintain the tracked modifier state from the event stream.  This runs
     // before the decision so the key-down of a modifier itself is included
@@ -857,7 +731,7 @@ pub fn start_mapping(
 
     // Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`): the daemon
     // swallows every key and re-emits it through the virtual keyboard, tagged
-    // with [`CAPTURE_TAG`], so the monitor's `WH_KEYBOARD_LL` hook can capture
+    // with [`INJECTED_TAG`], so the monitor's `WH_KEYBOARD_LL` hook can capture
     // the output without depending on a focused window.  In this mode the
     // worker performs all emission on its own (non-hook) thread — `SendInput`
     // from within a `WH_KEYBOARD_LL` callback would not reach other hooks.

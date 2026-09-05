@@ -53,7 +53,7 @@ A mapped output is emitted as a complete tap via `SendInput`: modifiers down (as
 
 In capture mode (e2e only) the worker emits the tagged outputs directly on its own thread, since the e2e monitor observes the session's hook chain and the tagged re-emission must not be queued.
 
-Because the low-level hook is session-global, the daemon's own `SendInput` events reach it. A static set of `(vk_code, is_key_down)` pairs tracks the daemon's active injections; the hook procedure skips and clears them so its own output is never processed as new input.
+Because the low-level hook is session-global, the daemon's own `SendInput` events reach it. Every injected event is stamped with a magic value in `dwExtraInfo` (`INJECTED_TAG`), and the hook procedure passes tagged events through without re-mapping, so its own output is never processed as new input. Matching on the tag is exact: a physical press of the same key can never be mistaken for one of the daemon's injections.
 
 ### Standalone consumer control
 
@@ -82,7 +82,7 @@ For end-to-end testing, an `e2e` build can be started with the `KEYMAPPER_CAPTUR
 | `src/platform/windows/dispatch.rs` | Worker thread, event matching, decision cache |
 | `src/platform/windows/key.rs` | VK ↔ `HidUsage` conversion, consumer VK table |
 | `src/platform/windows/keyboard.rs` | Keyboard enumeration (SetupAPI + HID API) |
-| `src/platform/windows/mod.rs` | Module root, capture tag |
+| `src/platform/windows/mod.rs` | Module root, injection tag |
 
 ## References
 

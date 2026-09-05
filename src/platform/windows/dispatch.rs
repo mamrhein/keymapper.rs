@@ -63,7 +63,7 @@ use crate::platform::windows::mapping::capture_enabled;
 #[cfg(feature = "e2e")]
 use crate::platform::windows::mapping::{
     capture_record_forwarded_down, capture_record_forwarded_up,
-    capture_release_triggered_modifiers, emit_forwarded_key, emit_mapped_output,
+    capture_release_triggered_modifiers, emit_forwarded_key, emit_key_event,
 };
 
 /// Result of a mapping lookup sent from the worker back to the hook thread.
@@ -419,7 +419,7 @@ fn process_hook_event(
                     capture_release_triggered_modifiers(event.modifiers);
                 }
                 for native_key in outputs {
-                    emit_mapped_output(native_key);
+                    emit_key_event(native_key);
                 }
             }
             Decision::PassThrough => {
@@ -522,7 +522,7 @@ fn process_consumer_event(
     #[cfg(feature = "e2e")]
     if capture_enabled() {
         for native_key in &outputs {
-            emit_mapped_output(native_key);
+            emit_key_event(native_key);
         }
         return;
     }

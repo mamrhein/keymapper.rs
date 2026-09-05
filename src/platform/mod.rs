@@ -54,7 +54,7 @@ pub use macos::{
     for_each_hid_value, keycode_to_hid_usage, list_keyboards, start_mapping,
 };
 #[cfg(target_os = "windows")]
-pub use windows::CAPTURE_TAG;
+pub use windows::INJECTED_TAG;
 #[cfg(target_os = "windows")]
 pub use windows::config_dir;
 #[cfg(target_os = "windows")]

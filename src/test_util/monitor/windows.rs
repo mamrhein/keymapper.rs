@@ -15,7 +15,7 @@
 //! monitor installs a `WH_KEYBOARD_LL` hook and captures only the keys the
 //! daemon re-emits through its virtual keyboard.  The daemon tags every
 //! re-emitted key with a magic `dwExtraInfo` (see
-//! [`crate::platform::CAPTURE_TAG`]); the hook logs the matching keys to the
+//! [`crate::platform::INJECTED_TAG`]); the hook logs the matching keys to the
 //! output file and swallows them, so they never leak into the compositor or
 //! any focused window.  This mirrors the Linux direct-capture backend: it is
 //! deterministic, needs no window or keyboard focus, and is headless
@@ -33,7 +33,7 @@ use windows::Win32::{
 };
 
 use super::{OutputEvent, register_signal_handlers, writer::EventWriter};
-use crate::platform::{CAPTURE_TAG, Key};
+use crate::platform::{INJECTED_TAG, Key};
 
 /// The writer is set once from [`run`] before the hook is installed, and
 /// written from the hook callback.  A `Mutex` guards it because the hook
@@ -60,7 +60,7 @@ unsafe extern "system" fn monitor_hook_proc(
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
 
     // Ignore every key that the daemon did not emit.
-    if kbd_struct.dwExtraInfo != CAPTURE_TAG {
+    if kbd_struct.dwExtraInfo != INJECTED_TAG {
         return unsafe { CallNextHookEx(None, code, w_param, l_param) };
     }
 
