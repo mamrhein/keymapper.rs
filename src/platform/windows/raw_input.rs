@@ -96,7 +96,7 @@ const WM_STOP: u32 = WM_USER + 1;
 /// physical keyboard.  Convert it to a string (e.g. via
 /// `GetRawInputDeviceInfo`) to match against the `KeyboardInfo::device` path
 /// populated at startup.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RawInputEvent {
     /// Decoded HID identity of the event, if it could be resolved.
     pub usage: Option<HidUsage>,

@@ -24,6 +24,19 @@ fn bin_path() -> PathBuf {
         .join("keymapper")
 }
 
+/// Whether the daemon binary is resolvable via `PATH`, which is exactly
+/// when `daemon start` can spawn a live daemon instance.
+fn daemon_binary_on_path() -> bool {
+    let name = if cfg!(target_os = "windows") {
+        "keymapperd.exe"
+    } else {
+        "keymapperd"
+    };
+    env::var_os("PATH").is_some_and(|paths| {
+        env::split_paths(&paths).any(|dir| dir.join(name).is_file())
+    })
+}
+
 /// Write *content* as a `config.yaml` in a unique temp directory, return the
 /// directory path.  The caller must delete it (or let the process exit).
 fn write_config_dir(label: &str, content: &str) -> PathBuf {
@@ -895,6 +908,19 @@ fn daemon_status_not_running() {
 
 #[test]
 fn daemon_start_not_found() {
+    // The test's premise is that `keymapperd` is not installed (true in CI).
+    // Where the daemon binary is resolvable via `PATH`, `daemon start`
+    // genuinely starts a live daemon that the service backend cannot stop
+    // again, so skip instead of leaving an orphaned daemon running its
+    // global hook.
+    if daemon_binary_on_path() {
+        eprintln!(
+            "skipping: keymapperd is resolvable via PATH; `daemon start` \
+             would start a live daemon"
+        );
+        return;
+    }
+
     // Hold the e2e lock: the test probes the process list for `keymapperd`,
     // and a daemon started by a concurrent e2e test would make `daemon
     // start` report "started" (its 500 ms liveness check would see the

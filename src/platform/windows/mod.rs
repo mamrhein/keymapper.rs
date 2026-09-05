@@ -8,11 +8,12 @@
 // $Revision$
 
 mod config_dir;
-mod dispatch;
+mod device_match;
 mod key;
 mod keyboard;
 mod mapping;
 pub(crate) mod raw_input;
+mod raw_worker;
 
 /// Magic `dwExtraInfo` tag stamped on every key the daemon injects through
 /// `SendInput` — mapped outputs in normal mode and re-emissions in capture

@@ -7,24 +7,30 @@
 // $Source$
 // $Revision$
 
-//! Windows keyboard mapping via a three-thread architecture.
+//! Windows keyboard mapping via a two-thread architecture.
 //!
 //! The hook thread installs a \`WH_KEYBOARD_LL\` hook and runs the message
-//! loop.  On each key event it sends a request to the worker thread and
-//! blocks on a one-shot reply channel.  The worker matches against recent
-//! raw input events to identify the source keyboard, performs the mapping
-//! lookup, and replies with \`swallow\` or \`pass through\`.
+//! loop.  On each key event the hook proc performs the mapping lookup
+//! itself — matching the event against the raw input buffer for device
+//! identification — and either emits the mapped output directly via
+//! \`SendInput\` and swallows the key, or passes it through.
+//!
+//! The in-callback emission is validated by the capture-mode e2e tests: the
+//! daemon's tagged re-emissions are issued from within the hook callback and
+//! captured by the monitor's own hook in a separate process, so the previous
+//! design (worker thread, one-shot reply channel, deferred emission) is no
+//! longer load-bearing.
 //!
 //! Thread layout:
 //!
 //! 1. **Hook thread** — \`WH_KEYBOARD_LL\` hook + message loop
-//!    (\`MsgWaitForMultipleObjects\` + \`PeekMessageW\`).  Sends \`HookEvent\`
-//!    to worker, blocks on reply, and drains queued emissions after each
-//!    wait.
+//!    (\`MsgWaitForMultipleObjects\` + \`PeekMessageW\`).  Decides and emits
+//!    in-callback, and drains the emission queue (fed only by standalone
+//!    consumer events) after each wait.
 //! 2. **Raw input thread** — Message-only window + \`GetMessageW\` loop for
-//!    \`WM_INPUT\`.  Sends \`RawInputEvent\` to worker.
-//! 3. **Worker thread** — Receives from both channels, matches events,
-//!    resolves devices, performs lookups, sends decisions back.
+//!    \`WM_INPUT\`.  Maintains the device-identification buffer and
+//!    processes standalone Consumer Control events, which never reach the
+//!    hook.
 
 use std::{
     sync::{
@@ -40,7 +46,6 @@ use std::io::Write;
 #[cfg(feature = "e2e")]
 use std::sync::atomic::AtomicBool;
 
-use crossbeam_channel;
 use parking_lot::RwLock;
 use windows::Win32::{
     Foundation::{
@@ -70,12 +75,12 @@ use windows::Win32::{
 use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
 
 use super::{
-    dispatch::{Decision, HookEvent, spawn_worker},
+    device_match::{device_cache, match_usage},
     key::{Key, hid_to_vk},
     raw_input::start_raw_input_loop,
+    raw_worker::spawn_raw_worker,
+    INJECTED_TAG,
 };
-
-use super::INJECTED_TAG;
 use crate::{
     common::{
         hid_usage::HidUsage, keyboard::KeyboardSpecifier,
@@ -87,22 +92,6 @@ use crate::{
 // ---------------------------------------------------------------------------
 // Static state for the hook procedure
 // ---------------------------------------------------------------------------
-
-/// Shared sender for hook events.  Accessed from the hook proc so that
-/// events can be pushed to the worker thread.
-static HOOK_TX: parking_lot::Mutex<
-    Option<crossbeam_channel::Sender<HookEvent>>,
-> = parking_lot::Mutex::new(None);
-
-/// Stores the sender that the hook procedure uses to push events.
-fn set_hook_tx(tx: crossbeam_channel::Sender<HookEvent>) {
-    *HOOK_TX.lock() = Some(tx);
-}
-
-/// Retrieves the sender for pushing hook events.
-fn get_hook_tx() -> Option<crossbeam_channel::Sender<HookEvent>> {
-    HOOK_TX.lock().clone()
-}
 
 /// `HHOOK` wraps a raw `*mut c_void` which is not `Send`.  We use a raw
 /// pointer stored in a usize instead, which is `Send` and `Sync`.  This is
@@ -118,6 +107,24 @@ fn set_hook_handle(handle: HHOOK) {
 
 fn hook_handle() -> HHOOK {
     HHOOK(*HOOK_HANDLE.lock() as *mut std::ffi::c_void)
+}
+
+/// The compiled mapping cache, shared with the hook proc.
+///
+/// The hook proc is a `extern "system"` fn and cannot capture locals, so
+/// the lookup is parked in a process-wide static that is set once from
+/// [`start_mapping`] before the hook is installed.  The hook proc treats a
+/// missing lookup as "pass through" so a key event can never stall the
+/// input chain while the engine is not up.
+static LOOKUP: std::sync::OnceLock<Arc<RwLock<dyn Lookup>>> =
+    std::sync::OnceLock::new();
+
+fn set_lookup(lookup: Arc<RwLock<dyn Lookup>>) {
+    let _ = LOOKUP.set(lookup);
+}
+
+fn lookup() -> Option<&'static Arc<RwLock<dyn Lookup>>> {
+    LOOKUP.get()
 }
 
 // ---------------------------------------------------------------------------
@@ -178,29 +185,6 @@ fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
 }
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
-    // In test mode, write output events to a file instead of calling
-    // `SendInput`. This avoids the issue where `SendInput` from within a
-    // `WH_KEYBOARD_LL` hook callback does not trigger other hooks (Windows
-    // prevents recursive hook invocation). The e2e test reads this file to
-    // verify outputs.  Compiled in only with the `e2e` feature, so the
-    // production binary has no env-gated file-write path here.
-    #[cfg(feature = "e2e")]
-    if let Ok(path) = std::env::var("KEYMAPPER_TEST_OUTPUT") {
-        let line = if is_key_up {
-            format!("UP {}\n", vk.0)
-        } else {
-            format!("DOWN {}\n", vk.0)
-        };
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()
-            .as_mut()
-            .and_then(|f| f.write_all(line.as_bytes()).ok());
-        return;
-    }
-
     #[cfg(feature = "e2e")]
     if capture_enabled() {
         capture_debug(&format!("emit vk={:#04x} up={}", vk.0, is_key_up));
@@ -282,20 +266,18 @@ pub(super) fn emit_key_event(native_key: &NativeKey) {
 // Deferred emission
 // ---------------------------------------------------------------------------
 
-/// Outputs the worker has decided to emit, queued for the main message loop
-/// to send via `SendInput`.
+/// Outputs queued for the main message loop to send via `SendInput`.
 ///
-/// A `SendInput` must not be issued from inside the low-level hook callback
-/// (nor while a hook chain is in progress): the input system drops injected
-/// events that arrive while the hook thread is busy processing a chain, and
-/// they never reach the target window.  The worker therefore queues the
-/// outputs here, and the always-pumping message loop performs the actual
-/// `SendInput` once the hook chain has completed.
+/// Only standalone consumer events are queued (see `raw_worker`): their
+/// emission originates on the raw input thread, where a `SendInput` could
+/// race a keyboard hook chain in progress and be dropped by the input
+/// system.  Mapped keyboard outputs are emitted in-callback by the hook
+/// proc directly, so they never pass through this queue.
 static PENDING_EMISSIONS: parking_lot::Mutex<Vec<Vec<NativeKey>>> =
     parking_lot::Mutex::new(Vec::new());
 
 /// The main message loop's thread id, recorded in `start_mapping` so the
-/// worker can post the drain wake message.
+/// raw input thread can post the drain wake message.
 static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 /// Records the main loop's thread id for the drain wake post.
@@ -306,7 +288,7 @@ fn set_main_thread_id(tid: u32) {
 /// Queue a set of mapped outputs for emission by the main message loop and
 /// wake the loop so it drains the queue.
 ///
-/// The worker thread calls this when a key-down resolves to a mapping.  A
+/// The raw input thread calls this for standalone consumer events.  A
 /// swallowed hook event produces no message of its own, so the posted
 /// `WM_APP` message is what makes the blocked `MsgWaitForMultipleObjects`
 /// return and the loop body (the drain) run.  If the wake is posted while a
@@ -324,10 +306,9 @@ pub(super) fn queue_emission(outputs: Vec<NativeKey>) {
     }
 }
 
-/// Emit all queued outputs via `SendInput`.  The main message loop calls this
-/// from the loop body, after the hook chain has completed, so the
-/// `SendInput` is issued from a thread that is neither inside the hook
-/// callback nor blocked in its reply wait.
+/// Emit all queued outputs via `SendInput`.  The main message loop calls
+/// this from the loop body, after the hook chain has completed, so the
+/// `SendInput` is issued with the input queue idle.
 fn drain_and_emit_emissions() {
     let pending = std::mem::take(&mut *PENDING_EMISSIONS.lock());
     for outputs in pending {
@@ -353,7 +334,7 @@ fn drain_and_emit_emissions() {
 static CAPTURE_T0: std::sync::OnceLock<std::time::Instant> =
     std::sync::OnceLock::new();
 
-/// Capture-mode debug log, appended to from the hook and worker threads.
+/// Capture-mode debug log, appended to from the hook and raw input threads.
 #[cfg(feature = "e2e")]
 static CAPTURE_DEBUG: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
     std::sync::OnceLock::new();
@@ -393,16 +374,13 @@ static TRACKED_MODIFIERS: AtomicU8 = AtomicU8::new(0);
 static CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Whether capture mode is active (all emission tagged through the virtual
-/// keyboard).  Capture mode only exists in `e2e` builds; in production it is
-/// always disabled, so the flag is a compile-time `false` there.  Only
-/// compiled in where it is referenced: the worker's normal-mode emission
-/// block (every non-test build) and the capture-mode paths (e2e builds).
-#[cfg(any(feature = "e2e", not(test)))]
+/// keyboard).
+///
+/// Only compiled in with the `e2e` feature: without it, capture mode can
+/// never be enabled, so the query is dead code in production builds.
+#[cfg(feature = "e2e")]
 pub(super) fn capture_enabled() -> bool {
-    #[cfg(feature = "e2e")]
-    { CAPTURE_MODE.load(Ordering::Relaxed) }
-    #[cfg(not(feature = "e2e"))]
-    { false }
+    CAPTURE_MODE.load(Ordering::Relaxed)
 }
 
 /// Record the capture-mode flag determined at startup.
@@ -486,8 +464,8 @@ impl CaptureModifierState {
     }
 }
 
-/// Process-global forwarded-modifier state, mutated only by the worker
-/// thread (the sole emitter in capture mode).
+/// Process-global forwarded-modifier state, mutated only by the hook proc
+/// (the sole decider of mapped keyboard events in capture mode).
 #[cfg(feature = "e2e")]
 static CAPTURE_MODIFIER_STATE: parking_lot::Mutex<CaptureModifierState> =
     parking_lot::Mutex::new(CaptureModifierState {
@@ -535,9 +513,6 @@ pub(super) fn capture_release_triggered_modifiers(modifiers: u8) {
 // Low-level keyboard hook procedure
 // ---------------------------------------------------------------------------
 
-/// Counter for polling the reply channel.  Resets on each hook event.
-static REPLY_COUNTER: AtomicU32 = AtomicU32::new(0);
-
 extern "system" fn low_level_keyboard_proc(
     code: i32,
     w_param: WPARAM,
@@ -546,10 +521,6 @@ extern "system" fn low_level_keyboard_proc(
     if code < 0 {
         return unsafe { CallNextHookEx(None, code, w_param, l_param) };
     }
-
-    let Some(tx) = get_hook_tx() else {
-        return unsafe { CallNextHookEx(None, code, w_param, l_param) };
-    };
 
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
@@ -624,72 +595,128 @@ extern "system" fn low_level_keyboard_proc(
         pressed_modifiers &= !(1 << bit);
     }
 
-    // Create a bounded (capacity 1) reply channel and send the event to the
-    // worker.  Capacity 1 is sufficient because only one decision is sent.
-    let (reply_tx, reply_rx) = crossbeam_channel::bounded(1);
-
-    let hook_event = HookEvent {
-        vk_code,
-        usage,
-        is_key_up,
-        modifiers: pressed_modifiers,
-        reply_tx,
-    };
-
-    // Sending to an unbounded channel never blocks.
-    let Ok(()) = tx.send(hook_event) else {
-        // Worker disconnected — pass through.
+    // A virtual-key code without an HID identity can never match a compiled
+    // rule, so pass it through before doing any other work.
+    let Some(usage) = usage else {
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
     };
 
-    // Wait for the worker's decision without blocking the input chain for too
-    // long.  Use a polling loop with short sleeps to avoid deadlocking the
-    // Windows message pump while still giving the worker time to respond.
-    //
-    // Note: the mapped output is NOT emitted here.  It is queued for the main
-    // message loop (see [`drain_and_emit_emissions`]), because a `SendInput`
-    // issued while this hook thread is blocked in the wait is dropped by the
-    // input system and never reaches the target.
-    let decision = loop {
-        if let Ok(decision) = reply_rx.try_recv() {
-            break decision;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        // Safety check — if we've been waiting too long, give up.
-        // The reply timeout is measured externally via a static counter.
-        if REPLY_COUNTER.fetch_add(1, Ordering::Relaxed) > 50 {
-            break Decision::PassThrough;
-        }
+    // Identify the source keyboard non-blockingly.  Raw input and the hook
+    // do not deliver in a guaranteed order, so retry for a few milliseconds
+    // — long enough for the raw event of this same press to arrive in the
+    // common case, short enough to keep the hook callback well inside
+    // Windows' low-level-hook timeout.  A press that never matches degrades
+    // to a lookup without device identification (device-filtered rules
+    // simply do not fire for it).
+    let device_path = match_usage_with_retry(usage)
+        .and_then(|handle_ptr| device_cache().get_or_resolve(handle_ptr));
+
+    // Perform the mapping lookup: app-scoped rules for the active
+    // application take precedence over global rules, and both honour the
+    // device filter resolved above.
+    let Some(lookup) = lookup() else {
+        // The engine is not up (or is shutting down); never block the
+        // input chain on that.
+        return unsafe {
+            CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
+        };
     };
+    let guard = lookup.read();
+    let outputs = guard
+        .for_active_app(usage, pressed_modifiers, device_path.as_deref())
+        .or_else(|| {
+            guard.global(usage, pressed_modifiers, device_path.as_deref())
+        })
+        .map(|v| v.to_vec());
+    drop(guard);
 
-    // Reset the reply counter for the next event.
-    REPLY_COUNTER.store(0, Ordering::Relaxed);
-
-    match decision {
-        Decision::Swallow(_) => {
-            // The worker has already handled the mapped outputs: in capture
-            // mode it emitted them directly, in normal mode it queued them
-            // for the main message loop (posting the wake message that
-            // triggers the drain).  A `SendInput` issued while this hook
-            // callback is on the stack is dropped by the input system, so
-            // the hook proc never emits — it only swallows the original
-            // key, which the daemon fully owns in both modes.
-            return LRESULT(1);
-        }
-        Decision::PassThrough => {
-            // In capture mode the worker forwarded the original key through
-            // the virtual keyboard, so swallow the real one to avoid double
-            // delivery.  In normal mode there is no mapping — pass through.
-            #[cfg(feature = "e2e")]
-            if capture_enabled() {
+    // Capture mode (e2e only): the hook proc performs all emission in
+    // callback, so the monitor's hook observes it.  Mapped outputs are
+    // emitted as complete taps; an unmapped key is forwarded as-is.
+    #[cfg(feature = "e2e")]
+    if capture_enabled() {
+        let own_bit = HidUsage::hid_usage_to_modifier_bit(usage);
+        match &outputs {
+            Some(outputs) => {
+                if !is_key_up {
+                    // The trigger's modifiers were forwarded when pressed.
+                    // Release them on the virtual keyboard now so the
+                    // output is emitted as a clean tap; mark them consumed
+                    // so their physical release is swallowed rather than
+                    // forwarded a second time.
+                    capture_release_triggered_modifiers(pressed_modifiers);
+                    for native_key in outputs {
+                        emit_key_event(native_key);
+                    }
+                }
+                // Swallow the physical key in both directions: the daemon
+                // fully owns it in capture mode.
+                return LRESULT(1);
+            }
+            None => {
+                if is_key_up
+                    && let Some(bit) = own_bit
+                    && capture_record_forwarded_up(bit)
+                {
+                    // The modifier was already released on the virtual
+                    // keyboard when its trigger fired; swallow the
+                    // physical release.
+                } else {
+                    if !is_key_up && let Some(bit) = own_bit {
+                        capture_record_forwarded_down(bit);
+                    }
+                    emit_forwarded_key(vk_code.0, is_key_up);
+                }
+                // The forwarded re-emission carries the tag, so swallow the
+                // physical key to avoid double delivery.
                 return LRESULT(1);
             }
         }
-    };
+    }
+
+    // Normal mode: emit the mapped output directly in the callback and
+    // swallow the original key.  A `SendInput` issued from within a
+    // `WH_KEYBOARD_LL` callback reaches other hooks and the target window
+    // (the capture-mode e2e tests capture the tagged re-emission from a
+    // separate process's hook), so the previous deferred-emission design is
+    // not needed.
+    if !is_key_up {
+        if let Some(outputs) = &outputs {
+            for native_key in outputs {
+                emit_key_event(native_key);
+            }
+            return LRESULT(1);
+        }
+    } else if outputs.is_some() {
+        // Swallow the key-up to stay consistent with its key-down, which
+        // was swallowed when it fired the rule.
+        return LRESULT(1);
+    }
 
     unsafe { CallNextHookEx(Some(hook_handle()), code, w_param, l_param) }
+}
+
+/// Match a raw input event for *usage* against the device-identification
+/// buffer, retrying for a few milliseconds to absorb the non-deterministic
+/// delivery order between the raw input and hook streams.
+///
+/// Returns the device handle pointer of the matching event, or `None` when
+/// no raw input event arrives within the budget (the caller then falls back
+/// to a lookup without device identification).
+fn match_usage_with_retry(usage: HidUsage) -> Option<usize> {
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(3);
+    loop {
+        if let Some(handle_ptr) = match_usage(usage) {
+            return Some(handle_ptr);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -698,12 +725,11 @@ extern "system" fn low_level_keyboard_proc(
 
 /// Starts the keyboard mapping engine.
 ///
-/// Initialises the raw input thread, spawns the worker thread, installs the
-/// `WH_KEYBOARD_LL` hook, and runs the message loop.  Blocks the calling
-/// thread until the message loop exits (i.e. on `WM_QUIT`).
+/// Initialises the raw input loop, spawns the raw input thread, installs
+/// the `WH_KEYBOARD_LL` hook, and runs the message loop.  Blocks the
+/// calling thread until the message loop exits (i.e. on `WM_QUIT`).
 ///
-/// This is the entry point called by `keymapperd.rs` and replaces the
-/// previous single-threaded static-mutex architecture.
+/// This is the entry point called by `keymapperd.rs`.
 ///
 /// `keyboard_filter` is accepted for signature uniformity with the other
 /// platforms but is a no-op on Windows: capture is a session-global
@@ -725,32 +751,28 @@ pub fn start_mapping(
     // The background thread is already detached inside start_raw_input_loop.
     Box::leak(Box::new(_raw_loop));
 
-    // Small delay to allow raw input registration to complete before the
-    // hook starts firing events.
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
     // Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`): the daemon
     // swallows every key and re-emits it through the virtual keyboard, tagged
     // with [`INJECTED_TAG`], so the monitor's `WH_KEYBOARD_LL` hook can capture
-    // the output without depending on a focused window.  In this mode the
-    // worker performs all emission on its own (non-hook) thread — `SendInput`
-    // from within a `WH_KEYBOARD_LL` callback would not reach other hooks.
-    // Compiled in only with the `e2e` feature, so production builds can never
-    // be switched into capture mode via the environment.
+    // the output without depending on a focused window.  Emission happens in
+    // the hook proc's callback, which the monitor observes.  Compiled in only
+    // with the `e2e` feature, so production builds can never be switched into
+    // capture mode via the environment.
     #[cfg(feature = "e2e")]
     if std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty()) {
         set_capture_mode(true);
         eprintln!("Windows: capture mode enabled (KEYMAPPER_CAPTURE).");
     }
 
-    // Record this thread's id so the worker can post the drain wake message
-    // to the message loop (done before the worker starts, so no emission
-    // can be queued before the id is recorded).
+    // Record this thread's id so the raw input thread can post the drain
+    // wake message to the message loop (done before the raw worker starts,
+    // so no emission can be queued before the id is recorded).
     set_main_thread_id(unsafe { GetCurrentThreadId() });
 
-    // Spawn the worker thread.
-    let hook_tx = spawn_worker(Arc::clone(&lookup), raw_rx);
-    set_hook_tx(hook_tx);
+    // Park the lookup where the hook proc can find it, then spawn the raw
+    // input thread (which consumes the raw input channel).
+    set_lookup(Arc::clone(&lookup));
+    spawn_raw_worker(lookup, raw_rx);
 
     // Install the low-level keyboard hook.
     let h_instance: HINSTANCE = unsafe { GetModuleHandleW(None)?.into() };
@@ -769,27 +791,26 @@ pub fn start_mapping(
     }
     set_hook_handle(handle);
 
-    println!("Windows low-level hook listening (three-thread mode).");
+    println!("Windows low-level hook listening (two-thread mode).");
 
-    // The raw input loop, worker thread, and keyboard hook are all live, so
-    // the daemon can now process events.
+    // The raw input loop, raw input thread, and keyboard hook are all live,
+    // so the daemon can now process events.
     if let Some(signal) = ready_signal {
         signal();
     }
 
     // Run the message loop until WM_QUIT.  The low-level hook callback runs
-    // re-entrantly inside the blocked `MsgWaitForMultipleObjects` call, and
-    // a swallowed hook event yields no message of its own, so the wake for
-    // the drain is the `WM_APP` message the worker posts through
-    // `queue_emission` when it queues mapped outputs.  The loop blocks in
+    // re-entrantly inside the blocked `MsgWaitForMultipleObjects` call and
+    // emits mapped keyboard output itself, so the only queueing emission is
+    // from standalone consumer events: the wake for the drain is the `WM_APP`
+    // message the raw input thread posts through `queue_emission` when it
+    // queues a consumer output.  The loop blocks in
     // `MsgWaitForMultipleObjects` (which returns for any posted message),
     // then drains the queue with the non-blocking `PeekMessageW` — a
-    // blocking `GetMessageW` here would
-    // consume the wake message and then block on the next one, starving the
-    // drain.  The drain runs in the loop body, where the hook chain is
-    // idle, so the `SendInput` reaches the target.  Messages are removed
-    // but neither translated nor dispatched: the hook callback performs all
-    // processing.
+    // blocking `GetMessageW` here would consume the wake message and then
+    // block on the next one, starving the drain.  Messages are removed but
+    // neither translated nor dispatched: the hook callback already handled
+    // everything else.
     unsafe {
         loop {
             let wait =
@@ -877,16 +898,6 @@ mod tests {
                 assert_eq!(resolved.unwrap().0, vk.as_native());
             }
         }
-    }
-
-    #[test]
-    fn hook_tx_static_is_initially_none() {
-        // Verify that the static sender starts as None.  This is mainly
-        // a sanity check that the static initialisation works correctly.
-        // Note: other tests may have set this, so we reset it afterwards.
-        let was_none = get_hook_tx().is_none();
-        // We don't assert because other tests may have populated it.
-        let _ = was_none;
     }
 
     #[cfg(feature = "e2e")]
