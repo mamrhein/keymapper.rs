@@ -74,14 +74,7 @@ pub fn stop() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 pub fn stop() -> Result<(), String> {
-    // On Windows we send a termination signal by finding the process and
-    // closing its handle.  For now fall back to asking the user to use the
-    // Task Manager or a future Windows service implementation.
-    Err(
-        "stop is not supported on Windows yet; use Task Manager or restart \
-         to stop keymapperd"
-            .into(),
-    )
+    windows::stop_daemon(DAEMON_NAME)
 }
 
 /// Restart the keymapperd service.
