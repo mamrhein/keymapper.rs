@@ -9,11 +9,15 @@
 
 //! Windows keyboard mapping via a two-thread architecture.
 //!
-//! The hook thread installs a \`WH_KEYBOARD_LL\` hook and runs the message
+//! The hook thread installs a `WH_KEYBOARD_LL` hook and runs the message
 //! loop.  On each key event the hook proc performs the mapping lookup
 //! itself — matching the event against the raw input buffer for device
 //! identification — and either emits the mapped output directly via
-//! \`SendInput\` and swallows the key, or passes it through.
+//! `SendInput` and swallows the key, or passes it through.  When a trigger
+//! fires while the user still holds a forwarded modifier key, that
+//! modifier is released first (a tagged key-up), so the emitted output is
+//! a clean tap instead of riding on the held modifier, and the modifier's
+//! physical release is swallowed.
 //!
 //! The in-callback emission is validated by the capture-mode e2e tests: the
 //! daemon's tagged re-emissions are issued from within the hook callback and
@@ -33,6 +37,7 @@
 //!    hook.
 
 use std::{
+    collections::BTreeSet,
     sync::{
         Arc,
         atomic::{AtomicU8, AtomicU32, Ordering},
@@ -402,31 +407,30 @@ pub(super) fn emit_forwarded_key(vk: u16, is_key_up: bool) {
     }
 }
 
-/// Tracks forwarded-modifier state for capture-mode emission.
+/// Tracks forwarded-modifier state for emission.
 ///
-/// In capture mode the daemon re-emits every pass-through key through the
-/// virtual keyboard, so a forwarded modifier key is held on that keyboard
-/// until its physical release is forwarded.  When a trigger fires while such
-/// a modifier is held, the modifier must be released first, or the emitted
-/// output becomes an unintended chord (e.g. the rule
+/// A forwarded (pass-through) modifier key is held in the target
+/// application until its physical release is forwarded.  When a trigger
+/// fires while such a modifier is held, the modifier must be released
+/// first, or the emitted output becomes an unintended chord (e.g. the rule
 /// `Ctrl+Semicolon -> C` would emit `Ctrl+C`, i.e. SIGINT).  Consumed
 /// modifiers are marked so their physical release is swallowed rather than
-/// forwarded a second time.  Mirrors the `consumed_modifiers` bookkeeping
-/// of the Linux and macOS backends.
-#[cfg(feature = "e2e")]
+/// forwarded a second time.  In capture mode the release goes to the
+/// virtual keyboard; in normal mode it is a tagged `SendInput` key-up.
+/// Mirrors the `consumed_modifiers` bookkeeping of the Linux and macOS
+/// backends.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct CaptureModifierState {
+struct ForwardedModifierState {
     /// Bitmask of modifier keys that were forwarded (pass-through) and are
-    /// still held on the virtual keyboard.
+    /// still held in the target application.
     forwarded: u8,
     /// Bitmask of modifier keys that were part of a fired trigger and have
-    /// already been released on the virtual keyboard.  Their physical
-    /// release is swallowed so it is not forwarded a second time.
+    /// already been released on the output side.  Their physical release
+    /// is swallowed so it is not forwarded a second time.
     consumed: u8,
 }
 
-#[cfg(feature = "e2e")]
-impl CaptureModifierState {
+impl ForwardedModifierState {
     /// Record a forwarded (pass-through) modifier press.
     ///
     /// A fresh press clears any consumed mark: the early release belongs to
@@ -440,7 +444,7 @@ impl CaptureModifierState {
     /// Record the physical release of a forwarded modifier.
     ///
     /// Returns `true` when the release must be swallowed because the
-    /// modifier was already released on the virtual keyboard when a trigger
+    /// modifier was already released on the output side when a trigger
     /// fired, and `false` when it should be forwarded.
     fn record_forwarded_up(&mut self, bit: u8) -> bool {
         let mask = 1 << bit;
@@ -455,7 +459,7 @@ impl CaptureModifierState {
 
     /// Consume the modifiers of a fired trigger: the subset that was
     /// forwarded is moved from the forwarded mask to the consumed mask and
-    /// returned, so the caller can release it on the virtual keyboard.
+    /// returned, so the caller can release it on the output side.
     fn consume_triggered(&mut self, modifiers: u8) -> u8 {
         let consumed = modifiers & self.forwarded;
         self.forwarded &= !consumed;
@@ -464,14 +468,32 @@ impl CaptureModifierState {
     }
 }
 
-/// Process-global forwarded-modifier state, mutated only by the hook proc
-/// (the sole decider of mapped keyboard events in capture mode).
+/// Process-global forwarded-modifier state for capture-mode emission,
+/// mutated only by the hook proc (the sole decider of mapped keyboard
+/// events in capture mode).
 #[cfg(feature = "e2e")]
-static CAPTURE_MODIFIER_STATE: parking_lot::Mutex<CaptureModifierState> =
-    parking_lot::Mutex::new(CaptureModifierState {
+static CAPTURE_MODIFIER_STATE: parking_lot::Mutex<ForwardedModifierState> =
+    parking_lot::Mutex::new(ForwardedModifierState {
         forwarded: 0,
         consumed: 0,
     });
+
+/// Process-global forwarded-modifier state for normal-mode emission,
+/// mutated only by the hook proc.
+static FORWARDED_MODIFIER_STATE: parking_lot::Mutex<ForwardedModifierState> =
+    parking_lot::Mutex::new(ForwardedModifierState {
+        forwarded: 0,
+        consumed: 0,
+    });
+
+/// Physical key-downs the daemon swallowed because they fired a mapped
+/// trigger, keyed by (scan code, extended flag) so keys sharing a
+/// virtual-key code (e.g. the two Shifts) stay distinct.  The record
+/// decides the fate of the key's release and auto-repeats; re-deriving it
+/// from a lookup would be wrong, because the modifier state can change
+/// between the key-down and the key-up.  Mutated only by the hook thread.
+static SWALLOWED_KEYS: parking_lot::Mutex<BTreeSet<(u16, bool)>> =
+    parking_lot::Mutex::new(BTreeSet::new());
 
 /// Record a forwarded (pass-through) modifier press in capture mode.
 #[cfg(feature = "e2e")]
@@ -512,6 +534,28 @@ pub(super) fn capture_release_triggered_modifiers(modifiers: u8) {
 // ---------------------------------------------------------------------------
 // Low-level keyboard hook procedure
 // ---------------------------------------------------------------------------
+
+/// Decide the fate of a physical key-up in normal mode.
+///
+/// Returns `true` when the key-up must be swallowed: the release of a key
+/// whose key-down fired a mapped trigger (recorded in *swallowed*), or the
+/// physical release of a consumed modifier (already released on the output
+/// side when its trigger fired).  Any other release forwards, and a
+/// forwarded modifier's release untracks the key.
+fn decide_key_up(
+    swallowed: &mut BTreeSet<(u16, bool)>,
+    state: &mut ForwardedModifierState,
+    key_identity: (u16, bool),
+    own_bit: Option<u8>,
+) -> bool {
+    if swallowed.remove(&key_identity) {
+        return true;
+    }
+    match own_bit {
+        Some(bit) => state.record_forwarded_up(bit),
+        None => false,
+    }
+}
 
 extern "system" fn low_level_keyboard_proc(
     code: i32,
@@ -676,25 +720,66 @@ extern "system" fn low_level_keyboard_proc(
         }
     }
 
-    // Normal mode: emit the mapped output directly in the callback and
-    // swallow the original key.  A `SendInput` issued from within a
-    // `WH_KEYBOARD_LL` callback reaches other hooks and the target window
-    // (the capture-mode e2e tests capture the tagged re-emission from a
-    // separate process's hook), so the previous deferred-emission design is
-    // not needed.
-    if !is_key_up {
-        if let Some(outputs) = &outputs {
+    // Normal mode.  A `SendInput` issued from within a `WH_KEYBOARD_LL`
+    // callback reaches other hooks and the target window (the capture-mode
+    // e2e tests capture the tagged re-emission from a separate process's
+    // hook), so the mapped output is emitted directly in the callback.
+    //
+    // (Scan code, extended flag) identifies the physical key; keys sharing
+    // a virtual-key code (e.g. the two Shifts) stay distinct.
+    let key_identity =
+        (kbd_struct.scanCode as u16, kbd_struct.flags.0 & 1 != 0);
+    let own_bit = HidUsage::hid_usage_to_modifier_bit(usage);
+
+    if is_key_up {
+        // The swallow decision comes from the key-down's own record rather
+        // than a re-run of the lookup: the modifier state may have changed
+        // in the meantime (releasing a modifier is the common case), which
+        // would re-derive a different rule — leaking the release into the
+        // app as a phantom key-up, or swallowing it while the key-down
+        // passed through and leaving the key held in the app.
+        let mut swallowed = SWALLOWED_KEYS.lock();
+        let mut state = FORWARDED_MODIFIER_STATE.lock();
+        if decide_key_up(&mut swallowed, &mut state, key_identity, own_bit) {
+            return LRESULT(1);
+        }
+        return unsafe {
+            CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
+        };
+    }
+
+    if let Some(outputs) = &outputs {
+        // First press: the trigger's modifiers were forwarded when pressed
+        // and are still held in the app; release them (tagged key-ups)
+        // before the output so it is emitted as a clean tap, and mark them
+        // consumed so their physical releases are swallowed.  Record the
+        // key so its release is swallowed too.  Auto-repeats (insert
+        // returns false) are swallowed without re-firing the rule.
+        let fired = SWALLOWED_KEYS.lock().insert(key_identity);
+        if fired {
+            let released = FORWARDED_MODIFIER_STATE
+                .lock()
+                .consume_triggered(pressed_modifiers);
+            for bit in 0..8 {
+                if released & (1 << bit) != 0
+                    && let Some(vk) = modifier_bit_to_vk(bit)
+                {
+                    simulate_key_event(vk, true);
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
             for native_key in outputs {
                 emit_key_event(native_key);
             }
-            return LRESULT(1);
         }
-    } else if outputs.is_some() {
-        // Swallow the key-up to stay consistent with its key-down, which
-        // was swallowed when it fired the rule.
         return LRESULT(1);
     }
 
+    // Unmapped: track a forwarded modifier press so a later fired trigger
+    // can release it cleanly, then pass the key through.
+    if let Some(bit) = own_bit {
+        FORWARDED_MODIFIER_STATE.lock().record_forwarded_down(bit);
+    }
     unsafe { CallNextHookEx(Some(hook_handle()), code, w_param, l_param) }
 }
 
@@ -900,12 +985,11 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "e2e")]
     #[test]
-    fn capture_state_forwarded_down_up_round_trip() {
+    fn forwarded_state_down_up_round_trip() {
         // A forwarded (pass-through) modifier press is tracked, and its
         // physical release is forwarded (not swallowed).
-        let mut state = CaptureModifierState::default();
+        let mut state = ForwardedModifierState::default();
         state.record_forwarded_down(0);
         assert_eq!(state.forwarded, 0b0000_0001);
         assert!(!state.record_forwarded_up(0));
@@ -913,12 +997,11 @@ mod tests {
         assert_eq!(state.consumed, 0);
     }
 
-    #[cfg(feature = "e2e")]
     #[test]
-    fn capture_state_consume_releases_and_swallows_releases() {
+    fn forwarded_state_consume_releases_and_swallows_releases() {
         // A trigger firing while both modifiers are held consumes them;
         // their physical releases are then swallowed.
-        let mut state = CaptureModifierState::default();
+        let mut state = ForwardedModifierState::default();
         state.record_forwarded_down(0);
         state.record_forwarded_down(1);
 
@@ -932,12 +1015,11 @@ mod tests {
         assert_eq!(state.consumed, 0);
     }
 
-    #[cfg(feature = "e2e")]
     #[test]
-    fn capture_state_consume_partial_subset() {
+    fn forwarded_state_consume_partial_subset() {
         // Only the modifiers that were actually forwarded are consumed;
         // the others are untouched and their releases still forward.
-        let mut state = CaptureModifierState::default();
+        let mut state = ForwardedModifierState::default();
         state.record_forwarded_down(2);
 
         let consumed = state.consume_triggered(0b0000_1100);
@@ -949,27 +1031,83 @@ mod tests {
         assert!(!state.record_forwarded_up(3)); // never forwarded: forward
     }
 
-    #[cfg(feature = "e2e")]
     #[test]
-    fn capture_state_consume_without_forwarded_modifiers() {
+    fn forwarded_state_consume_without_forwarded_modifiers() {
         // A trigger firing with no forwarded modifiers consumes nothing.
-        let mut state = CaptureModifierState::default();
+        let mut state = ForwardedModifierState::default();
         assert_eq!(state.consume_triggered(0b0000_0011), 0);
         assert_eq!(state.forwarded, 0);
         assert_eq!(state.consumed, 0);
     }
 
-    #[cfg(feature = "e2e")]
     #[test]
-    fn capture_state_late_release_after_consume_is_forwarded() {
+    fn forwarded_state_late_release_after_consume_is_forwarded() {
         // A modifier pressed again after being consumed (e.g. a fresh
         // physical press) is tracked as forwarded once more, so its
         // release forwards instead of being swallowed.
-        let mut state = CaptureModifierState::default();
+        let mut state = ForwardedModifierState::default();
         state.record_forwarded_down(0);
         assert_eq!(state.consume_triggered(0b0000_0001), 0b0000_0001);
         state.record_forwarded_down(0);
         assert!(!state.record_forwarded_up(0));
+        assert_eq!(state.forwarded, 0);
+        assert_eq!(state.consumed, 0);
+    }
+
+    #[test]
+    fn decide_key_up_swallows_release_of_mapped_key() {
+        // A release of a key whose key-down fired a mapped trigger is
+        // swallowed and clears the record.
+        let mut swallowed = BTreeSet::new();
+        let mut state = ForwardedModifierState::default();
+        swallowed.insert((0x1E, false));
+        assert!(decide_key_up(
+            &mut swallowed,
+            &mut state,
+            (0x1E, false),
+            None,
+        ));
+        assert!(swallowed.is_empty());
+    }
+
+    #[test]
+    fn decide_key_up_forwards_release_of_unmapped_key() {
+        // A release without a swallowed key-down record forwards.
+        let mut swallowed = BTreeSet::new();
+        let mut state = ForwardedModifierState::default();
+        assert!(!decide_key_up(
+            &mut swallowed,
+            &mut state,
+            (0x1E, false),
+            None,
+        ));
+    }
+
+    #[test]
+    fn decide_key_up_swallows_consumed_modifier_release() {
+        // A modifier consumed by a fired trigger swallows its physical
+        // release; a plain forwarded modifier's release forwards and
+        // untracks.
+        let mut swallowed = BTreeSet::new();
+        let mut state = ForwardedModifierState::default();
+        state.record_forwarded_down(1);
+        state.record_forwarded_down(5);
+        state.consume_triggered(0b0000_0010);
+
+        // Bit 1 (Left Shift) was consumed: swallow.
+        assert!(decide_key_up(
+            &mut swallowed,
+            &mut state,
+            (0x2A, false),
+            Some(1),
+        ));
+        // Bit 5 (Right Shift) was only forwarded: forward and untrack.
+        assert!(!decide_key_up(
+            &mut swallowed,
+            &mut state,
+            (0x36, true),
+            Some(5),
+        ));
         assert_eq!(state.forwarded, 0);
         assert_eq!(state.consumed, 0);
     }
