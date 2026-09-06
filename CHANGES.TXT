@@ -1,8 +1,6 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
-   0.1.0  First public version
-
    0.2.0  New features:
            - Cross-platform **active app detection**: macOS via objc2, Linux via
              Wayland toplevel-info / X11 (x11rb) / sysinfo, Windows via
@@ -15,3 +13,10 @@ Version   Changes
            - Daemon management: `keymapperd` now managed via systemd (Linux)
              and launchd (macOS).
           Platform architecture overhaul
+           - Windows app identity (breaking): `apps` entries are now the main
+             executable file name of the window-owning process and app-name
+             matching is now case-insensitive.
+           - Windows `appnames` no longer lists processes whose visible
+             top-level windows all have zero area.
+
+   0.1.0  First public version

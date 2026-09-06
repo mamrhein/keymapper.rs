@@ -12,10 +12,11 @@
 //! Both entry points produce the application names that keymapperd matches
 //! rules against:
 //!
-//! - [`get_active_app_name`] returns the name of the current foreground
-//!   application, used by the daemon for rule matching.
-//! - [`list_app_names`] returns the names of all visible applications, printed
-//!   by `keymapper appnames`.
+//! - [`get_active_app_name`] returns the canonical name of the current
+//!   foreground application, used by the daemon for rule matching.
+//! - [`list_app_names`] returns the canonical names of all visible
+//!   applications (with a human-readable display alias for each), printed by
+//!   `keymapper appnames`.
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -24,7 +25,22 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-/// Synchronously query the name of the current foreground application.
+/// A single application entry as returned by [`list_app_names`].
+///
+/// `name` is the canonical application identifier — the value to use in the
+/// `apps` field of the keymapperd configuration.  `display` is a
+/// human-readable alias (for example the application's marketing name) that
+/// may or may not differ from `name`.
+#[derive(Debug, Clone)]
+pub struct AppName {
+    /// Canonical app name used for rule matching.
+    pub name: String,
+    /// Human-readable display alias.
+    pub display: String,
+}
+
+/// Synchronously query the canonical name of the current foreground
+/// application.
 ///
 /// Returns `"unknown"` if no application is in the foreground or the query
 /// fails.
@@ -43,23 +59,35 @@ pub fn get_active_app_name() -> String {
     windows::get_active_app_name()
 }
 
-/// Return the sorted, deduplicated list of application names for all visible
-/// windows owned by the current user.
+/// Return the sorted, deduplicated list of application entries for all
+/// visible windows owned by the current user.
 ///
-/// These are the exact strings that should be used in the `apps` field of
-/// the keymapperd configuration.
+/// The `name` field of each entry is the exact value to use in the `apps`
+/// field of the keymapperd configuration.
 #[cfg(target_os = "linux")]
-pub fn list_app_names() -> Vec<String> {
+pub fn list_app_names() -> Vec<AppName> {
     linux::list_app_names()
+        .into_iter()
+        .map(|name| AppName {
+            display: name.clone(),
+            name,
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
-pub fn list_app_names() -> Vec<String> {
+pub fn list_app_names() -> Vec<AppName> {
     macos::list_app_names()
+        .into_iter()
+        .map(|name| AppName {
+            display: name.clone(),
+            name,
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
-pub fn list_app_names() -> Vec<String> {
+pub fn list_app_names() -> Vec<AppName> {
     windows::list_app_names()
 }
 
@@ -83,7 +111,7 @@ mod tests {
 
         let names = list_app_names();
         assert!(
-            names.contains(&active),
+            names.iter().any(|entry| entry.name == active),
             "active app {active:?} is not among the visible app names: \
              {names:?}",
         );

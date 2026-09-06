@@ -34,11 +34,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// List application names for all visible windows.
+    /// List applications that own visible windows.
     ///
-    /// The printed names are the exact values that keymapperd uses to match
-    /// rules against running applications.  Use them in the `apps` field of
-    /// your config.yaml.
+    /// Prints the canonical app name — the exact value to use in the `apps`
+    /// field of your config.yaml — followed by a human-readable display name
+    /// where it differs.
     Appnames,
 
     /// Configuration file management.
@@ -299,15 +299,22 @@ fn reject_symlink(path: &Path) -> Result<(), String> {
 }
 
 fn cmd_appnames() -> Result<(), Box<dyn std::error::Error>> {
-    let names = app_identity::list_app_names();
+    let apps = app_identity::list_app_names();
 
-    if names.is_empty() {
+    if apps.is_empty() {
         println!("No visible applications found.");
         return Ok(());
     }
 
-    for name in &names {
-        println!("{name}");
+    // Align the display names in a second column, but only print that
+    // column for entries where it adds information.
+    let width = apps.iter().map(|app| app.name.len()).max().unwrap_or(0);
+    for app in &apps {
+        if app.display == app.name {
+            println!("{}", app.name);
+        } else {
+            println!("{:<width$}  {}", app.name, app.display);
+        }
     }
 
     Ok(())
