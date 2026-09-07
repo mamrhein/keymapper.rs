@@ -10,8 +10,11 @@
 //! Daemon runtime: mapping cache, state management, and config hot-reload.
 
 pub mod config_io;
+pub mod decision;
 pub mod mapping_cache;
 pub mod state;
 #[cfg(feature = "e2e")]
 pub mod test_hooks;
+#[cfg(test)]
+pub(crate) mod test_lookup;
 pub mod watcher;

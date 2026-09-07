@@ -282,7 +282,7 @@ impl MutableLookup for RuntimeState {
 /// `check_keyboard` is called for each matching rule to verify its per-rule
 /// keyboard filter.  It should return `true` if the rule is allowed to
 /// fire for the current keyboard device.
-fn find_match<F>(
+pub(crate) fn find_match<F>(
     rules: &[CompiledRule],
     usage: HidUsage,
     modifiers: u8,
@@ -306,7 +306,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{config::AppConfig, hid_usage::HidUsage};
+    use crate::{
+        common::{config::AppConfig, hid_usage::HidUsage},
+        daemon::test_lookup::TestLookup,
+    };
 
     fn build_keyboard(
         name: &str,
@@ -657,75 +660,6 @@ groups:
         assert!(state.resolve_keyboard("/dev/input/event3").is_some());
         assert!(state.resolve_keyboard("/dev/input/event5").is_some());
         assert!(state.resolve_keyboard("/dev/input/event99").is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // TestLookup — in-process mapping engine tests
-    // -----------------------------------------------------------------------
-
-    /// A simple [`Lookup`] implementation backed by a [`RuntimeLookupCache`]
-    /// for in-process testing.  Resolves the active app to the configured
-    /// name without querying the platform.
-    struct TestLookup {
-        cache: RuntimeLookupCache,
-        app_name: String,
-    }
-
-    impl TestLookup {
-        fn from_yaml(yaml: &str) -> Self {
-            let config = AppConfig::load_from_str(yaml).unwrap();
-            Self {
-                cache: RuntimeLookupCache::compile_from_config(&config),
-                app_name: "test_app".to_string(),
-            }
-        }
-    }
-
-    impl std::fmt::Debug for TestLookup {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("TestLookup").finish()
-        }
-    }
-
-    impl Lookup for TestLookup {
-        fn for_app(
-            &self,
-            app: &str,
-            usage: HidUsage,
-            modifiers: u8,
-            _kbd_device_id: Option<&str>,
-        ) -> Option<&[NativeKey]> {
-            // For tests we always check the global rules; app-scoped
-            // rules are tested via the RuntimeState tests above.
-            if let Some(rules) = self.cache.process_rules(app) {
-                find_match(rules, usage, modifiers, |_rule_keyboards| true)
-            } else {
-                None
-            }
-        }
-
-        fn global(
-            &self,
-            usage: HidUsage,
-            modifiers: u8,
-            _kbd_id: Option<&str>,
-        ) -> Option<&[NativeKey]> {
-            find_match(
-                self.cache.global_rules(),
-                usage,
-                modifiers,
-                |_rule_keyboards| true,
-            )
-        }
-
-        fn for_active_app(
-            &self,
-            usage: HidUsage,
-            modifiers: u8,
-            kbd_device_id: Option<&str>,
-        ) -> Option<&[NativeKey]> {
-            self.for_app(&self.app_name, usage, modifiers, kbd_device_id)
-        }
     }
 
     /// Simulate a sequence of key events through the lookup engine.
