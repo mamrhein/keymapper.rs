@@ -17,9 +17,11 @@
     <key>StandardErrorPath</key>
     <string>@LOG_DIR@/keymapperd-err.log</string>
     <!--
-        The daemon runs as root to perform IOKit device seizure. Input events
-        are captured via IOHIDManager, and remapped output is emitted through
-        the DriverKit virtual HID driver.
+        The daemon runs as the logged-in user (a LaunchAgent in gui/<UID>).
+        Keyboard events are captured with a CGEventTap, which requires the
+        Input Monitoring and Accessibility privacy permissions (TCC).  Mapped
+        keys are emitted by the root virtkbdd daemon through the DriverKit
+        virtual HID driver.
     -->
 </dict>
 </plist>

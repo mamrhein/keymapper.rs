@@ -83,3 +83,27 @@ pub fn restart(backend: &Backend) -> Result<(), String> {
         Backend::PidFile(dir) => pid_file::restart(dir),
     }
 }
+
+/// Check whether the macOS virtkbdd emitter is running (system domain).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_is_running() -> bool {
+    service::virtkbdd_is_running()
+}
+
+/// Start the macOS virtkbdd emitter (system domain, through sudo).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_start() -> Result<(), String> {
+    service::virtkbdd_start()
+}
+
+/// Stop the macOS virtkbdd emitter (system domain, through sudo).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_stop() -> Result<(), String> {
+    service::virtkbdd_stop()
+}
+
+/// Restart the macOS virtkbdd emitter (system domain, through sudo).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_restart() -> Result<(), String> {
+    service::virtkbdd_restart()
+}

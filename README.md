@@ -2,10 +2,11 @@
 
 Cross-platform key-remapping daemon and CLI utility for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, hot-reload, and macros.
 
-The project ships two binaries:
+The project ships three binaries:
 
 - **`keymapperd`** — the background daemon that intercepts keyboard events and applies remapping rules.
 - **`keymapper`** — a CLI utility for managing configuration, inspecting keys, and controlling the daemon.
+- **`virtkbdd`** (macOS only) — a root daemon that emits mapped keys through the Karabiner DriverKit virtual HID driver.
 
 ## Installation
 
@@ -13,7 +14,7 @@ Building from source requires Rust 1.95+ (edition 2024).
 
 ### macOS
 
-The daemon must run as root (required for IOKit device seizure), and remapped keys are emitted through the Karabiner DriverKit VirtualHIDDevice driver.
+keymapper runs two processes on macOS: **`keymapperd`** captures keyboard events in your user session (via a `CGEventTap`) and decides which keys are mapped, and **`virtkbdd`** runs as root and emits the mapped keys through the Karabiner DriverKit VirtualHIDDevice driver.
 
 **Homebrew:**
 
@@ -39,16 +40,18 @@ Download a pre-built DMG from the [releases page](https://github.com/mamrhein/ke
 sudo ./install.sh
 ```
 
-This installs the binaries to `/usr/local/bin`, registers the LaunchDaemon, and installs the Karabiner DriverKit driver.
+This installs the CLI to `/usr/local/bin`, registers both launchd services (the `virtkbdd` LaunchDaemon and the `keymapperd` LaunchAgent), and installs the Karabiner DriverKit driver.
 
 **From source:**
 
 ```bash
 cargo install --path .
-sudo scripts/install-macos.sh /usr/local/bin/keymapperd
+sudo scripts/install-macos.sh
 ```
 
-The script registers the LaunchDaemon and installs the Karabiner DriverKit driver.
+The script installs `virtkbdd` to `/usr/local/bin/virtkbdd` (LaunchDaemon) and `keymapperd` to `~/.local/bin/keymapperd` (LaunchAgent), and installs the Karabiner DriverKit driver.
+
+After installing, grant keymapperd the required privacy permissions in System Settings > Privacy & Security: **Input Monitoring** (to see keyboard events) and **Accessibility** (to swallow mapped keys), then run `keymapper daemon restart`.
 
 ### Linux
 
@@ -296,7 +299,7 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 ## Troubleshooting
 
-**macOS — daemon not capturing keys:** the daemon must run as root to seize HID devices via IOKit. Verify it is running: `launchctl print system/de.adrhinum.keymapperd`. If it is not loaded, install the LaunchDaemon: `sudo ./install-macos.sh /usr/local/bin/keymapperd`.
+**macOS — daemon not capturing keys:** keymapperd needs the Input Monitoring and Accessibility privacy permissions (System Settings > Privacy & Security). Verify both processes are running: `keymapper daemon status`. If keymapperd is not loaded, reinstall it: `sudo ./install-macos.sh`.
 
 **macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-architecture.md](docs/macos-architecture.md) for full troubleshooting.
 
@@ -319,5 +322,5 @@ sudo usermod -aG input $USER
 | Platform | Mechanism                                                                                                                                                                       |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                                                 |
-| macOS    | IOKit device seizure for input capture, Karabiner DriverKit daemon for event emission                                                                                           |
+| macOS    | `CGEventTap` for input capture (keymapperd), Karabiner DriverKit virtual HID driver for event emission (virtkbdd) |
 | Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (see [windows-architecture.md](docs/windows-architecture.md))                                  |

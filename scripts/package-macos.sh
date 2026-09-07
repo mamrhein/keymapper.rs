@@ -45,6 +45,7 @@ mkdir -p "${VOLUME_DIR}/bin"
 # Copy binaries.
 cp "${PROJECT_ROOT}/target/${TARGET}/release/keymapper" "${VOLUME_DIR}/bin/"
 cp "${PROJECT_ROOT}/target/${TARGET}/release/keymapperd" "${VOLUME_DIR}/bin/"
+cp "${PROJECT_ROOT}/target/${TARGET}/release/virtkbdd" "${VOLUME_DIR}/bin/"
 
 # Copy documentation.
 cp "${PROJECT_ROOT}/README.md" "${VOLUME_DIR}/"
@@ -67,6 +68,8 @@ echo "Included ${KARABINER_PKG_NAME} in DMG."
 mkdir -p "${VOLUME_DIR}/resources/launchd"
 cp "${PROJECT_ROOT}/resources/launchd/de.adrhinum.keymapperd.plist" \
    "${VOLUME_DIR}/resources/launchd/"
+cp "${PROJECT_ROOT}/resources/launchd/de.adrhinum.virtkbdd.plist" \
+   "${VOLUME_DIR}/resources/launchd/"
 cp "${PROJECT_ROOT}/resources/launchd/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist" \
    "${VOLUME_DIR}/resources/launchd/"
 cp "${PROJECT_ROOT}/scripts/install-macos.sh" "${VOLUME_DIR}/"
@@ -74,19 +77,21 @@ cp "${PROJECT_ROOT}/scripts/uninstall-macos.sh" "${VOLUME_DIR}/"
 cp "${PROJECT_ROOT}/scripts/install-karabiner-macos.sh" "${VOLUME_DIR}/"
 cp "${PROJECT_ROOT}/scripts/uninstall-karabiner-macos.sh" "${VOLUME_DIR}/"
 
-# Install script — copies binaries to a usable location, registers the
-# LaunchDaemon, and installs the Karabiner DriverKit driver.  The daemon runs
-# as root for IOKit device seizure.
+# Install script — copies the CLI to a usable location, registers both
+# launchd services (the virtkbdd LaunchDaemon and the keymapperd LaunchAgent),
+# and installs the Karabiner DriverKit driver.
 cat > "${VOLUME_DIR}/install.sh" << 'INSTALL'
 #!/bin/bash
 # ---------------------------------------------------------------------------
-# Installs keymapper binaries to /usr/local/bin (default) or a custom path,
-# then registers the LaunchDaemon and installs the Karabiner DriverKit
-# VirtualHIDDevice driver (the device through which keymapperd emits
-# remapped keys).
+# Installs keymapper on macOS.
 #
-# The daemon runs as root to perform IOKit device seizure.  This script
-# requires sudo privileges.
+# Copies the CLI to /usr/local/bin (default) or a custom path, then installs
+# the two daemons — virtkbdd as a root LaunchDaemon (/usr/local/bin/virtkbdd)
+# and keymapperd as a user LaunchAgent (~/.local/bin/keymapperd) — and
+# installs the Karabiner DriverKit VirtualHIDDevice driver (the device through
+# which virtkbdd emits mapped keys).
+#
+# This script requires sudo privileges.
 #
 # Usage: ./install.sh [destination]
 # ---------------------------------------------------------------------------
@@ -108,7 +113,6 @@ if [ ! -d "$DEST" ]; then
 fi
 
 cp "${SCRIPT_DIR}/bin/keymapper" "$DEST/"
-cp "${SCRIPT_DIR}/bin/keymapperd" "$DEST/"
 
 echo "Installed keymapper to ${DEST}."
 echo ""
@@ -125,10 +129,10 @@ for candidate in "${SCRIPT_DIR}"/karabiner/*.pkg; do
 done
 
 if [ -n "$KARABINER_PKG" ]; then
-    "${SCRIPT_DIR}/install-macos.sh" "${DEST}/keymapperd" "$KARABINER_PKG"
+    "${SCRIPT_DIR}/install-macos.sh" "${SCRIPT_DIR}/bin/keymapperd" "${SCRIPT_DIR}/bin/virtkbdd" "$KARABINER_PKG"
 else
     echo "Warning: no bundled Karabiner package found; it will be downloaded." >&2
-    "${SCRIPT_DIR}/install-macos.sh" "${DEST}/keymapperd"
+    "${SCRIPT_DIR}/install-macos.sh" "${SCRIPT_DIR}/bin/keymapperd" "${SCRIPT_DIR}/bin/virtkbdd"
 fi
 
 echo ""
@@ -145,10 +149,13 @@ keymapper ${VERSION} for macOS
 Quick install (requires sudo):
   sudo ./install.sh
 
+This installs the CLI to /usr/local/bin, virtkbdd as a root LaunchDaemon
+(/usr/local/bin/virtkbdd), and keymapperd as a user LaunchAgent
+(~/.local/bin/keymapperd).
+
 Manual install:
   sudo cp bin/keymapper /usr/local/bin/
-  sudo cp bin/keymapperd /usr/local/bin/
-  sudo ./install-macos.sh /usr/local/bin/keymapperd
+  sudo ./install-macos.sh bin/keymapperd bin/virtkbdd
 
 Virtual HID driver:
   The Karabiner DriverKit VirtualHIDDevice package (bundled in the
@@ -157,9 +164,13 @@ Virtual HID driver:
   System Settings > General > Login Items & Extensions > Driver Extensions.
   No reboot is required.  See docs/macos-architecture.md for troubleshooting.
 
+Privacy permissions (required for keymapperd):
+  System Settings > Privacy & Security > Input Monitoring: enable keymapperd.
+  System Settings > Privacy & Security > Accessibility: enable keymapperd.
+
 Then:
   keymapper config create    # create a configuration file
-  keymapper daemon status    # verify the daemon is running
+  keymapper daemon status    # verify both daemons are running
 
 To uninstall:
   sudo ./uninstall-macos.sh

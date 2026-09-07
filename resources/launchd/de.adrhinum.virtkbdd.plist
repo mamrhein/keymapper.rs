@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>de.adrhinum.virtkbdd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@BINARY_PATH@</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>@LOG_DIR@/virtkbdd.log</string>
+    <key>StandardErrorPath</key>
+    <string>@LOG_DIR@/virtkbdd-err.log</string>
+    <!--
+        The daemon runs as root (a LaunchDaemon in the system domain) because
+        it owns the Karabiner DriverKit virtual-HID socket, which is
+        root-only.  It emits the mapped keys that the user-domain keymapperd
+        daemon decides on.
+    -->
+</dict>
+</plist>

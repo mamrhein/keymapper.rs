@@ -13,6 +13,10 @@
 //! `systemctl --user`).  On Windows it directly spawns the daemon binary.
 //! This is the backend selected when no `--config-dir` is provided; the
 //! PID-file (development) backend lives in [`super::pid_file`].
+//!
+//! On macOS the service manager additionally owns virtkbdd, the root
+//! LaunchDaemon that emits mapped keys; the `virtkbdd_*` functions manage it
+//! in the system domain (through `sudo launchctl`).
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -37,6 +41,30 @@ pub fn is_running() -> bool {
 #[cfg(target_os = "windows")]
 pub fn is_running() -> bool {
     windows::is_daemon_running(DAEMON_NAME)
+}
+
+/// Check whether the macOS virtkbdd emitter is running (system domain).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_is_running() -> bool {
+    macos::is_virtkbdd_running()
+}
+
+/// Start the macOS virtkbdd emitter (system domain, through sudo).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_start() -> Result<(), String> {
+    macos::spawn_virtkbdd()
+}
+
+/// Stop the macOS virtkbdd emitter (system domain, through sudo).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_stop() -> Result<(), String> {
+    macos::stop_virtkbdd()
+}
+
+/// Restart the macOS virtkbdd emitter (system domain, through sudo).
+#[cfg(target_os = "macos")]
+pub fn virtkbdd_restart() -> Result<(), String> {
+    macos::restart_virtkbdd()
 }
 
 /// Attempt to start keymapperd via the platform service manager (or direct
