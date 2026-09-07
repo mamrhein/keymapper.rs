@@ -9,7 +9,7 @@
 
 //! Platform backend: the single public boundary between the platform
 //! layer and the code above it (the daemon, `test_util`, `cli`, and — for
-//! [`config_dir`] — `common`).
+//! [`config_dir`] and, on macOS, `console_user_home` — `common`).
 //!
 //! The stable public surface that the code above may depend on is, per
 //! platform:
@@ -20,7 +20,9 @@
 //!   `HidUsage` translation used by the `keys probe` CLI command)
 //! - linux: additionally `hid_translate` (the canonical `HidUsage` and
 //!   evdev-keycode tables) and `VIRTUAL_KEYBOARD_NAME`
-//! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`
+//! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`, and
+//!   `console_user_home` (the console user's home directory, consumed by
+//!   `common::config_path` when running as root)
 //! - windows: additionally `Key`
 //!
 //! Layering rule: `test_util` and `cli` may depend only on this
@@ -46,13 +48,13 @@ pub use linux::{
     VIRTUAL_KEYBOARD_NAME, keycode_to_hid_usage, list_keyboards, start_mapping,
 };
 #[cfg(target_os = "macos")]
-pub use macos::config_dir;
-#[cfg(target_os = "macos")]
 pub use macos::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
     INJECTION_KEYBOARD_IDENTITY, IOHIDQueue, KarabinerClient,
     for_each_hid_value, keycode_to_hid_usage, list_keyboards, start_mapping,
 };
+#[cfg(target_os = "macos")]
+pub use macos::{config_dir, console_user_home};
 #[cfg(target_os = "windows")]
 pub use windows::CAPTURE_TAG;
 #[cfg(target_os = "windows")]

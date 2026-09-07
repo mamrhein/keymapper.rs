@@ -14,7 +14,7 @@ mod keyboard;
 mod keycode;
 mod mapping;
 
-pub use config_dir::config_dir;
+pub use config_dir::{config_dir, console_user_home};
 pub use iokit_hid::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
     IOHIDQueue, for_each_hid_value,

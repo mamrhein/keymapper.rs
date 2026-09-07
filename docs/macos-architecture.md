@@ -23,6 +23,15 @@ The Karabiner package ships a root daemon that owns a DriverKit extension exposi
 
 The Karabiner daemon is registered as a LaunchDaemon (`/Library/LaunchDaemons/org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon.plist`) with `KeepAlive`, so it restarts automatically if it exits. The client in `keymapperd` reconnects automatically if the connection is lost.
 
+### Configuration resolution
+
+The daemon runs as root, so its own home directory is `/var/root` — but the configuration lives in the logged-in user's home directory. To bridge the gap, the daemon resolves the user currently at the console (the owner of `/dev/console`, looked up via `getpwuid_r`) and searches that user's `~/Library/Application Support/keymapperd/` before falling back to its own `/var/root` directory. The unprivileged `keymapper` CLI is unaffected: it always uses its own home directory.
+
+Consequences:
+
+- Before a user has logged in (boot, login window, locked encrypted home volume) there is no console user, so the daemon finds no configuration and exits; launchd restarts it until the home directory is available.
+- After a console user switch (fast user switching), the daemon keeps watching the previous user's configuration until it is restarted: `keymapper daemon restart`.
+
 ### Why this approach?
 
 Compared to `CGEventTap`-based interception:

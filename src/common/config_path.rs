@@ -31,8 +31,9 @@ pub fn default_config_path() -> Option<PathBuf> {
 ///
 /// Searches the locations from [`search_dirs`] in priority order: current
 /// working directory first (e2e builds only, where the test harness runs
-/// from a scratch directory with a planted config), then the
-/// platform-specific application config directory.
+/// from a scratch directory with a planted config), then — on macOS when
+/// running as root — the console user's application config directory, then
+/// the process's own platform-specific application config directory.
 ///
 /// Symbolic links are rejected; `config.yaml` must be a regular file.
 /// Returns `None` when no configuration file exists in any search location.
@@ -77,12 +78,60 @@ pub fn find_config_path_strict() -> Result<PathBuf, String> {
     Err("configuration file not found".to_string())
 }
 
-/// Iterate over the search locations in priority order.
-fn search_dirs() -> impl Iterator<Item = PathBuf> {
-    [cwd_path()]
-        .into_iter()
-        .flatten()
-        .chain(platform_config_dir())
+/// Return the search locations in priority order.
+fn search_dirs() -> Vec<PathBuf> {
+    ordered_search_dirs(
+        cwd_path(),
+        console_user_config_dir(),
+        platform_config_dir(),
+    )
+}
+
+/// Order the search locations, dropping duplicates while preserving
+/// priority: the current working directory (e2e builds only), then the
+/// console user's configuration directory (macOS, root only), then the
+/// process's own platform configuration directory.
+fn ordered_search_dirs(
+    cwd: Option<PathBuf>,
+    console_user_dir: Option<PathBuf>,
+    platform_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for dir in [cwd, console_user_dir, platform_dir] {
+        if let Some(dir) = dir {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// Return the configuration directory of the user currently at the console,
+/// or `None` when it does not apply.
+///
+/// Only the root daemon needs this indirection: it runs with a home
+/// directory of `/var/root`, while the configuration lives in the
+/// logged-in user's home.  Unprivileged processes (the CLI, development
+/// builds) already resolve their own home directory correctly.
+#[cfg(target_os = "macos")]
+fn console_user_config_dir() -> Option<PathBuf> {
+    if unsafe { libc::geteuid() } != 0 {
+        return None;
+    }
+
+    let home = crate::platform::console_user_home()?;
+    Some(
+        home.join("Library")
+            .join("Application Support")
+            .join(APP_NAME),
+    )
+}
+
+/// Non-macOS platforms have no console-user indirection.
+#[cfg(not(target_os = "macos"))]
+fn console_user_config_dir() -> Option<PathBuf> {
+    None
 }
 
 /// Return the current working directory, or `None` if it cannot be determined.
@@ -113,7 +162,7 @@ pub fn print_search_locations() {
     // Drive off `search_dirs()` so the printed order can never drift from
     // the actual search order.
     let cwd = cwd_path();
-    for (i, dir) in search_dirs().enumerate() {
+    for (i, dir) in search_dirs().into_iter().enumerate() {
         let label = if Some(dir.as_path()) == cwd.as_deref() {
             "Current working directory".to_string()
         } else {
@@ -142,20 +191,17 @@ fn platform_config_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// CWD is searched before the platform config directory in e2e builds.
-    /// All lookup functions and `print_search_locations` drive off this order.
+    /// CWD is searched before the other locations in e2e builds.  All lookup
+    /// functions and `print_search_locations` drive off this order.
     #[cfg(feature = "e2e")]
     #[test]
-    fn search_dirs_prioritises_cwd_over_platform_dir() {
+    fn search_dirs_prioritises_cwd_over_other_dirs() {
         let cwd = std::env::current_dir().unwrap();
-        let dirs: Vec<PathBuf> = search_dirs().collect();
+        let dirs = search_dirs();
 
         assert_eq!(dirs.first(), Some(&cwd));
         if let Some(platform) = platform_config_dir() {
-            assert_eq!(dirs.len(), 2);
-            assert_eq!(dirs[1], platform);
-        } else {
-            assert_eq!(dirs.len(), 1);
+            assert!(dirs.contains(&platform));
         }
     }
 
@@ -166,8 +212,33 @@ mod tests {
     #[test]
     fn search_dirs_excludes_cwd_in_production_builds() {
         let cwd = std::env::current_dir().unwrap();
-        let dirs: Vec<PathBuf> = search_dirs().collect();
+        let dirs = search_dirs();
 
         assert!(!dirs.iter().any(|d| d == &cwd));
+    }
+
+    /// The search order is cwd, console-user dir, platform dir; duplicates
+    /// are dropped while preserving the first (highest-priority) position.
+    #[test]
+    fn ordered_search_dirs_preserves_priority_and_dedupes() {
+        let cwd = PathBuf::from("/tmp/e2e");
+        let console = PathBuf::from(
+            "/Users/alice/Library/Application Support/keymapperd",
+        );
+        let platform =
+            PathBuf::from("/var/root/Library/Application Support/keymapperd");
+
+        let dirs = ordered_search_dirs(
+            Some(cwd.clone()),
+            Some(console.clone()),
+            Some(platform.clone()),
+        );
+        assert_eq!(dirs, vec![cwd.clone(), console, platform]);
+
+        let dirs =
+            ordered_search_dirs(Some(cwd.clone()), Some(cwd.clone()), None);
+        assert_eq!(dirs, vec![cwd]);
+
+        assert!(ordered_search_dirs(None, None, None).is_empty());
     }
 }

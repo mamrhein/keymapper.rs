@@ -15,3 +15,7 @@ Version   Changes
            - Daemon management: `keymapperd` now managed via systemd (Linux)
              and launchd (macOS).
           Platform architecture overhaul
+          Bug fixes:
+           - macOS: the root daemon now resolves the configuration from the
+             home directory of the user currently at the console, instead of
+             looking only in /var/root.

@@ -19,3 +19,98 @@ use std::path::PathBuf;
 pub fn config_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join("Library").join("Application Support"))
 }
+
+/// Return the home directory of the user currently at the console.
+///
+/// The owner of `/dev/console` is the console user.  The root daemon uses
+/// this to locate the configuration of the logged-in user, because its own
+/// home directory is `/var/root`.
+///
+/// Returns `None` when there is no console user (headless system, or the
+/// login window before any user has logged in) and when the console user is
+/// root (single-user mode), in which case [`config_dir`] already points at
+/// the right place.
+pub fn console_user_home() -> Option<PathBuf> {
+    let console = std::ffi::CString::new("/dev/console").ok()?;
+    let fd = unsafe { libc::open(console.as_ptr(), libc::O_RDONLY) };
+    if fd < 0 {
+        return None;
+    }
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    let status = unsafe { libc::fstat(fd, &mut stat) };
+    // The descriptor is only needed for the metadata lookup.
+    unsafe { libc::close(fd) };
+    if status != 0 {
+        return None;
+    }
+
+    // No logged-in user yet, or a root console: the regular config dir is
+    // already the right search location in both cases.
+    if stat.st_uid == 0 {
+        return None;
+    }
+
+    passwd_home(stat.st_uid)
+}
+
+/// Look up the home directory of *uid* in the password database.
+fn passwd_home(uid: libc::uid_t) -> Option<PathBuf> {
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    // 1024 bytes covers any realistic pw_name/pw_dir; getpwuid_r reports
+    // ERANGE when the buffer is too small.
+    let mut buffer = [0u8; 1024];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut entry,
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+
+    let home = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) };
+    home.to_str().ok().map(PathBuf::from)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Root's home directory resolves through the password database.
+    #[test]
+    fn passwd_home_resolves_root() {
+        let home = passwd_home(0).expect("root entry must exist");
+        assert!(home.is_absolute());
+    }
+
+    /// A uid without a password entry yields `None`.
+    #[test]
+    fn passwd_home_missing_uid() {
+        // u32::MAX is never assigned to an account.
+        assert!(passwd_home(u32::MAX).is_none());
+    }
+
+    /// The console user lookup either fails cleanly (headless environment or
+    /// root console) or returns an absolute home directory that is not
+    /// root's.
+    #[test]
+    fn console_user_home_is_sane() {
+        let Some(home) = console_user_home() else {
+            return;
+        };
+
+        assert!(home.is_absolute());
+        assert_ne!(home, PathBuf::from("/var/root"));
+    }
+}

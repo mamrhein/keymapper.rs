@@ -106,9 +106,9 @@ Create `config.yaml` in one of the following locations:
 | macOS    | `~/Library/Application Support/keymapperd/config.yaml`                          |
 | Windows  | `%APPDATA%\keymapperd\config.yaml`                                              |
 
-The daemon searches the platform-specific application config directory. Symbolic links are rejected; `config.yaml` must be a regular file.
+The daemon searches the platform-specific application config directory. On macOS the daemon runs as root and additionally searches the home directory of the user currently at the console, so a configuration in your own `~/Library/Application Support/keymapperd/` is picked up without copying it to `/var/root`. Symbolic links are rejected; `config.yaml` must be a regular file.
 
-The daemon exits with an error if no configuration file is found in any search location.
+The daemon exits with an error if no configuration file is found in any search location. On macOS before a user has logged in, the daemon therefore exits and launchd restarts it until the console user's home directory is available. After a console user switch, restart the daemon (`keymapper daemon restart`) so it picks up the new user's configuration.
 
 ### Format
 
