@@ -58,9 +58,15 @@ unsafe extern "C" {
 
 /// Run the virtkbdd IPC server until a shutdown signal is received.
 ///
-/// Creates and `chown`s the socket, then loops: poll the listener (so signals
-/// are observed), accept, verify the peer, and emit each decoded batch.  On a
-/// connection close it returns to accept (keymapperd reconnects on its own).
+/// Creates the socket and keeps it owned by the current console user, then
+/// loops: poll the listener (so signals are observed), accept, verify the
+/// peer, and emit each decoded batch.  On a connection close it returns to
+/// accept (keymapperd reconnects on its own).
+///
+/// virtkbdd starts at boot, before any user logs in, so the console user —
+/// and thus the socket's owner — changes over the daemon's lifetime.  The
+/// ownership is re-applied in the accept loop whenever it changes, so the
+/// logged-in user's keymapperd can always connect.
 pub fn run_server(
     conn: &KarabinerClient,
     shutdown: Arc<AtomicBool>,
@@ -75,13 +81,17 @@ pub fn run_server(
 
     let listener = UnixListener::bind(&socket_path)?;
 
-    // Defense in depth: the socket is owned by the console user with mode
-    // 0600, so only that user can connect.  The `getpeereid` check on accept
-    // is authoritative (file permissions can be raced).
-    if let Some(uid) = console_uid() {
-        chown_socket(&socket_path, uid);
-    }
+    // The socket starts mode 0600 so it is never world-writable, even before
+    // the console user is known.
     set_mode(&socket_path, 0o600);
+
+    // Defense in depth: the socket is owned by the console user, so only that
+    // user can connect.  The `getpeereid` check on accept is authoritative
+    // (file permissions can be raced).  `socket_owner` tracks the uid the
+    // socket was last chowned to so the accept loop can re-apply ownership
+    // when the console user changes (login, logout, fast user switching).
+    let mut socket_owner: Option<libc::uid_t> = None;
+    apply_socket_ownership(&socket_path, &mut socket_owner);
 
     eprintln!("virtkbdd listening on {}", socket_path.display());
 
@@ -89,6 +99,10 @@ pub fn run_server(
         if shutdown.load(Ordering::Acquire) {
             break;
         }
+
+        // Keep the socket owned by the current console user so their
+        // keymapperd can connect; a no-op unless the uid changed.
+        apply_socket_ownership(&socket_path, &mut socket_owner);
 
         // Poll the listener with a timeout so SIGINT/SIGTERM are observed.
         if !wait_for_peer(&listener) {
@@ -167,6 +181,24 @@ fn handle_connection(stream: UnixStream, conn: &KarabinerClient) {
             }
         }
     }
+}
+
+/// (Re-)apply the current console user's ownership to the socket.
+///
+/// `last_owner` tracks the uid the socket was last chowned to, so the
+/// (best-effort) `chown`/`chmod` syscalls only run when the console user
+/// actually changes.  A `None` console user (headless) leaves the socket as
+/// is; the `getpeereid` check rejects peers in that case anyway.
+fn apply_socket_ownership(path: &Path, last_owner: &mut Option<libc::uid_t>) {
+    let Some(uid) = console_uid() else {
+        return;
+    };
+    if *last_owner == Some(uid) {
+        return;
+    }
+    chown_socket(path, uid);
+    set_mode(path, 0o600);
+    *last_owner = Some(uid);
 }
 
 /// `chown` the socket to the console user (group wheel).  Best-effort: a
