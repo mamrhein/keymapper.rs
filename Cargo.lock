@@ -701,7 +701,6 @@ dependencies = [
  "thiserror",
  "udev",
  "wayland-client",
- "wayland-protocols",
  "windows",
  "x11rb",
  "zbus",
