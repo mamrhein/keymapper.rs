@@ -160,6 +160,30 @@ fn run_event_loop(shutdown: &Arc<AtomicBool>) {
     println!("Shutdown signal received. Cleaning up...");
 }
 
+/// Compute the down/up state of a `FlagsChanged` event from its usage and
+/// flag mask.
+///
+/// The eight held modifiers map to their HID modifier bits, and the state is
+/// read from the corresponding flag.  CapsLock is a toggle key with no
+/// modifier bit, whose state is the alpha-shift flag; it is still a valid
+/// trigger key, so it must reach the decision core (macOS delivers it only as
+/// `FlagsChanged`, never as key-down/key-up).  Returns `None` for usages that
+/// are not mappable keys (Fn, etc.).
+fn flags_changed_state(usage: HidUsage, flags: CGEventFlags) -> Option<bool> {
+    match HidUsage::hid_usage_to_modifier_bit(usage) {
+        Some(bit) => Some(match bit {
+            0 | 4 => flags.contains(CGEventFlags::MaskControl),
+            1 | 5 => flags.contains(CGEventFlags::MaskShift),
+            2 | 6 => flags.contains(CGEventFlags::MaskAlternate),
+            _ => flags.contains(CGEventFlags::MaskCommand), // 3 | 7
+        }),
+        None if usage == HidUsage::CapsLock => {
+            Some(flags.contains(CGEventFlags::MaskAlphaShift))
+        }
+        None => None,
+    }
+}
+
 /// The state shared with the CGEventTap callback via its refcon.
 struct TapContext {
     /// The decision core, guarded because `decide` takes `&mut self`.
@@ -207,21 +231,15 @@ unsafe extern "C-unwind" fn tap_callback(
         CGEventType::KeyDown => (keycode_to_hid_usage(keycode), true),
         CGEventType::KeyUp => (keycode_to_hid_usage(keycode), false),
         // Modifier presses arrive here, not as key-down/key-up.  Resolve the
-        // modifier usage from the keycode; `is_down` is whether that
-        // modifier's bit is set in the event's flag mask.
+        // usage from the keycode; `is_down` is read from the event's flag
+        // mask.
         CGEventType::FlagsChanged => {
             let Some(usage) = keycode_to_hid_usage(keycode) else {
                 return event.as_ptr(); // Fn, etc.: no HID equivalent.
             };
-            let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) else {
-                return event.as_ptr(); // CapsLock: not a tracked modifier.
-            };
             let flags = CGEvent::flags(Some(cg_event));
-            let is_down = match bit {
-                0 | 4 => flags.contains(CGEventFlags::MaskControl),
-                1 | 5 => flags.contains(CGEventFlags::MaskShift),
-                2 | 6 => flags.contains(CGEventFlags::MaskAlternate),
-                _ => flags.contains(CGEventFlags::MaskCommand), // 3 | 7
+            let Some(is_down) = flags_changed_state(usage, flags) else {
+                return event.as_ptr();
             };
             (Some(usage), is_down)
         }
@@ -247,5 +265,68 @@ unsafe extern "C-unwind" fn tap_callback(
             std::ptr::null_mut()
         }
         Decision::Swallow => std::ptr::null_mut(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A held modifier's state is read from its flag: set means down,
+    /// cleared means up.  Right-side modifiers share the flag with their
+    /// left-side twin.
+    #[test]
+    fn modifier_state_from_flag_mask() {
+        assert_eq!(
+            flags_changed_state(
+                HidUsage::LeftControl,
+                CGEventFlags::MaskControl
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            flags_changed_state(HidUsage::LeftControl, CGEventFlags::empty()),
+            Some(false)
+        );
+        assert_eq!(
+            flags_changed_state(HidUsage::RightShift, CGEventFlags::MaskShift),
+            Some(true)
+        );
+        assert_eq!(
+            flags_changed_state(HidUsage::RightAlt, CGEventFlags::empty()),
+            Some(false)
+        );
+    }
+
+    /// CapsLock is a toggle key with no modifier bit; its state is the
+    /// alpha-shift flag, and it must still reach the decision core (macOS
+    /// delivers it only as `FlagsChanged`).
+    #[test]
+    fn capslock_state_from_alpha_shift_flag() {
+        assert_eq!(
+            flags_changed_state(
+                HidUsage::CapsLock,
+                CGEventFlags::MaskAlphaShift
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            flags_changed_state(HidUsage::CapsLock, CGEventFlags::empty()),
+            Some(false)
+        );
+    }
+
+    /// A usage that is neither a held modifier nor CapsLock is not mappable
+    /// via `FlagsChanged`.
+    #[test]
+    fn non_modifier_usage_is_not_mappable() {
+        assert_eq!(
+            flags_changed_state(HidUsage::A, CGEventFlags::empty()),
+            None
+        );
     }
 }
