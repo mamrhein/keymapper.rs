@@ -20,9 +20,11 @@ use super::{
     device::{HidDevice, HidDeviceManager, HidQueueHandle},
     ffi::{
         CFRelease, HID_USAGE_PAGE_CONSUMER, HID_USAGE_PAGE_KEYBOARD,
-        IOHIDElementGetUsage, IOHIDElementGetUsagePage, IOHIDQueue,
-        IOHIDQueueCopyNextValue, IOHIDValue, IOHIDValueGetElement,
-        IOHIDValueGetIntegerValue, IoKitError,
+        IOHIDCheckAccess, IOHIDElementGetUsage, IOHIDElementGetUsagePage,
+        IOHIDQueue, IOHIDQueueCopyNextValue, IOHIDValue, IOHIDValueGetElement,
+        IOHIDValueGetIntegerValue, IoKitError, kIOHIDAccessDenied,
+        kIOHIDAccessGranted, kIOHIDAccessRestricted,
+        kIOHIDAccessTypeHIDActivity,
     },
 };
 use crate::{
@@ -465,6 +467,30 @@ pub fn start_iohid_seizure_mapping(
     conn: Arc<KarabinerClient>,
     keyboard_filter: Option<&[crate::common::keyboard::KeyboardSpecifier]>,
 ) -> Result<SeizureHandle, IoKitError> {
+    // Check Input Monitoring (TCC) access up front.  A stale or missing
+    // grant makes seizure a silent no-op on recent macOS: the device open
+    // succeeds, but no events are ever delivered to our queues.  The check
+    // is advisory: on macOS 26 it reports denied for this root daemon even
+    // when the grant is effective, so a non-granted status only warrants
+    // verifying the grant if keys are not captured.
+    let access = unsafe { IOHIDCheckAccess(kIOHIDAccessTypeHIDActivity) };
+    if access == kIOHIDAccessGranted {
+        println!("IOKit HID: input monitoring access granted");
+    } else {
+        let status = if access == kIOHIDAccessDenied {
+            "denied"
+        } else if access == kIOHIDAccessRestricted {
+            "restricted"
+        } else {
+            "unknown"
+        };
+        eprintln!(
+            "IOKit HID: input monitoring access reported as {status}. If \
+             keys are not captured, grant Input Monitoring to the current \
+             keymapperd binary in System Settings > Privacy & Security."
+        );
+    }
+
     // Discover physical keyboards.
     let manager = HidDeviceManager::new_keyboard_matcher()?;
     let discovered = manager.scan_devices();
@@ -484,16 +510,20 @@ pub fn start_iohid_seizure_mapping(
     // Apply the global keyboard filter: only seize keyboards the user wants
     // to remap.  Non-matching keyboards are left alone so they keep working
     // normally (a seized keyboard is invisible to the OS).
-    let devices: Vec<_> = discovered
+    let filtered: Vec<_> = discovered
         .into_iter()
         .filter(|device| device_matches_filter(device, keyboard_filter))
         .collect();
 
+    // Seize every matched node.  Each physical keyboard exposes several
+    // nodes (the event driver plus interface and sub-interface nodes); only
+    // the event driver delivers events, so seizing the rest is harmless.
+    // No static selection is made: on macOS 26 the internal keyboard's
+    // event driver is a mid-sized node, not the largest one.
+    let devices = filtered;
+
     if devices.is_empty() {
-        eprintln!(
-            "IOKit HID: no keyboards match the global filter; nothing to \
-             seize"
-        );
+        eprintln!("IOKit HID: no keyboards to seize");
     }
 
     // Open and seize each device, creating queues.

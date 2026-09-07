@@ -108,10 +108,6 @@ pub(super) const kIOHIDMapKeyVendorID: &str = "Vendor ID";
 #[allow(non_upper_case_globals)]
 pub(super) const kIOHIDMapKeyProductID: &str = "Product ID";
 
-/// `kIOHIDMapKeyRegistryEntryID`.
-#[allow(non_upper_case_globals)]
-pub(super) const kIOHIDMapKeyRegistryEntryID: &str = "Registry Entry ID";
-
 /// `kIOHIDSerialNumberKey`.
 #[allow(non_upper_case_globals)]
 pub(super) const kIOHIDSerialNumberKey: &str = "Serial Number";
@@ -119,6 +115,22 @@ pub(super) const kIOHIDSerialNumberKey: &str = "Serial Number";
 /// `kIOHIDProductKey`.
 #[allow(non_upper_case_globals)]
 pub(super) const kIOHIDProductKey: &str = "Product";
+
+/// `kIOHIDAccessTypeHIDActivity` — access to the HID event stream.
+#[allow(non_upper_case_globals)]
+pub(super) const kIOHIDAccessTypeHIDActivity: u32 = 0;
+
+/// `kIOHIDAccessGranted` — the process has been granted access.
+#[allow(non_upper_case_globals)]
+pub(super) const kIOHIDAccessGranted: u32 = 1;
+
+/// `kIOHIDAccessDenied` — the user has explicitly denied access.
+#[allow(non_upper_case_globals)]
+pub(super) const kIOHIDAccessDenied: u32 = 2;
+
+/// `kIOHIDAccessRestricted` — access is restricted by system policy.
+#[allow(non_upper_case_globals)]
+pub(super) const kIOHIDAccessRestricted: u32 = 3;
 
 /// USB HID usage page for Keyboard/Keypad.
 pub(super) const HID_USAGE_PAGE_KEYBOARD: u32 = 0x07;
@@ -128,19 +140,22 @@ pub(super) const HID_USAGE_PAGE_CONSUMER: u32 = 0x0C;
 
 // ---------------------------------------------------------------------------
 // IOReturn constants
+//
+// Values from IOKit's IOReturn.h, where each code is `iokit_common_err(n)`
+// = 0xe0000000 | n.
 // ---------------------------------------------------------------------------
 
 /// `kIOReturnSuccess`.
 #[allow(non_upper_case_globals)]
 pub(super) const kIOReturnSuccess: u32 = 0;
 
-/// `kIOReturnNotPermitted`.
+/// `kIOReturnNotPermitted` (iokit_common_err(0x2e2)).
 #[allow(non_upper_case_globals)]
-pub(super) const kIOReturnNotPermitted: u32 = 0xe00002c7;
+pub(super) const kIOReturnNotPermitted: u32 = 0xe00002e2;
 
-/// `kIOReturnExclusiveAccess`.
+/// `kIOReturnExclusiveAccess` (iokit_common_err(0x2c5)).
 #[allow(non_upper_case_globals)]
-pub(super) const kIOReturnExclusiveAccess: u32 = 0xe00002b7;
+pub(super) const kIOReturnExclusiveAccess: u32 = 0xe00002c5;
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -274,6 +289,7 @@ type FnIOHIDValueGetElement =
 type FnIOHIDElementGetUsagePage =
     unsafe extern "C" fn(*mut IOHIDElement) -> u32;
 type FnIOHIDElementGetUsage = unsafe extern "C" fn(*mut IOHIDElement) -> u32;
+type FnIOHIDCheckAccess = unsafe extern "C" fn(u32) -> u32;
 type FnCFArrayGetCount = unsafe extern "C" fn(*const c_void) -> usize;
 type FnCFArrayGetValueAtIndex =
     unsafe extern "C" fn(*const c_void, usize) -> *const c_void;
@@ -325,6 +341,7 @@ struct IoKitFunctions {
     value_get_element: FnIOHIDValueGetElement,
     element_get_usage_page: FnIOHIDElementGetUsagePage,
     element_get_usage: FnIOHIDElementGetUsage,
+    check_access: FnIOHIDCheckAccess,
     cf_array_get_count: FnCFArrayGetCount,
     cf_array_get_value_at_index: FnCFArrayGetValueAtIndex,
     cf_set_get_count: FnCFSetGetCount,
@@ -487,6 +504,11 @@ impl IoKitFunctions {
                 handle,
                 b"IOHIDElementGetUsage\0",
                 FnIOHIDElementGetUsage
+            )?,
+            check_access: resolve_sym!(
+                handle,
+                b"IOHIDCheckAccess\0",
+                FnIOHIDCheckAccess
             )?,
             cf_array_get_count: resolve_sym!(
                 handle,
@@ -721,6 +743,10 @@ pub(super) unsafe fn IOHIDElementGetUsage(element: *mut IOHIDElement) -> u32 {
     unsafe { (IoKitFunctions::get().element_get_usage)(element) }
 }
 
+pub(super) unsafe fn IOHIDCheckAccess(access_type: u32) -> u32 {
+    unsafe { (IoKitFunctions::get().check_access)(access_type) }
+}
+
 pub(super) unsafe fn CFArrayGetCount(the_array: *const c_void) -> usize {
     unsafe { (IoKitFunctions::get().cf_array_get_count)(the_array) }
 }
@@ -849,5 +875,19 @@ mod tests {
     fn check_io_return_generic() {
         let err = check_io_return(0xdeadbeef, "test");
         assert!(matches!(err, Err(IoKitError::IoReturn(0xdeadbeef, _))));
+    }
+
+    // Lock in the real IOReturn.h values so a wrong constant cannot silently
+    // demote these to the generic branch again.
+    #[test]
+    fn check_io_return_not_permitted_sdk_value() {
+        let err = check_io_return(0xe00002e2, "test");
+        assert!(matches!(err, Err(IoKitError::NotPermitted(_))));
+    }
+
+    #[test]
+    fn check_io_return_exclusive_access_sdk_value() {
+        let err = check_io_return(0xe00002c5, "test");
+        assert!(matches!(err, Err(IoKitError::ExclusiveAccess(_))));
     }
 }
