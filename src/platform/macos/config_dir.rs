@@ -20,17 +20,16 @@ pub fn config_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join("Library").join("Application Support"))
 }
 
-/// Return the home directory of the user currently at the console.
+/// Return the uid of the user currently at the console.
 ///
-/// The owner of `/dev/console` is the console user.  The root daemon uses
-/// this to locate the configuration of the logged-in user, because its own
-/// home directory is `/var/root`.
+/// The owner of `/dev/console` is the console user.  Returns `None` when
+/// there is no console user (headless system, or the login window before any
+/// user has logged in).
 ///
-/// Returns `None` when there is no console user (headless system, or the
-/// login window before any user has logged in) and when the console user is
-/// root (single-user mode), in which case [`config_dir`] already points at
-/// the right place.
-pub fn console_user_home() -> Option<PathBuf> {
+/// The virtkbdd daemon uses this to verify the peer of an IPC connection and
+/// to `chown` its socket, because it runs as root while the console user's
+/// keymapperd connects to it.
+pub fn console_uid() -> Option<libc::uid_t> {
     let console = std::ffi::CString::new("/dev/console").ok()?;
     let fd = unsafe { libc::open(console.as_ptr(), libc::O_RDONLY) };
     if fd < 0 {
@@ -45,13 +44,29 @@ pub fn console_user_home() -> Option<PathBuf> {
         return None;
     }
 
+    Some(stat.st_uid)
+}
+
+/// Return the home directory of the user currently at the console.
+///
+/// The owner of `/dev/console` is the console user.  The root daemon uses
+/// this to locate the configuration of the logged-in user, because its own
+/// home directory is `/var/root`.
+///
+/// Returns `None` when there is no console user (headless system, or the
+/// login window before any user has logged in) and when the console user is
+/// root (single-user mode), in which case [`config_dir`] already points at
+/// the right place.
+pub fn console_user_home() -> Option<PathBuf> {
+    let uid = console_uid()?;
+
     // No logged-in user yet, or a root console: the regular config dir is
     // already the right search location in both cases.
-    if stat.st_uid == 0 {
+    if uid == 0 {
         return None;
     }
 
-    passwd_home(stat.st_uid)
+    passwd_home(uid)
 }
 
 /// Look up the home directory of *uid* in the password database.
@@ -99,6 +114,18 @@ mod tests {
     fn passwd_home_missing_uid() {
         // u32::MAX is never assigned to an account.
         assert!(passwd_home(u32::MAX).is_none());
+    }
+
+    /// The console uid is either absent (headless environment) or a valid,
+    /// non-negative uid.
+    #[test]
+    fn console_uid_is_sane() {
+        // On a headless CI runner there may be no console user; both outcomes
+        // are acceptable, so only assert the value is well-formed when
+        // present.
+        if let Some(uid) = console_uid() {
+            assert!(uid != libc::uid_t::MAX);
+        }
     }
 
     /// The console user lookup either fails cleanly (headless environment or

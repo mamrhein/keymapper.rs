@@ -8,11 +8,16 @@
 // $Revision$
 
 mod config_dir;
+mod emit;
 mod iokit_hid;
+mod ipc_client;
+mod ipc_frame;
+mod ipc_server;
 mod karabiner_client;
 mod keyboard;
 mod keycode;
 mod mapping;
+mod virtkbd;
 
 pub use config_dir::{config_dir, console_user_home};
 pub use iokit_hid::{
@@ -26,3 +31,4 @@ pub use karabiner_client::{
 pub use keyboard::list_keyboards;
 pub use keycode::keycode_to_hid_usage;
 pub use mapping::start_mapping;
+pub use virtkbd::start_virtkbd;

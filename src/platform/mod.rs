@@ -20,7 +20,8 @@
 //!   `HidUsage` translation used by the `keys probe` CLI command)
 //! - linux: additionally `hid_translate` (the canonical `HidUsage` and
 //!   evdev-keycode tables) and `VIRTUAL_KEYBOARD_NAME`
-//! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`, and
+//! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`,
+//!   `start_virtkbd` (the root virtkbdd daemon entry point), and
 //!   `console_user_home` (the console user's home directory, consumed by
 //!   `common::config_path` when running as root)
 //! - windows: additionally `Key`
@@ -52,6 +53,7 @@ pub use macos::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
     INJECTION_KEYBOARD_IDENTITY, IOHIDQueue, KarabinerClient,
     for_each_hid_value, keycode_to_hid_usage, list_keyboards, start_mapping,
+    start_virtkbd,
 };
 #[cfg(target_os = "macos")]
 pub use macos::{config_dir, console_user_home};

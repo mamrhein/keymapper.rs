@@ -24,6 +24,10 @@ path = "src/keymapperd.rs"
 name = "keymapper_monitor"
 path = "src/keymapper_monitor.rs"
 
+[[bin]]
+name = "virtkbdd"
+path = "src/virtkbdd.rs"
+
 [features]
 # Compile the e2e test hooks (readiness file, active-app override, and the
 # Windows capture / test-output modes) into the daemon.  Off by default so
@@ -63,8 +67,8 @@ zbus = { version = "5", features = ["blocking"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWorkspace"] }
-objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary"] }
-objc2-core-graphics = { version = "0.3", features = ["CGWindow"] }
+objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary", "CFMachPort"] }
+objc2-core-graphics = { version = "0.3", features = ["CGWindow", "CGEvent", "CGEventTypes"] }
 objc2-foundation = "0.3"
 
 # Windows-specific dependencies

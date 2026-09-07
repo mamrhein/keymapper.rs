@@ -96,12 +96,10 @@ fn ordered_search_dirs(
     console_user_dir: Option<PathBuf>,
     platform_dir: Option<PathBuf>,
 ) -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    for dir in [cwd, console_user_dir, platform_dir] {
-        if let Some(dir) = dir {
-            if !dirs.contains(&dir) {
-                dirs.push(dir);
-            }
+    let mut dirs = Vec::<PathBuf>::new();
+    for dir in [cwd, console_user_dir, platform_dir].iter().flatten() {
+        if !dirs.contains(dir) {
+            dirs.push(dir.clone());
         }
     }
     dirs
