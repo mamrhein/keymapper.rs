@@ -11,10 +11,9 @@
 //!
 //! This is the virtkbdd side of the two-process design: it turns a single
 //! mapped-output [`NativeKey`] into a sequence of DriverKit virtual-keyboard
-//! reports.  It is the simplified successor of the legacy `emit_hid_report` in
-//! the IOKit seizure capture path.  Because the virtual keyboard is now used
-//! only for mapped outputs (unmapped keys pass through natively), there is no
-//! forwarded key state to preserve across reports.
+//! reports.  Because the virtual keyboard is now used only for mapped outputs
+//! (unmapped keys pass through natively), there is no forwarded key state to
+//! preserve across reports.
 
 use super::karabiner_client::KarabinerClient;
 use crate::{

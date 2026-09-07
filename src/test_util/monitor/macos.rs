@@ -102,8 +102,8 @@ unsafe extern "C" fn monitor_value_callback(
 ///
 /// Returning null drops the event, so it never reaches the WindowServer's
 /// application dispatch.  All keyboard events are consumed (not just those
-/// from the virtual keyboards) because the daemon seizes the user's physical
-/// keyboard, so no legitimate input can reach this level during a test run.
+/// from the virtual keyboards), so nothing — neither the daemon's leaked VHK
+/// output nor any other input — reaches an application during a test run.
 unsafe extern "C-unwind" fn suppress_callback(
     _proxy: CGEventTapProxy,
     _event_type: CGEventType,

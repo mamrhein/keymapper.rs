@@ -534,27 +534,24 @@ impl Drop for ProcessGuard {
 /// The daemon runs in its own session (see `spawn_daemon`), so it survives
 /// the death of the test process that started it: a Ctrl-C or nextest
 /// cancellation kills the test before `DaemonGuard` can stop the daemon.
-/// The orphan keeps holding the keyboard grab, and because each run uses a
-/// fresh temp directory (and thus a fresh PID file), the next run cannot
-/// see it.  Callers must hold the e2e lock, so no live e2e daemon can be
-/// mistaken for a stale one.
+/// The orphan keeps capturing the user's keyboard, and because each run
+/// uses a fresh temp directory (and thus a fresh PID file), the next run
+/// cannot see it.  Callers must hold the e2e lock, so no live e2e daemon can
+/// be mistaken for a stale one.
 #[cfg(unix)]
 fn kill_stale_daemons() {
     // SIGKILL any orphaned daemons.
     kill_orphaned_daemons();
 
     // Wait for the killed daemons' virtual keyboard nodes to be destroyed,
-    // so neither the monitor nor the daemon seizes a stale node.  This runs
-    // even when no daemon was found, because a node can outlive its daemon:
-    // the service daemon destroys it asynchronously after the client socket
-    // closes.  A stale injection keyboard node is equally dangerous: it can
-    // satisfy the injector-device wait before the new injector's node
-    // registers, leaving the daemon's seizure stale and leaking injected
-    // keys into the focused window.
+    // so the monitor does not seize a stale output node.  This runs even
+    // when no daemon was found, because a node can outlive its daemon: the
+    // service daemon destroys it asynchronously after the client socket
+    // closes.
     #[cfg(target_os = "macos")]
     wait_for_virtual_keyboards_gone();
 
-    // Give the kernel a moment to release the seized devices.
+    // Give the kernel a moment to release the virtual keyboard devices.
     thread::sleep(Duration::from_millis(500));
 }
 
@@ -590,11 +587,8 @@ fn kill_orphaned_daemons() {
 /// output keyboard node can be seized by the e2e monitor; when it is later
 /// destroyed, the seizure is void and the new daemon's output leaks into the
 /// focused window (e.g. running a shell-history command in the user's
-/// terminal).  A lingering injection keyboard node is equally dangerous: it
-/// can satisfy the injector-device wait before the new injector's node
-/// registers, so the daemon seizes the stale node and the injected keys leak
-/// into the focused window.  Polling until both identities are gone closes
-/// those races.
+/// terminal).  Polling until both identities are gone closes that race and
+/// leaves a clean slate for the new run.
 ///
 /// The manager is scheduled with the current run loop and pumped while
 /// waiting, because `IOHIDManagerCopyDevices` only reflects devices the
@@ -624,8 +618,8 @@ fn wait_for_virtual_keyboards_gone() {
         if Instant::now() >= deadline {
             eprintln!(
                 "warning: a stale Karabiner virtual keyboard node is still \
-                 present after 10 s; the e2e monitor or daemon may seize it \
-                 and miss the new daemon's output"
+                 present after 10 s; the e2e monitor may seize it and miss \
+                 the new daemon's output"
             );
             return;
         }
@@ -639,7 +633,8 @@ fn wait_for_virtual_keyboards_gone() {
 /// RAII guard that stops the daemon on `Drop`.
 ///
 /// The daemon runs detached from the test process, so a panic in the test
-/// would leave it running and holding the keyboard grab.  This guard runs
+/// would leave it running and capturing the user's keyboard.  This guard
+/// runs
 /// `keymapper daemon stop` on drop to make the cleanup unconditional.  It
 /// only logs failures, because `stop` may run during stack unwinding,
 /// where a panic would abort the process.
@@ -741,10 +736,9 @@ fn start_daemon(config_dir: &Path) -> DaemonGuard {
         .env("KEYMAPPER_READY_FILE", &ready_file)
         // On Windows, run the daemon in capture mode so it re-emits every
         // key through the virtual keyboard tagged for the monitor's hook.
-        // On macOS and Linux the variable is ignored: the macOS daemon
-        // seizes the injection keyboard like any other physical keyboard and
-        // sees injected keys directly, and the Linux daemon always re-emits
-        // every key.
+        // On macOS and Linux the variable is ignored: the macOS daemon's
+        // CGEventTap sees injected keys through the native event path, and the
+        // Linux daemon always re-emits every key.
         .env("KEYMAPPER_CAPTURE", "1")
         .status()
         .expect("failed to run keymapper daemon start");
@@ -913,45 +907,6 @@ fn wait_for_injector_device(injector: &dyn KeyInjector) {
     );
 }
 
-/// Wait until the injector's virtual keyboard appears in IOKit.
-///
-/// The daemon's startup discovery snapshots the connected keyboards, so the
-/// injection keyboard (created by `injector.setup()`) must be registered in
-/// IOKit before the daemon starts.  The manager is scheduled with the run
-/// loop and pumped while waiting, because `IOHIDManagerCopyDevices` only
-/// reflects devices the manager has been notified about.
-#[cfg(target_os = "macos")]
-fn wait_for_injector_device(_injector: &dyn KeyInjector) {
-    use keymapper::platform::HidDeviceManager;
-    use objc2_core_foundation::{CFRunLoop, kCFRunLoopDefaultMode};
-
-    let manager = HidDeviceManager::new_keyboard_matcher()
-        .expect("failed to create IOHIDManager");
-    manager.schedule_with_runloop();
-
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let found = manager
-            .scan_devices()
-            .iter()
-            .any(|device| device.is_injection_keyboard());
-        if found {
-            return;
-        }
-
-        if Instant::now() >= deadline {
-            panic!(
-                "the injection keyboard did not appear in IOKit within 15 s; \
-                 is the DriverKit driver loaded?"
-            );
-        }
-
-        // Pump the run loop so hotplug notifications are processed; a short
-        // timeout keeps the deadline check responsive.
-        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.1, true);
-    }
-}
-
 /// Check whether the daemon recorded in the config directory's PID file is
 /// still alive.
 #[cfg(unix)]
@@ -1116,10 +1071,11 @@ fn run_e2e(configs: &[&str], label: &str) {
     injector.setup().expect("failed to setup injector");
 
     // f2. Wait until the injector device is fully registered, so the
-    //     daemon's startup discovery sees it deterministically.
+    //     daemon's startup discovery sees it deterministically.  On macOS
+    //     this is unnecessary: the injector's setup() already waits for its
+    //     virtual keyboard, and keymapperd's CGEventTap needs no device
+    //     discovery.
     #[cfg(target_os = "linux")]
-    wait_for_injector_device(&*injector);
-    #[cfg(target_os = "macos")]
     wait_for_injector_device(&*injector);
 
     // g. Start the daemon.  The guard stops it on drop, even when the test

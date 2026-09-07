@@ -17,8 +17,8 @@
 //! types, so it can be unit-tested in isolation with the [`TestLookup`]
 //! harness.
 //!
-//! The decision core is a simplified mirror of the legacy IOKit seizure
-//! capture logic, minus the virtual-keyboard forwarding machinery.  Unmapped
+//! The decision core is a simplified mirror of the legacy capture logic,
+//! minus the virtual-keyboard forwarding machinery.  Unmapped
 //! keys are no longer re-emitted: they are passed through to the OS unchanged,
 //! and only mapped keys are swallowed and re-emitted (via the emitter).  This
 //! is what makes the two-process CGEventTap design possible — the capture

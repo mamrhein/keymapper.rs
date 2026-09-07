@@ -7,33 +7,25 @@
 // $Source$
 // $Revision$
 
-//! IOKit HID device seizure for keyboard input capture on macOS.
+//! IOKit HID device access for the e2e keyboard monitor on macOS.
 //!
-//! Follows the Karabiner Elements approach: uses `IOHIDManager` exclusively
-//! for device discovery, then opens individual devices with
-//! `kIOHIDOptionsTypeSeizeDevice` and captures events via per-device
-//! `IOHIDQueue` callbacks.  This avoids the entitlement-gated
-//! `IOHIDManagerRegisterInputCallback` API entirely.
-//!
-//! Requires root privileges for device seizure and the Input Monitoring
-//! permission in System Settings.
+//! The daemon no longer captures input through IOKit (keymapperd uses a
+//! CGEventTap in the user domain); this module remains because the e2e
+//! monitor seizes the daemon's Karabiner DriverKit virtual keyboard and logs
+//! the raw HID events it emits.  Seizing a device requires root privileges
+//! and the Input Monitoring permission in System Settings.
 #![allow(dead_code, non_snake_case)]
 
-mod capture;
 mod device;
 mod ffi;
 
-// Some of these items are only referenced within this module tree, but they
-// were part of the module's public surface before the split, so they are
-// re-exported unchanged.
-#[allow(unused_imports)]
-pub use capture::{
-    HidQueueContext, SeizureHandle, for_each_hid_value,
-    start_iohid_seizure_mapping,
-};
 pub use device::{
     HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
+    for_each_hid_value,
 };
+// Some of these items are only referenced within this module tree, but
+// they were part of the module's public surface before the split, so they
+// are re-exported unchanged.
 #[allow(unused_imports)]
 pub use ffi::{
     IOHIDDevice, IOHIDElement, IOHIDManager, IOHIDQueue, IOHIDValue,

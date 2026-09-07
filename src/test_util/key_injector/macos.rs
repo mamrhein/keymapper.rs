@@ -11,10 +11,10 @@
 //!
 //! The injector opens its own connection to the Karabiner DriverKit daemon
 //! and registers a virtual keyboard with the injection identity
-//! ([`INJECTION_KEYBOARD_IDENTITY`]).  The daemon under test seizes that
-//! keyboard through the same IOKit path it uses for physical keyboards, so
-//! injected keystrokes flow through the regular capture pipeline — no
-//! CGEventTap, and no feedback loop from the daemon's own output keyboard.
+//! ([`INJECTION_KEYBOARD_IDENTITY`]).  Injected keystrokes flow through the
+//! native event path into keymapperd's CGEventTap, and the injection
+//! keyboard's distinct identity keeps it separate from the daemon's output
+//! keyboard.
 
 use std::{
     collections::HashSet,

@@ -130,8 +130,8 @@ pub struct KeyboardIdentity {
 
 /// The identity of the daemon's output keyboard.
 ///
-/// This is the virtual keyboard the daemon creates to re-emit captured
-/// keys.  It must be excluded from capture (see `iokit_hid`).
+/// This is the virtual keyboard virtkbdd uses to emit mapped keys.  The e2e
+/// monitor seizes it to log the daemon's output (see `iokit_hid`).
 pub const OUTPUT_KEYBOARD_IDENTITY: KeyboardIdentity = KeyboardIdentity {
     vendor_id: 0x16c0,
     product_id: 0x27db,
@@ -141,7 +141,8 @@ pub const OUTPUT_KEYBOARD_IDENTITY: KeyboardIdentity = KeyboardIdentity {
 /// The identity of the e2e injection keyboard.
 ///
 /// The test harness creates a second virtual keyboard with this identity to
-/// inject keystrokes; the daemon seizes it like any other physical keyboard.
+/// inject keystrokes; keymapperd's CGEventTap sees them through the native
+/// event path.
 /// The product ID is the next value after the output keyboard's `0x27db`;
 /// the two-keyboard PoC verified that no other device in the keyboard set
 /// shares it.

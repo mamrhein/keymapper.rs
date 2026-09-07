@@ -21,23 +21,23 @@ use objc2_core_foundation::{
     kCFRunLoopDefaultMode,
 };
 
-use super::{
-    capture::{HidQueueContext, hid_queue_value_callback},
-    ffi::{
-        CFArrayGetCount, CFArrayGetValueAtIndex, CFDictionaryCreateMutable,
-        CFDictionarySetValue, CFNumberCreate, CFNumberGetValue, CFNumberRef,
-        CFRelease, CFSetApplyFunction, CFSetGetCount, IOHIDDevice,
-        IOHIDDeviceClose, IOHIDDeviceCopyMatchingElements,
-        IOHIDDeviceGetProperty, IOHIDDeviceOpen, IOHIDElement, IOHIDManager,
-        IOHIDManagerClose, IOHIDManagerCopyDevices, IOHIDManagerCreate,
-        IOHIDManagerOpen, IOHIDManagerScheduleWithRunLoop,
-        IOHIDManagerSetDeviceMatching, IOHIDQueue, IOHIDQueueAddElement,
-        IOHIDQueueCreate, IOHIDQueueRegisterValueAvailableCallback,
-        IOHIDQueueScheduleWithRunLoop, IOHIDQueueStart, IOHIDQueueStop,
-        IoKitError, check_io_return, create_cf_string, kCFAllocatorDefault,
-        kCFNumberSInt32Type, kIOHIDMapKeyProductID, kIOHIDMapKeyVendorID,
-        kIOHIDOptionsTypeNone, kIOHIDOptionsTypeSeizeDevice, kIOHIDProductKey,
-    },
+use super::ffi::{
+    CFArrayGetCount, CFArrayGetValueAtIndex, CFDictionaryCreateMutable,
+    CFDictionarySetValue, CFNumberCreate, CFNumberGetValue, CFNumberRef,
+    CFRelease, CFSetApplyFunction, CFSetGetCount, HID_USAGE_PAGE_CONSUMER,
+    HID_USAGE_PAGE_KEYBOARD, IOHIDDevice, IOHIDDeviceClose,
+    IOHIDDeviceCopyMatchingElements, IOHIDDeviceGetProperty, IOHIDDeviceOpen,
+    IOHIDElement, IOHIDElementGetUsage, IOHIDElementGetUsagePage,
+    IOHIDManager, IOHIDManagerClose, IOHIDManagerCopyDevices,
+    IOHIDManagerCreate, IOHIDManagerOpen, IOHIDManagerScheduleWithRunLoop,
+    IOHIDManagerSetDeviceMatching, IOHIDQueue, IOHIDQueueAddElement,
+    IOHIDQueueCopyNextValue, IOHIDQueueCreate,
+    IOHIDQueueRegisterValueAvailableCallback, IOHIDQueueScheduleWithRunLoop,
+    IOHIDQueueStart, IOHIDQueueStop, IOHIDValueGetElement,
+    IOHIDValueGetIntegerValue, IoKitError, check_io_return, create_cf_string,
+    kCFAllocatorDefault, kCFNumberSInt32Type, kIOHIDMapKeyProductID,
+    kIOHIDMapKeyVendorID, kIOHIDOptionsTypeNone, kIOHIDOptionsTypeSeizeDevice,
+    kIOHIDProductKey,
 };
 use crate::platform::macos::{
     INJECTION_KEYBOARD_IDENTITY, KeyboardIdentity, OUTPUT_KEYBOARD_IDENTITY,
@@ -236,8 +236,8 @@ impl HidDevice {
     /// Returns true if this device is the e2e injection keyboard.
     ///
     /// The test harness creates a second virtual keyboard with this
-    /// identity; the daemon seizes it like any other physical keyboard so
-    /// injected keys flow through the normal remap path.
+    /// identity; keymapperd's CGEventTap captures it like any other
+    /// keyboard, so injected keys flow through the normal remap path.
     pub fn is_injection_keyboard(&self) -> bool {
         identity_matches(self.vendor_product_id(), INJECTION_KEYBOARD_IDENTITY)
     }
@@ -309,24 +309,11 @@ pub type HidValueCallback = unsafe extern "C" fn(
 );
 
 impl HidQueue {
-    /// Register the daemon's remapping callback with a `HidQueueContext`.
+    /// Register a value-available callback with a caller-provided context.
     ///
     /// The context is boxed and passed to the callback as `user_info`; it is
-    /// freed when the returned handle is dropped.
-    pub fn register_value_callback(
-        &self,
-        context: HidQueueContext,
-    ) -> HidQueueHandle<HidQueueContext> {
-        self.register_value_callback_generic(hid_queue_value_callback, context)
-    }
-
-    /// Register an arbitrary value-available callback with a caller-provided
-    /// context.
-    ///
-    /// The context is boxed and passed to the callback as `user_info`; it is
-    /// freed when the returned handle is dropped.  This lets callers (e.g. the
-    /// e2e monitor) register their own logging callback instead of the
-    /// daemon's remapping one.
+    /// freed when the returned handle is dropped.  The e2e monitor uses this
+    /// to register its logging callback.
     pub fn register_value_callback_generic<T>(
         &self,
         callback: HidValueCallback,
@@ -394,6 +381,51 @@ impl<T> Drop for HidQueueHandle<T> {
                 drop(Box::from_raw(self.context_ptr));
             }
         }
+    }
+}
+
+/// Drain a queue of `IOHIDValueRef` and invoke `f` for each recognized
+/// keyboard/consumer key event, passing the combined HID usage code
+/// (`(page << 16) | id`) and whether the key is down.
+///
+/// Values are pulled from the queue with `IOHIDQueueCopyNextValue`
+/// (non-blocking) until it returns NULL; each returned value is a retained
+/// copy and is released after processing.  Non-keyboard/consumer values are
+/// skipped.  Used by the e2e monitor's logging callback to extract key
+/// events from the seized virtual keyboard.
+///
+/// # Safety
+///
+/// `queue` must be a valid, open `IOHIDQueue` that outlives the call, and
+/// the callback `f` must not panic (a panic would leak the retained value
+/// currently being processed).
+pub unsafe fn for_each_hid_value(
+    queue: *mut IOHIDQueue,
+    mut f: impl FnMut(u32, bool),
+) {
+    if queue.is_null() {
+        return;
+    }
+
+    while let Some(value_ref) = unsafe { IOHIDQueueCopyNextValue(queue) } {
+        let element = unsafe { IOHIDValueGetElement(value_ref) };
+
+        if !element.is_null() {
+            let usage_page = unsafe { IOHIDElementGetUsagePage(element) };
+
+            if usage_page == HID_USAGE_PAGE_KEYBOARD
+                || usage_page == HID_USAGE_PAGE_CONSUMER
+            {
+                let usage = unsafe { IOHIDElementGetUsage(element) };
+                let raw_value =
+                    unsafe { IOHIDValueGetIntegerValue(value_ref) };
+
+                f((usage_page << 16) | usage, raw_value != 0);
+            }
+        }
+
+        // Each value is a retained copy; release it after processing.
+        unsafe { CFRelease(value_ref as *const _) };
     }
 }
 
@@ -470,7 +502,7 @@ impl HidDeviceManager {
 
         // Apply the matching dictionary.  Without this the manager matches no
         // devices, so `IOHIDManagerCopyDevices` would always return an empty
-        // set and the daemon/monitor would never discover any keyboard.
+        // set and the monitor would never discover any keyboard.
         unsafe {
             IOHIDManagerSetDeviceMatching(manager, dict);
         }
@@ -498,35 +530,8 @@ impl HidDeviceManager {
         check_io_return(result, "IOHIDManagerOpen")
     }
 
-    // Synchronously scan for connected keyboard devices.
-    pub fn scan_devices(&self) -> Vec<HidDevice> {
-        let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
-
-        if device_set.is_null() {
-            return Vec::new();
-        }
-
-        let mut devices = Vec::new();
-
-        // Collect the matched devices.  The applier is a raw C function
-        // pointer, so the accumulator travels in the context argument.
-        unsafe {
-            CFSetApplyFunction(
-                device_set,
-                scan_devices_applier,
-                &mut devices as *mut Vec<HidDevice> as *mut c_void,
-            );
-        }
-
-        // Release the CFSet.
-        unsafe { CFRelease(device_set as *const _) };
-
-        devices
-    }
-
     /// Return the number of devices currently matched by this manager,
-    /// including both Karabiner DriverKit virtual keyboards (unlike
-    /// [`Self::scan_devices`], which skips the output keyboard).
+    /// including both Karabiner DriverKit virtual keyboards.
     ///
     /// Used by the e2e monitor to log progress while waiting for the
     /// virtual keyboard to appear.
@@ -549,10 +554,8 @@ impl HidDeviceManager {
     /// is currently connected.
     ///
     /// Matches on the output keyboard's VID/PID, so the e2e injection
-    /// keyboard (a distinct identity) is never returned.  Unlike
-    /// [`Self::scan_devices`], which skips the output keyboard (to prevent
-    /// a remap feedback loop), this returns it — the e2e monitor seizes it
-    /// to capture the daemon's output.
+    /// keyboard (a distinct identity) is never returned.  The e2e monitor
+    /// seizes it to capture the daemon's output.
     pub fn find_karabiner_virtual_keyboard(&self) -> Option<HidDevice> {
         let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
 
@@ -582,11 +585,10 @@ impl HidDeviceManager {
     /// connected — either the daemon's output keyboard or the e2e injection
     /// keyboard.
     ///
-    /// Unlike [`Self::scan_devices`] (which skips the output keyboard and
-    /// logs) and [`Self::find_karabiner_virtual_keyboard`] (which matches
-    /// only the output keyboard), this matches both identities and does not
-    /// log, so it is safe to call in a poll loop.  The e2e harness uses it
-    /// to wait for stale virtual keyboard nodes to be destroyed before
+    /// Unlike [`Self::find_karabiner_virtual_keyboard`] (which matches only
+    /// the output keyboard), this matches both identities and does not log,
+    /// so it is safe to call in a poll loop.  The e2e harness uses it to
+    /// wait for stale virtual keyboard nodes to be destroyed before
     /// starting the monitor and daemon.
     pub fn has_karabiner_virtual_keyboard(&self) -> bool {
         let device_set = unsafe { IOHIDManagerCopyDevices(self.manager) };
@@ -646,33 +648,6 @@ impl Drop for HidDeviceManager {
             }
         }
     }
-}
-
-/// `CFSetApplyFunction` applier for [`HidDeviceManager::scan_devices`].
-///
-/// Collects every matched device into the `Vec<HidDevice>` passed as the
-/// context, skipping only the daemon's output keyboard: it matches the
-/// generic keyboard matcher, and seizing our own output device would
-/// create an infinite remap loop.  The e2e injection keyboard is included
-/// on purpose — the daemon seizes it like any other physical keyboard.
-unsafe extern "C" fn scan_devices_applier(
-    value: *const c_void,
-    info: *mut c_void,
-) {
-    let devices = unsafe { &mut *(info as *mut Vec<HidDevice>) };
-    let device = value as *mut IOHIDDevice;
-
-    let hid_device = HidDevice { device };
-
-    if hid_device.is_output_keyboard() {
-        println!(
-            "IOKit HID: skipping the output keyboard at location {}",
-            hid_device.location_id_string()
-        );
-        return;
-    }
-
-    devices.push(hid_device);
 }
 
 /// `CFSetApplyFunction` applier for
