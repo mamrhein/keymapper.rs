@@ -115,7 +115,7 @@ pub fn stop() -> Result<(), String> {
 /// Restart the keymapperd service.
 #[cfg(target_os = "macos")]
 pub fn restart() -> Result<(), String> {
-    macos::restart_daemon()
+    macos::restart_daemon(DAEMON_NAME)
 }
 
 #[cfg(target_os = "linux")]

@@ -80,10 +80,13 @@ pub fn is_daemon_running(name: &str) -> bool {
 
 /// Start the keymapperd service via launchd.
 ///
-/// Boots the service using `launchctl bootstrap gui/<UID> <plist>`.  This is
-/// a synchronous call — launchd returns once the service has been started (or
-/// failed to start).
-pub fn spawn_daemon(_name: &str) -> Result<(), String> {
+/// Boots the service using `launchctl bootstrap gui/<UID> <plist>` and then
+/// confirms the daemon process actually came up.  `launchctl bootstrap`
+/// returns success as soon as launchd accepts the job, which does not by
+/// itself guarantee the process started — with `KeepAlive` set in the plist,
+/// a daemon that crashes on startup is restarted in a loop — so we verify the
+/// process is genuinely alive before reporting success.
+pub fn spawn_daemon(name: &str) -> Result<(), String> {
     let plist = plist_path();
 
     // Verify the plist exists before attempting to boot it.
@@ -118,6 +121,56 @@ pub fn spawn_daemon(_name: &str) -> Result<(), String> {
         ));
     }
 
+    verify_daemon_started(name)
+}
+
+/// The path to the keymapperd error log written by launchd.
+fn keymapperd_log_path() -> String {
+    format!(
+        "{}/Library/Logs/keymapper/keymapperd-err.log",
+        std::env::var("HOME").unwrap_or_default()
+    )
+}
+
+/// Confirm the daemon process actually came up after a `launchctl bootstrap`.
+///
+/// `launchctl bootstrap` succeeds as soon as launchd accepts the job, even if
+/// the process then fails to start.  With `KeepAlive` set in the plist, a
+/// daemon that crashes on startup is restarted in a loop (with throttling), so
+/// we poll briefly for the process to appear, then wait a short stability
+/// window and confirm it is still alive.  On failure we point at the log file
+/// so the user can see why the daemon exited.
+fn verify_daemon_started(name: &str) -> Result<(), String> {
+    let log = keymapperd_log_path();
+
+    // Poll for the process to appear; launchd spawns it asynchronously, so it
+    // may take a moment after bootstrap returns.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut appeared = false;
+    while std::time::Instant::now() < deadline {
+        if is_daemon_running(name) {
+            appeared = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    if !appeared {
+        return Err(format!("{name} did not start. Check the log at {log}"));
+    }
+
+    // Wait a short stability window and confirm it is still alive.  This
+    // catches a daemon that spawns and then crashes immediately (for example
+    // when the Input Monitoring / Accessibility permissions are missing or the
+    // configuration is invalid).
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    if !is_daemon_running(name) {
+        return Err(format!(
+            "{name} started but exited immediately. Check the log at {log}"
+        ));
+    }
+
     Ok(())
 }
 
@@ -145,7 +198,11 @@ pub fn stop_daemon() -> Result<(), String> {
 }
 
 /// Restart the keymapperd service via launchd.
-pub fn restart_daemon() -> Result<(), String> {
+///
+/// Boots the service out and back in, then confirms the daemon process
+/// actually came up (see [`verify_daemon_started`]) — `launchctl bootstrap`
+/// alone does not guarantee the process started.
+pub fn restart_daemon(name: &str) -> Result<(), String> {
     stop_daemon()?;
     // Brief pause to let launchd fully clean up the old process.
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -156,7 +213,7 @@ pub fn restart_daemon() -> Result<(), String> {
         .output()
         .map_err(|e| format!("failed to invoke launchctl: {e}"))?;
 
-    Ok(())
+    verify_daemon_started(name)
 }
 
 /// Check whether the virtkbdd process is actually running (system domain).
