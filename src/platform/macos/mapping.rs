@@ -136,6 +136,12 @@ pub fn start_mapping(
         .ok_or("failed to get the current run loop")?
         .add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
 
+    // A CGEventTap is created disabled; it must be explicitly enabled or it
+    // never receives events and every key passes through unmapped.  Enable it
+    // now that its port is scheduled, so the callback can fire as soon as the
+    // run loop starts below.
+    CGEvent::tap_enable(&*tap_port, true);
+
     // The tap is live, so the daemon can now process events.
     if let Some(signal) = ready_signal {
         signal();
