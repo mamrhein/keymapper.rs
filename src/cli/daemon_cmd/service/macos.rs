@@ -58,30 +58,19 @@ fn sudo_launchctl(args: &[&str]) -> std::io::Result<Output> {
     Command::new("sudo").arg("launchctl").args(args).output()
 }
 
-/// Check whether the keymapperd launchd service is loaded and running.
+/// Check whether a keymapperd process is actually running.
 ///
-/// `launchctl print gui/<UID> <label>` succeeds (exit code 0) when the
-/// service is known to launchd.  A loaded service that has crashed will still
-/// be reported as known, so we also check `pgrep` as a fallback to confirm
-/// the process is alive.
-pub fn is_daemon_running(_name: &str) -> bool {
-    // Check if launchd knows about the service.
-    let print_ok = Command::new("launchctl")
-        .args(["print", &gui_domain(), SERVICE_LABEL])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if print_ok {
-        return true;
-    }
-
-    // Fallback: check if the process is running via pgrep.  This covers the
-    // case where the service was started manually (not via launchd).
+/// The authoritative check is `pgrep -x <name>`, which reports whether a live
+/// process with that exact name exists.  We deliberately do **not** rely on
+/// `launchctl print gui/<UID> <label>` for this: that command succeeds (exit
+/// code 0) whenever the service is merely *known* to launchd, which is true
+/// even for a loaded service whose process has crashed or exited (for example
+/// when `KeepAlive` is false).  Relying on it alone would report a dead daemon
+/// as running.  `pgrep` also covers the case where the daemon was started
+/// manually rather than through launchd.
+pub fn is_daemon_running(name: &str) -> bool {
     Command::new("pgrep")
-        .args(["-x", "keymapperd"])
+        .args(["-x", name])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -170,10 +159,21 @@ pub fn restart_daemon() -> Result<(), String> {
     Ok(())
 }
 
-/// Check whether the virtkbdd launchd service is loaded (system domain).
+/// Check whether the virtkbdd process is actually running (system domain).
+///
+/// As with [`is_daemon_running`], the authoritative check is `pgrep -x
+/// virtkbdd`, which reports whether a live process with that exact name
+/// exists.  `sudo launchctl print system <label>` only tells us the service is
+/// *known* to launchd, which is true even for a loaded service whose process
+/// has crashed or exited.  `pgrep` sees the root-owned virtkbdd process even
+/// when run as an unprivileged user, so no `sudo` is needed for this check.
 pub fn is_virtkbdd_running() -> bool {
-    sudo_launchctl(&["print", "system", VIRTKBDD_LABEL])
-        .map(|o| o.status.success())
+    Command::new("pgrep")
+        .args(["-x", "virtkbdd"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
         .unwrap_or(false)
 }
 
