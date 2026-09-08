@@ -168,8 +168,11 @@ mkdir -p "$KEYMAPPERD_LOG_DIR"
 chown "$CONSOLE_USER" "$KEYMAPPERD_LOG_DIR"
 
 # If the service is already loaded, unload it first so we can replace the plist.
-if launchctl print "gui/${CONSOLE_UID}" "$KEYMAPPERD_LABEL" >/dev/null 2>&1; then
-    launchctl bootout "gui/${CONSOLE_UID}" "$KEYMAPPERD_LABEL" 2>/dev/null || true
+# The `gui/<UID>/<label>` target form is required: on recent macOS (Tahoe and
+# later) the two-argument `launchctl <verb> gui/<UID> <label>` form fails with
+# an input/output error and leaves the service loaded.
+if launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
+    launchctl bootout "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" 2>/dev/null || true
 fi
 
 sed \
@@ -183,7 +186,7 @@ echo "Installed ${KEYMAPPERD_LABEL}.plist to ${LAUNCH_AGENTS_DIR}/"
 
 launchctl bootstrap "gui/${CONSOLE_UID}" "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 
-if launchctl print "gui/${CONSOLE_UID}" "$KEYMAPPERD_LABEL" >/dev/null 2>&1; then
+if launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
     echo "keymapperd is running via launchd."
 else
     echo "Warning: keymapperd was installed but does not appear to be running." >&2

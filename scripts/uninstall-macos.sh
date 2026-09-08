@@ -52,8 +52,11 @@ CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory | awk '{p
 if [ -n "$CONSOLE_HOME" ] && [ -d "$CONSOLE_HOME" ]; then
     KEYMAPPERD_PLIST="${CONSOLE_HOME}/Library/LaunchAgents/${KEYMAPPERD_LABEL}.plist"
 
-    if launchctl print "gui/${CONSOLE_UID}" "$KEYMAPPERD_LABEL" >/dev/null 2>&1; then
-        launchctl bootout "gui/${CONSOLE_UID}" "$KEYMAPPERD_LABEL"
+    # The `gui/<UID>/<label>` target form is required: on recent macOS (Tahoe
+    # and later) the two-argument `launchctl <verb> gui/<UID> <label>` form
+    # fails with an input/output error and leaves the service loaded.
+    if launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
+        launchctl bootout "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}"
         echo "Stopped ${KEYMAPPERD_LABEL}."
     else
         echo "${KEYMAPPERD_LABEL} is not loaded."

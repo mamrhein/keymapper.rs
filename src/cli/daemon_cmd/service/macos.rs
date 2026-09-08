@@ -20,7 +20,7 @@
 //!   domain is only accessible to root, so these operations go through `sudo
 //!   launchctl`.
 
-use std::process::{Command, Output};
+use std::process::Command;
 
 /// The launchd label used to identify the keymapperd service.
 const SERVICE_LABEL: &str = "de.adrhinum.keymapperd";
@@ -50,12 +50,84 @@ fn virtkbdd_plist_path() -> String {
     format!("/Library/LaunchDaemons/{VIRTKBDD_LABEL}.plist")
 }
 
-/// Run a `launchctl` subcommand in the system domain via `sudo`.
+/// Build a `launchctl` command, optionally prefixed with `sudo`.
 ///
-/// The system domain is only accessible to root.  Any sudo password prompt
-/// is read from the controlling terminal, not from our stdio.
-fn sudo_launchctl(args: &[&str]) -> std::io::Result<Output> {
-    Command::new("sudo").arg("launchctl").args(args).output()
+/// The system domain is only accessible to root, so virtkbdd operations go
+/// through `sudo`.  Any sudo password prompt is read from the controlling
+/// terminal, not from our stdio.
+fn launchctl(sudo: bool) -> Command {
+    if sudo {
+        let mut cmd = Command::new("sudo");
+        cmd.arg("launchctl");
+        cmd
+    } else {
+        Command::new("launchctl")
+    }
+}
+
+/// The `domain/label` target specifier for a launchd service.
+///
+/// The slash form is required: on recent macOS (Tahoe and later) the
+/// two-argument `launchctl <verb> <domain> <label>` form fails with
+/// "failed: 5: Input/output error" and leaves the service untouched, while
+/// `launchctl <verb> <domain>/<label>` works.
+fn target(domain: &str, label: &str) -> String {
+    format!("{domain}/{label}")
+}
+
+/// Check whether a service is currently loaded (registered) with launchd in
+/// the given domain.
+///
+/// `launchctl print <domain>/<label>` exits 0 when the service is known to
+/// launchd and non-zero (with a "Could not find service" message) when it is
+/// not.  This reflects the *loaded* state that `bootout` unloads, which is
+/// distinct from whether the process is alive (see [`is_daemon_running`]).
+fn is_loaded(sudo: bool, domain: &str, label: &str) -> bool {
+    launchctl(sudo)
+        .args(["print", &target(domain, label)])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Boot a service out of launchd, treating the "not loaded" no-op as success.
+///
+/// `launchctl bootout` exits non-zero both when the service is not loaded (a
+/// no-op we treat as success) and on genuine failures.  Rather than parsing
+/// the version-specific message, we confirm the actual state: if the service
+/// is no longer known to launchd, it has been stopped (or was already
+/// stopped).
+fn bootout(sudo: bool, domain: &str, label: &str) -> Result<(), String> {
+    let output = launchctl(sudo)
+        .args(["bootout", &target(domain, label)])
+        .output()
+        .map_err(|e| format!("failed to invoke launchctl: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // A sudo-level failure (e.g. "sudo: a password is required") means we
+    // never reached launchd, so the state check below would be meaningless.
+    if sudo && stderr.contains("sudo:") {
+        return Err(format!(
+            "launchctl bootout failed: {}",
+            stderr.trim().lines().next().unwrap_or("unknown error")
+        ));
+    }
+
+    if !is_loaded(sudo, domain, label) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "launchctl bootout failed: {}",
+        stderr.trim().lines().next().unwrap_or("unknown error")
+    ))
 }
 
 /// Check whether a keymapperd process is actually running.
@@ -101,8 +173,8 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
     // If the service is already loaded, boot it out first to ensure a clean
     // start.  This makes `start` idempotent and doubles as a restart.
     let domain = gui_domain();
-    Command::new("launchctl")
-        .args(["bootout", &domain, SERVICE_LABEL])
+    launchctl(false)
+        .args(["bootout", &target(&domain, SERVICE_LABEL)])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -176,25 +248,7 @@ fn verify_daemon_started(name: &str) -> Result<(), String> {
 
 /// Stop the keymapperd service via launchd.
 pub fn stop_daemon() -> Result<(), String> {
-    let output = Command::new("launchctl")
-        .args(["bootout", &gui_domain(), SERVICE_LABEL])
-        .output()
-        .map_err(|e| format!("failed to invoke launchctl: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // bootout returns non-zero if the service is not loaded, which is a
-        // no-op condition we treat as success.
-        if stderr.contains("does not exist") || stderr.contains("not found") {
-            return Ok(());
-        }
-        return Err(format!(
-            "launchctl bootout failed: {}",
-            stderr.trim().lines().next().unwrap_or("unknown error")
-        ));
-    }
-
-    Ok(())
+    bootout(false, &gui_domain(), SERVICE_LABEL)
 }
 
 /// Restart the keymapperd service via launchd.
@@ -249,9 +303,16 @@ pub fn spawn_virtkbdd() -> Result<(), String> {
 
     // If the service is already loaded, boot it out first to ensure a clean
     // start.  This makes `start` idempotent and doubles as a restart.
-    sudo_launchctl(&["bootout", "system", VIRTKBDD_LABEL]).ok();
+    launchctl(true)
+        .args(["bootout", &target("system", VIRTKBDD_LABEL)])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok(); // Ignore — service may not be loaded yet.
 
-    let output = sudo_launchctl(&["bootstrap", "system", &plist])
+    let output = launchctl(true)
+        .args(["bootstrap", "system", &plist])
+        .output()
         .map_err(|e| format!("failed to invoke sudo launchctl: {e}"))?;
 
     if !output.status.success() {
@@ -267,23 +328,7 @@ pub fn spawn_virtkbdd() -> Result<(), String> {
 
 /// Stop the virtkbdd service via launchd (system domain, through sudo).
 pub fn stop_virtkbdd() -> Result<(), String> {
-    let output = sudo_launchctl(&["bootout", "system", VIRTKBDD_LABEL])
-        .map_err(|e| format!("failed to invoke sudo launchctl: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // bootout returns non-zero if the service is not loaded, which is a
-        // no-op condition we treat as success.
-        if stderr.contains("does not exist") || stderr.contains("not found") {
-            return Ok(());
-        }
-        return Err(format!(
-            "launchctl bootout failed: {}",
-            stderr.trim().lines().next().unwrap_or("unknown error")
-        ));
-    }
-
-    Ok(())
+    bootout(true, "system", VIRTKBDD_LABEL)
 }
 
 /// Restart the virtkbdd service via launchd (system domain, through sudo).
@@ -292,7 +337,9 @@ pub fn restart_virtkbdd() -> Result<(), String> {
     // Brief pause to let launchd fully clean up the old process.
     std::thread::sleep(std::time::Duration::from_millis(200));
     let plist = virtkbdd_plist_path();
-    let output = sudo_launchctl(&["bootstrap", "system", &plist])
+    let output = launchctl(true)
+        .args(["bootstrap", "system", &plist])
+        .output()
         .map_err(|e| format!("failed to invoke sudo launchctl: {e}"))?;
 
     if !output.status.success() {
