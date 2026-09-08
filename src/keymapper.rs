@@ -314,7 +314,8 @@ fn cmd_appnames() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn cmd_config_list() -> Result<(), Box<dyn std::error::Error>> {
-    let (_path, contents) = load_config()?;
+    let (path, contents) = load_config()?;
+    println!("{}:", path.display());
     print!("{contents}");
     Ok(())
 }
