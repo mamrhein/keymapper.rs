@@ -739,4 +739,3 @@ mod tests {
         assert_eq!(specs[1].vendor, Some("Logitech".to_string()));
     }
 }
-x

@@ -63,4 +63,3 @@ pub use windows::INJECTED_TAG;
 pub use windows::config_dir;
 #[cfg(target_os = "windows")]
 pub use windows::{Key, keycode_to_hid_usage, list_keyboards, start_mapping};
-x

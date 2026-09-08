@@ -1112,4 +1112,3 @@ mod tests {
         assert_eq!(state.consumed, 0);
     }
 }
-x

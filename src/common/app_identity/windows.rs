@@ -308,5 +308,3 @@ fn app_identity_for_pid(pid: u32) -> Option<AppName> {
     let display = get_file_description(&image_path).unwrap_or(name.clone());
     Some(AppName { name, display })
 }
-x
-x

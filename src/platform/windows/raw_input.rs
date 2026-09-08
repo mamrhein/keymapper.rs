@@ -815,5 +815,3 @@ mod tests {
         assert_eq!(RIM_TYPEKEYBOARD, 0x01);
     }
 }
-x
-x

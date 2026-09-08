@@ -959,4 +959,3 @@ fn daemon_start_not_found() {
         stderr
     );
 }
-x

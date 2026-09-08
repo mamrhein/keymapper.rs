@@ -133,4 +133,3 @@ pub fn run(output_path: &Path) {
         let _ = UnhookWindowsHookEx(hook);
     }
 }
-x

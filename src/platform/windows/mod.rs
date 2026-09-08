@@ -30,4 +30,3 @@ pub use config_dir::config_dir;
 pub use key::{Key, keycode_to_hid_usage};
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;
-x

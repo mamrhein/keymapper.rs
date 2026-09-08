@@ -308,5 +308,3 @@ mod tests {
         assert_eq!(HidUsage::PlayPause.page(), PAGE_CONSUMER);
     }
 }
-x
-x

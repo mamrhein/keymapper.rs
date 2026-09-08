@@ -397,4 +397,3 @@ mod tests {
         assert_eq!(device, 0x44);
     }
 }
-x
