@@ -104,9 +104,13 @@ pub fn start_mapping(
 
     // Observe key-down, key-up, and modifier (flags-changed) events at the
     // earliest tap point, so a swallowed event never reaches the WindowServer.
-    let mask: CGEventMask = (CGEventType::KeyDown.0
-        | CGEventType::KeyUp.0
-        | CGEventType::FlagsChanged.0) as u64;
+    // `CGEventMask` is a bitmask whose bit N selects event type N, so each
+    // type must be shifted into its own bit.  A plain OR of the raw type
+    // values (10 | 11 | 12 = 0xF) would select the low-numbered mouse events
+    // and the tap would never see a single keyboard event.
+    let mask: CGEventMask = (1u64 << CGEventType::KeyDown.0)
+        | (1u64 << CGEventType::KeyUp.0)
+        | (1u64 << CGEventType::FlagsChanged.0);
 
     let tap_port = unsafe {
         CGEvent::tap_create(
@@ -140,7 +144,7 @@ pub fn start_mapping(
     // never receives events and every key passes through unmapped.  Enable it
     // now that its port is scheduled, so the callback can fire as soon as the
     // run loop starts below.
-    CGEvent::tap_enable(&*tap_port, true);
+    CGEvent::tap_enable(&tap_port, true);
 
     // The tap is live, so the daemon can now process events.
     if let Some(signal) = ready_signal {
