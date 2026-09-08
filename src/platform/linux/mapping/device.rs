@@ -17,6 +17,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    os::unix::io::{AsRawFd, RawFd},
     sync::Arc,
     thread,
     time::Duration,
@@ -155,6 +156,11 @@ pub(super) struct ManagedDevice {
     /// same press; key-ups and repeats carry no scan code, so those fall
     /// back to the `EV_KEY` reverse lookup.
     pub(super) pending_scan: Option<u32>,
+    /// Set when a hot-plugged device was adopted before its current key state
+    /// was synced to the virtual device.  The event loop syncs it once on the
+    /// device's first pass, then clears this.  Devices grabbed at startup are
+    /// synced inline in `start_mapping` and start `false`.
+    pub(super) pending_initial_state: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -509,31 +515,121 @@ fn hold_modifier_output(
 
 /// Forward a raw evdev key event to the virtual device.
 ///
-/// Repeat events (value == 2) are emitted as a press+release pair to
-/// avoid key-stick on the virtual device.
+/// A repeat (value == 2) of a **modifier** is a no-op: its down is already
+/// out, and emitting a press+release pair would release it mid-hold,
+/// corrupting the modifier state for every key that follows it.  A repeat of
+/// any other key is emitted as a press+release pair so each tick stays
+/// visible to windowing backends that sample keyboard state once per frame.
 fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
     // Raw evdev event type codes.
     const EV_KEY: u16 = 1;
     const EV_SYN: u16 = 0;
     const SYN_REPORT: u16 = 0;
 
-    let events = if value == 2 {
-        // Repeat event: emit as press+release to avoid key-stick.
-        vec![
+    if value == 2 {
+        let is_modifier = keycode_to_hid_usage(code)
+            .and_then(HidUsage::hid_usage_to_modifier_bit)
+            .is_some();
+        if is_modifier {
+            return;
+        }
+        // Non-modifier repeat: emit as press+release to avoid key-stick.
+        let events = [
             InputEvent::new(EV_KEY, code, 1),
             InputEvent::new(EV_KEY, code, 0),
             InputEvent::new(EV_SYN, SYN_REPORT, 0),
-        ]
-    } else {
-        vec![
-            InputEvent::new(EV_KEY, code, value),
-            InputEvent::new(EV_SYN, SYN_REPORT, 0),
-        ]
-    };
+        ];
+        if let Err(e) = device.emit(&events) {
+            eprintln!("emit error: {e}");
+        }
+        return;
+    }
 
+    let events = [
+        InputEvent::new(EV_KEY, code, value),
+        InputEvent::new(EV_SYN, SYN_REPORT, 0),
+    ];
     if let Err(e) = device.emit(&events) {
         eprintln!("emit error: {e}");
     }
+}
+
+/// Read the keyboard's current key state from the kernel and sync any held
+/// keys to the virtual output device and this device's modifier tracking.
+///
+/// Grabbing a device delivers events only from the grab onward, so a key
+/// (commonly a modifier) that is already held is invisible to the event
+/// stream.  Without this sync the virtual keyboard and `managed.modifiers`
+/// start out of step with the physical keyboard and stay that way, which is
+/// why a modifier held at grab time silently breaks later key combinations.
+pub(super) fn sync_initial_state(
+    managed: &mut ManagedDevice,
+    virtual_device: &mut VirtualDevice,
+) {
+    let Ok(held) = read_kernel_key_state(managed.device.as_raw_fd()) else {
+        return;
+    };
+    for code in held {
+        if let Some(usage) = keycode_to_hid_usage(code)
+            && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
+        {
+            // Restore the held modifier in the per-device lookup state and
+            // mark it forwarded so its later physical release is forwarded
+            // (not swallowed) to the virtual device.
+            managed.modifiers |= 1 << bit;
+            managed.tracking.record_forwarded_down(bit);
+        }
+        forward_key_event(virtual_device, code, 1);
+    }
+}
+
+/// Build the `EVIOCGKEY` request word for a buffer of `buf_len` bytes.
+///
+/// `EVIOCGKEY = _IOC(_IOC_READ, 'E' (0x45), 0x18, buf_len)` using the generic
+/// Linux ioctl layout: `nr` at bit 0, `type` at bit 8, `size` at bit 16,
+/// and `dir` at bit 30.  The size field is 14 bits wide.
+fn eviocgkey_request(buf_len: usize) -> libc::c_ulong {
+    const IOC_READ: u64 = 2;
+    const EVIOC_TYPE: u64 = 0x45; // 'E'
+    const EVIOC_NR: u64 = 0x18;
+    IOC_READ << 30
+        | EVIOC_TYPE << 8
+        | EVIOC_NR
+        | ((buf_len as u64 & 0x3fff) << 16)
+}
+
+/// Read the set of currently-held key codes straight from the kernel via
+/// `EVIOCGKEY`.  Returns the `KEY_*` codes the physical keyboard reports as
+/// down at this instant.
+fn read_kernel_key_state(fd: RawFd) -> std::io::Result<Vec<u16>> {
+    const KEY_CNT: usize = 0x2fe; // KEY_MAX + 1
+    let buf_len = KEY_CNT.div_ceil(8);
+    let mut buf = vec![0u8; buf_len];
+    let request = eviocgkey_request(buf_len);
+    // Safety: `buf` is a valid writable buffer of exactly the length encoded
+    // in the request word, and `fd` is the live evdev handle this device owns.
+    let ret = unsafe { libc::ioctl(fd, request, buf.as_mut_ptr() as *mut _) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(parse_key_bitmap(&buf, KEY_CNT))
+}
+
+/// Decode a kernel `EVIOCGKEY` key bitmap (one bit per code, byte-major) into
+/// the list of currently-held key codes, dropping any code beyond `key_cnt`.
+fn parse_key_bitmap(buf: &[u8], key_cnt: usize) -> Vec<u16> {
+    let mut held = Vec::new();
+    for (i, &byte) in buf.iter().enumerate() {
+        for bit in 0..8u8 {
+            if byte & (1 << bit) != 0 {
+                let code = (i * 8 + bit as usize) as u16;
+                if code < key_cnt as u16 {
+                    held.push(code);
+                }
+            }
+        }
+    }
+    held
 }
 
 /// Release a set of consumed trigger modifiers on the virtual device.
@@ -569,6 +665,39 @@ fn release_consumed_modifiers(device: &mut VirtualDevice, consumed: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Initial-state bitmap parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_key_bitmap_sets_expected_codes() {
+        // Bit 2 of byte 0 => code 2; bit 5 of byte 1 => code 13.
+        let mut buf = [0u8; 2];
+        buf[0] = 1 << 2;
+        buf[1] = 1 << 5;
+        assert_eq!(parse_key_bitmap(&buf, 100), vec![2u16, 13]);
+    }
+
+    #[test]
+    fn parse_key_bitmap_ignores_codes_beyond_key_count() {
+        // KEY_CNT = 5: codes 0..4 are valid; any higher bit must be dropped.
+        // Byte 0 all ones = codes 0..7, of which only 0..4 are in range.
+        let buf = [0xFFu8, 0u8];
+        assert_eq!(parse_key_bitmap(&buf, 5), vec![0u16, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn parse_key_bitmap_empty_returns_nothing() {
+        assert!(parse_key_bitmap(&[0u8; 4], 100).is_empty());
+    }
+
+    #[test]
+    fn eviocgkey_request_matches_kernel_ioctl_layout() {
+        // _IOC(_IOC_READ=2, 'E'=0x45, nr=0x18, size=96) =
+        // (2 << 30) | (0x45 << 8) | (0x18 << 0) | (96 << 16).
+        assert_eq!(eviocgkey_request(96), 0x80604518);
+    }
 
     // -----------------------------------------------------------------------
     // Key-fate tracking tests

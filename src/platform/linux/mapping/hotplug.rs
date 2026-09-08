@@ -268,6 +268,9 @@ fn handle_device_add(
         modifiers: 0,
         tracking: KeyTracker::default(),
         pending_scan: None,
+        // The hot-plug thread cannot reach the virtual device, so the event
+        // loop syncs this device's current key state on its first event.
+        pending_initial_state: true,
     };
 
     // Register with managed devices.
