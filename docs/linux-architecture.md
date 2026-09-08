@@ -40,15 +40,16 @@ Each managed device tracks its own state, so one keyboard's modifiers never affe
 - `forwarded_modifiers` — unmapped modifiers that are still held on the virtual keyboard.
 - `consumed_modifiers` — modifiers that were part of a fired trigger and have already been released on the virtual keyboard; their physical release is swallowed rather than forwarded a second time.
 - `swallowed_keys` — the evdev codes of key-downs that fired a mapped trigger and were swallowed. A key-up's fate is decided from this record (and the modifier masks above), **not** from a re-run of the lookup: the modifier state may have changed between the key-down and the key-up (releasing a modifier is the common case), and re-deriving would leak the release as a phantom key-up, or swallow it while the key-down passed through and leave the key held.
+- `held_output_modifiers` — for a swallowed key-down whose mapped output is itself a modifier key (e.g. `CapsLock: LeftControl`), the modifier bits that are therefore held down on the virtual keyboard. The held bits count as active modifiers for subsequent lookups, so chord triggers can match while the remapped modifier is pressed; they are released when the physical key-up arrives, or when a later fired trigger consumes them.
 
 ### Mapping and emission
 
 For each key event the daemon looks up the trigger — active-app rules first, then global rules — passing the device path so per-group `keyboards` filters work:
 
-- **Mapped:** the original event is swallowed and each output is emitted as a complete tap through the virtual keyboard: modifiers down (ascending bit order), base key press and release, modifiers up in reverse. Sub-events are spaced apart (20 ms between modifier events, 1 ms around the base key) because windowing backends sample keyboard state once per frame — a tap that fits entirely between two samples is invisible to them. If emission fails, any keys already pressed are released to avoid a stuck state.
+- **Mapped:** the original event is swallowed and each output is emitted through the virtual keyboard. An output whose base is a regular key is a complete tap: modifiers down (ascending bit order), base key press and release, modifiers up in reverse. An output whose base is itself a modifier key is instead held down (the output's modifier bits, then the base modifier, each key-down only) until the physical key-up, so the remapped modifier stays active for the key presses that follow it. Sub-events are spaced apart (20 ms between modifier events, 1 ms around the base key) because windowing backends sample keyboard state once per frame — a tap that fits entirely between two samples is invisible to them. If emission fails, any keys already pressed are released to avoid a stuck state.
 - **Unmapped:** the raw event is forwarded unchanged. Auto-repeat (value 2) is emitted as a press+release pair to avoid key-stick on the virtual device.
 
-Mapped modifier keys are swallowed on both press and release: when a trigger fires, the chord's previously forwarded modifiers are released first so the output is emitted as a clean tap, and the physical release of those modifiers is swallowed (see `consumed_modifiers` above).
+Mapped modifier keys are swallowed on both press and release: when a trigger fires, the chord's previously forwarded modifiers — and any held modifier outputs of other remapped keys — are released first so the output is emitted as a clean tap, and the physical release of those modifiers is swallowed (see `consumed_modifiers` above). A modifier key that fires a trigger is likewise not forwarded: its own bit is cleared from the lookup state at fire time, since it is mapped rather than passed through.
 
 ### Self-exclusion
 
