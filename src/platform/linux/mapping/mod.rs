@@ -33,7 +33,7 @@ use std::{
     time::Duration,
 };
 
-use device::{ManagedDevice, process_device_events};
+use device::{KeyTracker, ManagedDevice, process_device_events};
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
 use hotplug::start_hotplug_monitor;
@@ -104,8 +104,7 @@ pub fn start_mapping(
             device,
             path: kb.device,
             modifiers: 0,
-            forwarded_modifiers: 0,
-            consumed_modifiers: 0,
+            tracking: KeyTracker::default(),
             pending_scan: None,
         });
     }

@@ -34,11 +34,12 @@ Compiled rules are keyed by `HidUsage`, not by evdev key code:
 
 ### Modifier tracking
 
-Each managed device tracks its own modifier state as three bitmasks, so one keyboard's modifiers never affect another:
+Each managed device tracks its own state, so one keyboard's modifiers never affect another:
 
 - `modifiers` — the currently pressed modifiers. The lookup uses a pre-update snapshot so that bare-modifier triggers (e.g. `LeftControl: A`) match against the concurrent modifier set.
 - `forwarded_modifiers` — unmapped modifiers that are still held on the virtual keyboard.
 - `consumed_modifiers` — modifiers that were part of a fired trigger and have already been released on the virtual keyboard; their physical release is swallowed rather than forwarded a second time.
+- `swallowed_keys` — the evdev codes of key-downs that fired a mapped trigger and were swallowed. A key-up's fate is decided from this record (and the modifier masks above), **not** from a re-run of the lookup: the modifier state may have changed between the key-down and the key-up (releasing a modifier is the common case), and re-deriving would leak the release as a phantom key-up, or swallow it while the key-down passed through and leave the key held.
 
 ### Mapping and emission
 
@@ -87,16 +88,16 @@ For end-to-end testing, the Linux monitor does not create a GUI window — whose
 
 ## Source files
 
-| File | Responsibility |
-| ---- | -------------- |
-| `src/platform/linux/mapping/mod.rs` | Startup, epoll event loop, virtual device creation |
-| `src/platform/linux/mapping/device.rs` | Per-device state, modifier tracking, event processing, emission |
-| `src/platform/linux/mapping/hotplug.rs` | udev add/remove monitor, startup resync |
-| `src/platform/linux/mapping/epoll.rs` | Raw epoll FFI wrapper |
-| `src/platform/linux/keyboard.rs` | Keyboard enumeration via udev |
-| `src/platform/linux/hid_translate.rs` | HID usage ↔ evdev key code translation |
-| `src/platform/linux/config_dir.rs` | XDG configuration directory resolution |
-| `src/common/app_identity/linux/` | Active application query (X11, Wayland) and `.desktop` resolution |
+| File                                    | Responsibility                                                    |
+| --------------------------------------- | ----------------------------------------------------------------- |
+| `src/platform/linux/mapping/mod.rs`     | Startup, epoll event loop, virtual device creation                |
+| `src/platform/linux/mapping/device.rs`  | Per-device state, modifier tracking, event processing, emission   |
+| `src/platform/linux/mapping/hotplug.rs` | udev add/remove monitor, startup resync                           |
+| `src/platform/linux/mapping/epoll.rs`   | Raw epoll FFI wrapper                                             |
+| `src/platform/linux/keyboard.rs`        | Keyboard enumeration via udev                                     |
+| `src/platform/linux/hid_translate.rs`   | HID usage ↔ evdev key code translation                            |
+| `src/platform/linux/config_dir.rs`      | XDG configuration directory resolution                            |
+| `src/common/app_identity/linux/`        | Active application query (X11, Wayland) and `.desktop` resolution |
 
 ## References
 

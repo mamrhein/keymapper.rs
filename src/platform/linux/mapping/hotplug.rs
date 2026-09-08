@@ -27,7 +27,7 @@ use udev::{Enumerator, MonitorBuilder};
 
 use super::{
     VIRTUAL_KEYBOARD_NAME,
-    device::ManagedDevice,
+    device::{KeyTracker, ManagedDevice},
     epoll::{epoll_add, epoll_del},
 };
 use crate::{
@@ -266,8 +266,7 @@ fn handle_device_add(
         device,
         path: kb.device.clone(),
         modifiers: 0,
-        forwarded_modifiers: 0,
-        consumed_modifiers: 0,
+        tracking: KeyTracker::default(),
         pending_scan: None,
     };
 

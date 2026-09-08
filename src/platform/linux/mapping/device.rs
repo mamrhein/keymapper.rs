@@ -15,7 +15,7 @@
 //! key's HID identity, applies the active rules, and either emits the mapped
 //! outputs or forwards the raw event to the virtual output device.
 
-use std::{sync::Arc, thread, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, thread, time::Duration};
 
 use evdev::{Device, EventType, InputEvent, MiscCode, uinput::VirtualDevice};
 use parking_lot::RwLock;
@@ -32,6 +32,76 @@ use crate::{
 // Per-device state
 // ---------------------------------------------------------------------------
 
+/// Per-device key-fate tracking.
+///
+/// Kept separate from the evdev handle so the swallow/forward decision is
+/// unit-testable.  The decisive fact is that a key-up is decided from its
+/// key-down's own record rather than from a re-run of the lookup: the
+/// modifier state may have changed in the meantime, which would leak the
+/// release into the app as a phantom key-up, or swallow it while the
+/// key-down passed through and leave the key held.
+#[derive(Default)]
+pub(super) struct KeyTracker {
+    /// Bitmask of forwarded (unmapped) modifier keys that are still held on
+    /// the virtual keyboard.
+    forwarded_modifiers: u8,
+    /// Bitmask of modifier keys that were part of a fired trigger and have
+    /// already been released on the virtual keyboard.  Their physical release
+    /// is swallowed so it is not forwarded a second time.
+    consumed_modifiers: u8,
+    /// Evdev codes of key-downs that fired a mapped trigger and were
+    /// swallowed.  Their key-ups are swallowed unconditionally, regardless of
+    /// the modifier state at release time.
+    swallowed_keys: BTreeSet<u16>,
+}
+
+impl KeyTracker {
+    /// Record a swallowed key-down.  Returns `true` only for the first press
+    /// of a fresh key-down, not for auto-repeats (value 2), so a repeat is
+    /// swallowed without re-firing the rule.
+    fn record_swallowed_down(&mut self, code: u16, value: i32) -> bool {
+        value == 1 && self.swallowed_keys.insert(code)
+    }
+
+    /// Decide the fate of a key-up.  Returns `true` when the release is
+    /// swallowed (its key-down fired a trigger, or the modifier was consumed
+    /// by one); `false` when it is forwarded.  For a forwarded modifier the
+    /// tracking bit is cleared.
+    fn release(&mut self, code: u16, usage: HidUsage) -> bool {
+        if self.swallowed_keys.remove(&code) {
+            return true;
+        }
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
+            let mask = 1u8 << bit;
+            if self.consumed_modifiers & mask != 0 {
+                self.consumed_modifiers &= !mask;
+                return true;
+            }
+            self.forwarded_modifiers &= !mask;
+        }
+        false
+    }
+
+    /// Track a forwarded (unmapped) modifier press.  A fresh press clears any
+    /// stale consumed mark, since the earlier release belonged to the previous
+    /// press.
+    fn record_forwarded_down(&mut self, bit: u8) {
+        let mask = 1u8 << bit;
+        self.forwarded_modifiers |= mask;
+        self.consumed_modifiers &= !mask;
+    }
+
+    /// Consume the modifiers of a fired trigger: the subset that was forwarded
+    /// is moved from the forwarded mask to the consumed mask and returned, so
+    /// the caller can release it on the virtual keyboard.
+    fn consume_triggered(&mut self, modifiers: u8) -> u8 {
+        let consumed = modifiers & self.forwarded_modifiers;
+        self.forwarded_modifiers &= !consumed;
+        self.consumed_modifiers |= consumed;
+        consumed
+    }
+}
+
 /// A single managed keyboard device, tracking its own modifier state.
 pub(super) struct ManagedDevice {
     pub(super) device: Device,
@@ -39,14 +109,8 @@ pub(super) struct ManagedDevice {
     pub(super) path: String,
     /// Bitmask of currently active modifiers for this device only.
     pub(super) modifiers: u8,
-    /// Bitmask of forwarded (unmapped) modifier keys that are still held.
-    /// Mapped modifiers are excluded so their self-contained output taps
-    /// do not leak into later state.
-    pub(super) forwarded_modifiers: u8,
-    /// Bitmask of modifier keys that were part of a fired trigger and have
-    /// already been released on the virtual keyboard.  Their physical
-    /// release is swallowed so it is not forwarded a second time.
-    pub(super) consumed_modifiers: u8,
+    /// Key-fate tracking (swallowed / forwarded / consumed).
+    pub(super) tracking: KeyTracker,
     /// Last received `MSC_SCAN` value, consumed by the next `EV_KEY`
     /// event.  The kernel emits the scan code before the key event of the
     /// same press; key-ups and repeats carry no scan code, so those fall
@@ -224,6 +288,20 @@ pub(super) fn process_device_events(
             }
         }
 
+        // Key-up: decide the fate from the key-down's own record rather than
+        // a re-run of the lookup.  The modifier state may have changed since
+        // the key-down (releasing a modifier is the common case), which would
+        // otherwise leak the release into the app as a phantom key-up, or
+        // swallow it while the key-down passed through and leave the key held.
+        if value == 0 {
+            if managed.tracking.release(code, usage) {
+                continue;
+            }
+            forward_key_event(virtual_device, code, value);
+            continue;
+        }
+
+        // Key-down (value 1) or auto-repeat (value 2).
         let device_path = &managed.path;
 
         // Compiled rules store the trigger as a `HidUsage`, so the
@@ -238,20 +316,19 @@ pub(super) fn process_device_events(
         drop(guard);
 
         if let Some(outputs) = active_outputs {
-            // Emit mapped outputs and swallow the original event.  This
-            // applies to modifier keys as well: if a bare modifier
-            // (e.g. LeftControl alone) is mapped, its outputs are emitted
-            // and the original modifier press is NOT forwarded to the
-            // virtual device, preventing double emission.
-            if value == 1 {
+            // Record the key-down so its release is swallowed even if the
+            // modifier state changes before the key-up.  Fire the rule —
+            // release the trigger's held modifiers, then emit the outputs —
+            // only on the first press; repeats are swallowed without
+            // re-firing.
+            if managed.tracking.record_swallowed_down(code, value) {
                 // The trigger's modifiers were forwarded when pressed.
                 // Release them now so the output is emitted as a clean tap;
                 // mark them consumed so their physical release is swallowed
                 // below rather than forwarded a second time.
-                let consumed = lookup_modifiers & managed.forwarded_modifiers;
+                let consumed =
+                    managed.tracking.consume_triggered(lookup_modifiers);
                 if consumed != 0 {
-                    managed.forwarded_modifiers &= !consumed;
-                    managed.consumed_modifiers |= consumed;
                     release_consumed_modifiers(virtual_device, consumed);
                 }
 
@@ -265,32 +342,13 @@ pub(super) fn process_device_events(
             continue;
         }
 
-        // A modifier key-up that did not fire a trigger: a consumed modifier
-        // (already released when its trigger fired) and a mapped
-        // bare-modifier trigger's release are both swallowed, while a
-        // forwarded modifier's release is forwarded and untracked.
-        if value == 0
-            && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
-        {
-            let mask = 1u8 << bit;
-            if managed.consumed_modifiers & mask != 0 {
-                managed.consumed_modifiers &= !mask;
-                continue;
-            }
-            if managed.forwarded_modifiers & mask == 0 {
-                // The press was mapped (a bare-modifier trigger) and never
-                // forwarded, so its release is swallowed.
-                continue;
-            }
-            managed.forwarded_modifiers &= !mask;
-        }
-
-        // Track a forwarded (unmapped) modifier press so a later fired
-        // trigger can release it cleanly.
+        // Unmapped: track a forwarded modifier press so a later fired trigger
+        // can release it cleanly.  A fresh press clears any stale consumed
+        // mark, since the earlier release belonged to the previous press.
         if value == 1
             && let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage)
         {
-            managed.forwarded_modifiers |= 1 << bit;
+            managed.tracking.record_forwarded_down(bit);
         }
 
         // Forward the event to the virtual device.
@@ -360,6 +418,93 @@ fn release_consumed_modifiers(device: &mut VirtualDevice, consumed: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -----------------------------------------------------------------------
+    // Key-fate tracking tests
+    // -----------------------------------------------------------------------
+    //
+    // Verifies that a key-up's fate is decided from the key-down's own record
+    // (and the forwarded/consumed modifier state) rather than from a re-run of
+    // the lookup, whose modifier state may have changed in the meantime.
+
+    /// Evdev `KEY_LEFTCTRL`.
+    const CTRL_CODE: u16 = 29;
+    /// Evdev `KEY_A`.
+    const A_CODE: u16 = 30;
+
+    #[test]
+    fn swallowed_key_down_swallows_its_key_up() {
+        let mut t = KeyTracker::default();
+        // The key-down fired a mapped trigger and was swallowed.
+        assert!(t.record_swallowed_down(A_CODE, 1));
+        // Its key-up is swallowed regardless of the modifier state, and the
+        // record is consumed.
+        assert!(t.release(A_CODE, HidUsage::A));
+        assert!(!t.release(A_CODE, HidUsage::A));
+    }
+
+    #[test]
+    fn mapped_base_release_swallowed_after_modifier_state_change() {
+        // Models `Ctrl+Semicolon -> C` where the modifier is released before
+        // the base.  The base's key-down fired the trigger (recorded); its
+        // key-up arrives after the modifier state changed (Ctrl released), so
+        // a re-derived lookup would not match and the release would leak as a
+        // phantom key-up.  The record keeps it swallowed.
+        let mut t = KeyTracker::default();
+
+        // Ctrl down: forwarded (unmapped).
+        t.record_forwarded_down(0);
+
+        // Semicolon (base) down: fires the trigger.  Consume the held Ctrl and
+        // record the base.
+        assert_eq!(t.consume_triggered(1), 1);
+        assert!(t.record_swallowed_down(A_CODE, 1));
+
+        // Ctrl up: consumed by the trigger, so swallowed.
+        assert!(t.release(CTRL_CODE, HidUsage::LeftControl));
+
+        // Base up: modifier state is now empty, but the base's key-down fired
+        // a trigger, so its release is swallowed (not a phantom key-up).
+        assert!(t.release(A_CODE, HidUsage::A));
+    }
+
+    #[test]
+    fn forwarded_modifier_key_up_forwards_and_untracks() {
+        let mut t = KeyTracker::default();
+        t.record_forwarded_down(0);
+        // Its release is forwarded and the tracking bit is cleared.
+        assert!(!t.release(CTRL_CODE, HidUsage::LeftControl));
+    }
+
+    #[test]
+    fn consumed_modifier_key_up_swallowed() {
+        let mut t = KeyTracker::default();
+        // Ctrl is forwarded, then consumed by a fired trigger.
+        t.record_forwarded_down(0);
+        assert_eq!(t.consume_triggered(1), 1);
+        // Its release is swallowed (already released on the virtual device).
+        assert!(t.release(CTRL_CODE, HidUsage::LeftControl));
+    }
+
+    #[test]
+    fn repeat_does_not_refire() {
+        let mut t = KeyTracker::default();
+        assert!(t.record_swallowed_down(A_CODE, 1)); // fresh press records
+        assert!(!t.record_swallowed_down(A_CODE, 2)); // repeat does not re-record
+    }
+
+    #[test]
+    fn fresh_forwarded_press_clears_stale_consumed_mark() {
+        let mut t = KeyTracker::default();
+        // Ctrl forwarded, then consumed by a trigger; its release is swallowed
+        // by another path, leaving the consumed mark stale.
+        t.record_forwarded_down(0);
+        assert_eq!(t.consume_triggered(1), 1);
+        // A fresh Ctrl press must clear the stale mark so its release forwards
+        // rather than being wrongly swallowed (which would leave it stuck).
+        t.record_forwarded_down(0);
+        assert!(!t.release(CTRL_CODE, HidUsage::LeftControl));
+    }
 
     // -----------------------------------------------------------------------
     // Per-device modifier isolation tests
