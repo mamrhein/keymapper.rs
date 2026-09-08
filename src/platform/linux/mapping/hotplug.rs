@@ -27,7 +27,7 @@ use udev::{Enumerator, MonitorBuilder};
 
 use super::{
     VIRTUAL_KEYBOARD_NAME,
-    device::ManagedDevice,
+    device::{KeyTracker, ManagedDevice},
     epoll::{epoll_add, epoll_del},
 };
 use crate::{
@@ -90,7 +90,50 @@ pub(super) fn start_hotplug_monitor(
             // missing keyboards to close that window.
             resync_devices(&managed_devices, epoll_fd, &global_filter);
 
-            for event in socket.iter() {
+            // The monitor socket is non-blocking:
+            // `udev_monitor_receive_device` (what `socket.iter()`
+            // calls) returns NULL as soon as no event is pending,
+            // so a bare iteration loop would end immediately and
+            // the monitor would die on startup.  Block in `poll` until udev
+            // has an event, then receive it.
+            let mut pollfd = libc::pollfd {
+                fd: socket.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let mut iter = socket.iter();
+
+            loop {
+                let ret = unsafe { libc::poll(&mut pollfd, 1, -1) };
+                if ret < 0 {
+                    if std::io::Error::last_os_error().raw_os_error()
+                        == Some(libc::EINTR)
+                    {
+                        continue;
+                    }
+                    eprintln!(
+                        "warning: udev monitor poll failed: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    break;
+                }
+                if pollfd.revents
+                    & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+                    != 0
+                {
+                    eprintln!(
+                        "warning: udev monitor socket closed, hot-plug \
+                         monitoring stopped"
+                    );
+                    break;
+                }
+
+                // `poll` reported data, but the receive can still find
+                // nothing (spurious wake-up) — keep polling in that case.
+                let Some(event) = iter.next() else {
+                    continue;
+                };
+
                 let udev_device = event.device();
 
                 // Filter for keyboards manually, since the netlink monitor
@@ -223,9 +266,11 @@ fn handle_device_add(
         device,
         path: kb.device.clone(),
         modifiers: 0,
-        forwarded_modifiers: 0,
-        consumed_modifiers: 0,
+        tracking: KeyTracker::default(),
         pending_scan: None,
+        // The hot-plug thread cannot reach the virtual device, so the event
+        // loop syncs this device's current key state on its first event.
+        pending_initial_state: true,
     };
 
     // Register with managed devices.

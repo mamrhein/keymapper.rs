@@ -9,9 +9,12 @@
 
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
-    System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
-        Process32NextW, TH32CS_SNAPPROCESS,
+    System::{
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW,
+            Process32NextW, TH32CS_SNAPPROCESS,
+        },
+        Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
     },
 };
 
@@ -72,11 +75,11 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-/// Check whether a process with the given name is running by enumerating
-/// processes via the ToolHelp32 API.  Uses native Windows APIs instead of
-/// spawning `tasklist`, avoiding shell injection and string-matching
-/// fragility.
-pub fn is_daemon_running(name: &str) -> bool {
+/// Collect the process IDs of all processes whose image name matches the
+/// given name.  Uses the native ToolHelp32 API instead of spawning `tasklist`,
+/// avoiding shell injection and string-matching fragility.  Returns an empty
+/// vec when no process matches.
+fn find_pids(name: &str) -> Vec<u32> {
     // Normalise the image name — always compare against the `.exe` form.
     let target_name = if name.ends_with(".exe") {
         name.to_string()
@@ -88,23 +91,22 @@ pub fn is_daemon_running(name: &str) -> bool {
     let Ok(snapshot) =
         (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) })
     else {
-        return false;
+        return Vec::new();
     };
     if snapshot == INVALID_HANDLE_VALUE {
-        return false;
+        return Vec::new();
     }
 
     let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-    let mut found = false;
+    let mut pids = Vec::new();
 
     // Process32First returns TRUE on success, FALSE on failure.
     if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
         loop {
             if wide_eq(&entry.szExeFile, &target) {
-                found = true;
-                break;
+                pids.push(entry.th32ProcessID);
             }
             if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
                 break;
@@ -114,7 +116,39 @@ pub fn is_daemon_running(name: &str) -> bool {
 
     // CloseHandle fails only with an invalid handle, which would be a bug.
     let _ = unsafe { CloseHandle(snapshot) };
-    found
+    pids
+}
+
+/// Check whether a process with the given name is running.
+pub fn is_daemon_running(name: &str) -> bool {
+    !find_pids(name).is_empty()
+}
+
+/// Stop the keymapperd process.  Windows has no SIGTERM, so we enumerate the
+/// matching processes and terminate each one with `TerminateProcess`, which is
+/// a hard stop (there is no graceful shutdown hook).  A missing process is
+/// treated as success so that stop is idempotent.
+pub fn stop_daemon(name: &str) -> Result<(), String> {
+    let pids = find_pids(name);
+    if pids.is_empty() {
+        return Ok(());
+    }
+
+    for pid in pids {
+        let Ok(handle) =
+            (unsafe { OpenProcess(PROCESS_TERMINATE, false, pid) })
+        else {
+            continue;
+        };
+        let result = unsafe { TerminateProcess(handle, 0) };
+        // Always release the process handle, even if the termination failed.
+        let _ = unsafe { CloseHandle(handle) };
+        if result.is_err() {
+            return Err(format!("failed to terminate process {pid}"));
+        }
+    }
+
+    Ok(())
 }
 
 /// Convert a UTF-8 string to a null-terminated wide (UTF-16) string suitable

@@ -152,7 +152,7 @@ The document is a YAML sequence of rule groups. Each group has:
 | Field       | Required | Description                                                                        |
 | ----------- | -------- | ---------------------------------------------------------------------------------- |
 | `name`      | No       | Human-readable label (ignored at runtime)                                          |
-| `apps`      | No       | List of application names to scope the group. Omit or leave empty for global rules |
+| `apps`      | No       | List of application names (as printed by `keymapper appnames`) to scope the group. Omit or leave empty for global rules |
 | `keyboards` | No       | List of keyboard filters to scope the group. Omit or leave empty for all keyboards |
 | `mappings`  | Yes      | Key-value pairs mapping triggers to outputs                                        |
 
@@ -242,7 +242,7 @@ The following aliases resolve to the same platform key:
 
 ### `keymapper appnames`
 
-List every visible application along with the exact name keymapperd uses for matching. Use these values in the `apps` field of your config.
+List every application that owns a visible window along with the canonical name keymapperd uses for matching. Where a human-readable display name differs, it is printed in a second column. Use the first-column value in the `apps` field of your config.
 
 ```
 Arc
@@ -251,7 +251,7 @@ Keyboard Maestro Engine
 Activity Monitor
 ```
 
-The match is case-sensitive. On Linux, the names are `.desktop` application ids (e.g. `org.mozilla.firefox`), resolved uniformly across X11 and Wayland.
+Matching is case-insensitive. On Windows, the names are the main executable file names of the window-owning processes (e.g. `WindowsTerminalHost.exe`), with the executable's `FileDescription` printed as a display alias where it differs. On Linux, the names are `.desktop` application ids (e.g. `org.mozilla.firefox`), resolved uniformly across X11 and Wayland.
 
 ### `keymapper config`
 
@@ -324,3 +324,5 @@ sudo usermod -aG input $USER
 | Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                                                 |
 | macOS    | `CGEventTap` for input capture (keymapperd), Karabiner DriverKit virtual HID driver for event emission (virtkbdd) |
 | Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (see [windows-architecture.md](docs/windows-architecture.md))                                  |
+x
+x

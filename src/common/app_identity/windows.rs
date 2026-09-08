@@ -10,29 +10,33 @@
 //! Windows application identity.
 //!
 //! Both entry points resolve each process to the same canonical name: the
-//! `FileDescription` from the PE version resources of the process
-//! executable, falling back to the file stem.  `get_active_app_name`
-//! resolves the process that owns the foreground window, and
-//! `list_app_names` enumerates the processes that own visible top-level
-//! windows.  This guarantees the active app name is always one of the
-//! names printed by `keymapper appnames`.
+//! file name of the process's main executable (e.g. `pwsh.exe`), which
+//! uniquely identifies the window-owning process, is stable across app
+//! updates, and is independent of the system locale.  The `FileDescription`
+//! from the PE version resources serves only as a human-readable display
+//! alias.  `get_active_app_name` resolves the process that owns the
+//! foreground window, and `list_app_names` enumerates the processes that
+//! own visible top-level windows.  This guarantees the active app name is
+//! always one of the names printed by `keymapper appnames`.
 
 use std::{collections::HashSet, path::Path};
 
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND, LPARAM},
-        System::Diagnostics::ToolHelp::{
-            CREATE_TOOLHELP_SNAPSHOT_FLAGS, CreateToolhelp32Snapshot,
-            MODULEENTRY32W, Module32FirstW, TH32CS_SNAPMODULE,
+        Foundation::{CloseHandle, HWND, LPARAM, RECT},
+        System::Threading::{
+            OpenProcess, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
         },
         UI::WindowsAndMessaging::{
-            EnumWindows, GetDesktopWindow, GetForegroundWindow,
+            EnumWindows, GetDesktopWindow, GetForegroundWindow, GetWindowRect,
             GetWindowThreadProcessId, IsWindowVisible,
         },
     },
-    core::BOOL,
+    core::{BOOL, PWSTR},
 };
+
+use super::AppName;
 
 /// Synchronously query the current foreground application name.
 ///
@@ -53,7 +57,9 @@ pub fn get_active_app_name() -> String {
         return "unknown".to_string();
     }
 
-    app_name_for_pid(pid).unwrap_or_else(|| "unknown".to_string())
+    app_identity_for_pid(pid)
+        .map(|entry| entry.name)
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -169,43 +175,50 @@ fn get_file_description(path: &str) -> Option<String> {
     }
 }
 
-/// Extract the file stem from a path (e.g., "chrome" from
-/// "C:\Program Files\Google\Chrome\Application\chrome.exe").
-fn file_stem(path: &str) -> String {
+/// Extract the file name with extension from a path (e.g., `chrome.exe`
+/// from `C:\Program Files\Google\Chrome\Application\chrome.exe`).
+fn file_name(path: &str) -> String {
     Path::new(path)
-        .file_stem()
+        .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_string()
 }
 
-/// Get the executable path for a process by enumerating its modules.
-fn get_process_exe_path(pid: u32) -> Option<String> {
-    let snap_flags = TH32CS_SNAPMODULE | CREATE_TOOLHELP_SNAPSHOT_FLAGS(pid);
-
-    let Ok(mod_snap) = (unsafe { CreateToolhelp32Snapshot(snap_flags, pid) })
-    else {
+/// Get the full path of the process's main executable.
+fn get_process_image_path(pid: u32) -> Option<String> {
+    let Ok(handle) = (unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+    }) else {
         return None;
     };
-    if mod_snap.is_invalid() {
-        return None;
-    }
 
-    unsafe {
-        let mut me = std::mem::zeroed::<MODULEENTRY32W>();
-        me.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+    // Image paths rarely exceed 1024 UTF-16 units; retry with a much larger
+    // buffer when the path is longer than that.
+    let result = [1024usize, 32_768].into_iter().find_map(|capacity| {
+        let mut buffer = vec![0u16; capacity];
+        let mut size = capacity as u32;
 
-        let result = if Module32FirstW(mod_snap, &mut me).is_ok() {
-            let path = utf16_to_string(&me.szExePath);
-            if path.is_empty() { None } else { Some(path) }
-        } else {
-            None
-        };
+        if (unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut size,
+            )
+        })
+        .is_err()
+        {
+            return None;
+        }
 
-        // CloseHandle fails only with an invalid handle, which would be a bug.
-        let _ = CloseHandle(mod_snap);
-        result
-    }
+        let path = utf16_to_string(&buffer[..size as usize]);
+        (!path.is_empty()).then_some(path)
+    });
+
+    // CloseHandle fails only with an invalid handle, which would be a bug.
+    let _ = unsafe { CloseHandle(handle) };
+    result
 }
 
 /// Callback for EnumWindows — collect PIDs of visible top-level windows.
@@ -213,15 +226,28 @@ struct WindowCollector {
     pids: HashSet<u32>,
 }
 
+/// Callback for EnumWindows — collect PIDs of visible top-level windows.
 extern "system" fn enum_windows_proc(hwnd: HWND, param: LPARAM) -> BOOL {
     if unsafe { IsWindowVisible(hwnd) }.as_bool() {
-        let mut pid: u32 = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-        if pid != 0 {
-            let collector = param.0 as *mut WindowCollector;
-            unsafe {
-                if !collector.is_null() {
-                    (*collector).pids.insert(pid);
+        // Skip zero-area helper windows (e.g. the 0x0 ConPTY
+        // "PseudoConsoleWindow" that PowerShell creates in-process).  Such
+        // windows can never take the foreground, so their owning process
+        // could never be the active app.  Minimized app windows are
+        // unaffected: they still report a non-zero, off-screen rect.
+        let mut rect = unsafe { core::mem::zeroed::<RECT>() };
+        let has_area = unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
+            && rect.right - rect.left != 0
+            && rect.bottom - rect.top != 0;
+
+        if has_area {
+            let mut pid: u32 = 0;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            if pid != 0 {
+                let collector = param.0 as *mut WindowCollector;
+                unsafe {
+                    if !collector.is_null() {
+                        (*collector).pids.insert(pid);
+                    }
                 }
             }
         }
@@ -229,8 +255,9 @@ extern "system" fn enum_windows_proc(hwnd: HWND, param: LPARAM) -> BOOL {
     BOOL(1) // continue enumeration
 }
 
-/// Enumerate all visible top-level windows and extract unique app names.
-pub fn list_app_names() -> Vec<String> {
+/// Enumerate all visible, non-zero-area top-level windows and extract
+/// unique application entries.
+pub fn list_app_names() -> Vec<AppName> {
     // Ensure a desktop session is active.
     unsafe {
         let _ = GetDesktopWindow();
@@ -246,34 +273,40 @@ pub fn list_app_names() -> Vec<String> {
     unsafe {
         let _ = EnumWindows(
             Some(enum_windows_proc),
-            LPARAM(&mut collector as *mut _ as isize),
+            LPARAM(&mut collector as *const _ as isize),
         );
     };
 
-    let mut app_names: Vec<String> = Vec::new();
+    let mut apps: Vec<AppName> = Vec::new();
 
     for &pid in &collector.pids {
-        if let Some(name) = app_name_for_pid(pid) {
-            app_names.push(name);
+        if let Some(entry) = app_identity_for_pid(pid) {
+            apps.push(entry);
         }
     }
 
-    app_names.sort();
-    app_names.dedup();
-    app_names
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    apps.dedup_by(|a, b| a.name == b.name);
+    apps
 }
 
-/// Resolve the canonical app name for a process: the `FileDescription`
-/// from its executable's PE version resources, falling back to the file
-/// stem.
+/// Resolve the canonical application identity for a process: the file name
+/// of its main executable (the rule-matching key), plus the
+/// `FileDescription` from its PE version resources as a human-readable
+/// display alias.
 ///
 /// This is the single definition of the per-process app identity on
 /// Windows.  Both entry points of this module must go through it so they
 /// stay in the same namespace.
-fn app_name_for_pid(pid: u32) -> Option<String> {
-    let exe_path = get_process_exe_path(pid)?;
-    let name = get_file_description(&exe_path)
-        .unwrap_or_else(|| file_stem(&exe_path));
+fn app_identity_for_pid(pid: u32) -> Option<AppName> {
+    let image_path = get_process_image_path(pid)?;
+    let name = file_name(&image_path);
+    if name.is_empty() {
+        return None;
+    }
 
-    if name.is_empty() { None } else { Some(name) }
+    let display = get_file_description(&image_path).unwrap_or(name.clone());
+    Some(AppName { name, display })
 }
+x
+x

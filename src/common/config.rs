@@ -280,7 +280,8 @@ pub struct RuleGroup {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
-    /// Target applications (process names or bundle IDs).  An empty list
+    /// Target applications, as canonical app names printed by
+    /// `keymapper appnames`.  Matching is case-insensitive.  An empty list
     /// means the group applies globally.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<String>,

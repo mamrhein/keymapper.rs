@@ -33,7 +33,9 @@ use std::{
     time::Duration,
 };
 
-use device::{ManagedDevice, process_device_events};
+use device::{
+    KeyTracker, ManagedDevice, process_device_events, sync_initial_state,
+};
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
 use hotplug::start_hotplug_monitor;
@@ -104,9 +106,10 @@ pub fn start_mapping(
             device,
             path: kb.device,
             modifiers: 0,
-            forwarded_modifiers: 0,
-            consumed_modifiers: 0,
+            tracking: KeyTracker::default(),
             pending_scan: None,
+            // Synced inline below, before the event loop starts.
+            pending_initial_state: false,
         });
     }
 
@@ -122,6 +125,15 @@ pub fn start_mapping(
 
     thread::sleep(Duration::from_millis(200));
     println!("Linux virtual keyboard ready.");
+
+    // Sync each grabbed keyboard's currently-held keys to the virtual device
+    // and per-device modifier tracking.  This runs before the event loop so
+    // the first real event is never processed against a stale (neutral)
+    // modifier state — the root cause of a held-at-start modifier breaking
+    // later key combinations.
+    for managed in &mut managed_devices {
+        sync_initial_state(managed, &mut virtual_device);
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     register(SIGINT, shutdown.clone())
@@ -175,6 +187,14 @@ pub fn start_mapping(
                     if let Some(managed) =
                         devices.iter_mut().find(|m| m.device.as_raw_fd() == fd)
                     {
+                        // A hot-plugged device was adopted before its key
+                        // state was synced; sync it now, on the first event
+                        // from it, so that event is not processed against a
+                        // stale state.
+                        if managed.pending_initial_state {
+                            sync_initial_state(managed, &mut virtual_device);
+                            managed.pending_initial_state = false;
+                        }
                         process_device_events(
                             managed,
                             &mut virtual_device,

@@ -74,7 +74,9 @@ impl RuntimeLookupCache {
         &self,
         app: &str,
     ) -> Option<&Vec<CompiledRule>> {
-        self.process_rules.get(app)
+        // Keys are folded to lowercase at compile time (executable names
+        // are case-insensitive on Windows), so fold the query the same way.
+        self.process_rules.get(&app.to_lowercase())
     }
 
     pub(crate) fn global_rules(&self) -> &Vec<CompiledRule> {
@@ -167,8 +169,11 @@ impl RuntimeLookupCache {
                         global_rules.push(rule);
                     } else {
                         for app in &apps {
-                            let rules =
-                                process_rules.entry(app.clone()).or_default();
+                            // Fold the key to lowercase so lookups can be
+                            // case-insensitive (executable names are
+                            // case-insensitive on Windows).
+                            let key = app.to_lowercase();
+                            let rules = process_rules.entry(key).or_default();
                             rules.push(rule.clone());
                         }
                     }
@@ -427,13 +432,22 @@ mod tests {
         let cache = build_cache(yaml);
         assert!(cache.global_rules().is_empty());
 
-        // Exact case-sensitive app match.
+        // App names match case-insensitively.
         let rules = cache.process_rules("MyApp").expect("MyApp should exist");
         assert!(!rules.is_empty());
 
-        // Wrong case should not match.
-        assert!(cache.process_rules("myapp").is_none());
-        assert!(cache.process_rules("MYAPP").is_none());
+        let rules_lower = cache
+            .process_rules("myapp")
+            .expect("lowercase should match");
+        assert_eq!(rules.len(), rules_lower.len());
+
+        let rules_upper = cache
+            .process_rules("MYAPP")
+            .expect("uppercase should match");
+        assert_eq!(rules.len(), rules_upper.len());
+
+        // An unrelated app should not match.
+        assert!(cache.process_rules("OtherApp").is_none());
     }
 
     #[test]
