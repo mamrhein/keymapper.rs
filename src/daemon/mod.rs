@@ -11,6 +11,7 @@
 
 pub mod config_io;
 pub mod decision;
+pub mod engine;
 pub mod mapping_cache;
 pub mod state;
 #[cfg(feature = "e2e")]
