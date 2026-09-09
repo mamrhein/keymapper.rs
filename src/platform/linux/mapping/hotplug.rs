@@ -22,16 +22,17 @@ use std::{
 };
 
 use libc::c_int;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use udev::{Enumerator, MonitorBuilder};
 
 use super::{
     VIRTUAL_KEYBOARD_NAME,
-    device::{KeyTracker, ManagedDevice},
+    device::ManagedDevice,
     epoll::{epoll_add, epoll_del},
 };
 use crate::{
     common::keyboard::{KeyboardSpecifier, filter_keyboards_by_specifiers},
+    daemon::{engine::MappingEngine, state::Lookup},
     platform::linux::keyboard::build_keyboard_from_udev,
 };
 
@@ -45,6 +46,7 @@ use crate::{
 /// not affect the grab list. The user must restart the daemon for
 /// filter changes to take effect on hot-plugged devices.
 pub(super) fn start_hotplug_monitor(
+    lookup: Arc<RwLock<dyn Lookup>>,
     managed_devices: Arc<Mutex<Vec<ManagedDevice>>>,
     epoll_fd: RawFd,
     global_filter: Option<Vec<KeyboardSpecifier>>,
@@ -88,7 +90,12 @@ pub(super) fn start_hotplug_monitor(
             // snapshot) never emits a fresh "add" event to this monitor and
             // would otherwise never be grabbed.  Rescan and adopt any
             // missing keyboards to close that window.
-            resync_devices(&managed_devices, epoll_fd, &global_filter);
+            resync_devices(
+                &lookup,
+                &managed_devices,
+                epoll_fd,
+                &global_filter,
+            );
 
             // The monitor socket is non-blocking:
             // `udev_monitor_receive_device` (what `socket.iter()`
@@ -149,6 +156,7 @@ pub(super) fn start_hotplug_monitor(
                 match event.event_type() {
                     EventType::Add => {
                         handle_device_add(
+                            &lookup,
                             &udev_device,
                             &managed_devices,
                             epoll_fd,
@@ -176,6 +184,7 @@ pub(super) fn start_hotplug_monitor(
 /// call.  Reuses [`handle_device_add`], which skips devices that are
 /// already managed.
 fn resync_devices(
+    lookup: &Arc<RwLock<dyn Lookup>>,
     managed_devices: &Arc<Mutex<Vec<ManagedDevice>>>,
     epoll_fd: RawFd,
     global_filter: &Option<Vec<KeyboardSpecifier>>,
@@ -199,6 +208,7 @@ fn resync_devices(
 
     for udev_device in devices {
         handle_device_add(
+            lookup,
             &udev_device,
             managed_devices,
             epoll_fd,
@@ -212,6 +222,7 @@ fn resync_devices(
 /// Opens the device, checks the global filter, grabs it, and registers it
 /// with epoll and the managed device list.
 fn handle_device_add(
+    lookup: &Arc<RwLock<dyn Lookup>>,
     udev_device: &udev::Device,
     managed_devices: &Arc<Mutex<Vec<ManagedDevice>>>,
     epoll_fd: RawFd,
@@ -265,8 +276,7 @@ fn handle_device_add(
     let managed = ManagedDevice {
         device,
         path: kb.device.clone(),
-        modifiers: 0,
-        tracking: KeyTracker::default(),
+        engine: MappingEngine::new(Arc::clone(lookup)),
         pending_scan: None,
         // The hot-plug thread cannot reach the virtual device, so the event
         // loop syncs this device's current key state on its first event.

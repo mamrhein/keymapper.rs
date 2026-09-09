@@ -33,9 +33,7 @@ use std::{
     time::Duration,
 };
 
-use device::{
-    KeyTracker, ManagedDevice, process_device_events, sync_initial_state,
-};
+use device::{ManagedDevice, process_device_events, sync_initial_state};
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
 use hotplug::start_hotplug_monitor;
@@ -51,7 +49,7 @@ use crate::{
     common::keyboard::{
         KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
     },
-    daemon::state::Lookup,
+    daemon::{engine::MappingEngine, state::Lookup},
 };
 
 /// Name of the daemon's own uinput output device.
@@ -105,8 +103,7 @@ pub fn start_mapping(
         managed_devices.push(ManagedDevice {
             device,
             path: kb.device,
-            modifiers: 0,
-            tracking: KeyTracker::default(),
+            engine: MappingEngine::new(Arc::clone(&lookup)),
             pending_scan: None,
             // Synced inline below, before the event loop starts.
             pending_initial_state: false,
@@ -159,6 +156,7 @@ pub fn start_mapping(
 
     // Start hot-plug monitor for dynamic device add/remove.
     start_hotplug_monitor(
+        Arc::clone(&lookup),
         Arc::clone(&managed_devices),
         epoll_fd.as_raw_fd(),
         keyboard_filter,
@@ -195,11 +193,7 @@ pub fn start_mapping(
                             sync_initial_state(managed, &mut virtual_device);
                             managed.pending_initial_state = false;
                         }
-                        process_device_events(
-                            managed,
-                            &mut virtual_device,
-                            &lookup,
-                        );
+                        process_device_events(managed, &mut virtual_device);
                     }
                 }
             }
