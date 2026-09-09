@@ -38,7 +38,12 @@
 //! mask on [`Decision::Emit`] and [`Decision::Swallow`] is the clean-tap /
 //! held-output mechanism; a platform whose output device does not need it
 //! (macOS, where the virtual keyboard's modifier state is isolated from
-//! physical typing) simply ignores it.
+//! physical typing) simply ignores it. [`Decision::ConsumedRelease`] is the
+//! physical release of a modifier that a fired trigger consumed: platforms
+//! whose output device already released it (Linux, Windows) swallow the
+//! event, while a platform where forwarded events never reach the output
+//! device (macOS) passes it through, because the physical release is the
+//! application's only source of truth.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -66,12 +71,18 @@ pub enum Decision {
         release: u8,
         outputs: Vec<NativeKey>,
     },
-    /// Swallow the event without emitting (a mapped key-up, a consumed
-    /// modifier release, or the auto-repeat of a mapped key).
+    /// Swallow the event without emitting (a mapped key-up or the auto-repeat
+    /// of a mapped key).
     ///
     /// `release` is the mask of held output modifier bits to release on the
     /// output device (0 when none).
     Swallow { release: u8 },
+    /// The physical release of a modifier that was forwarded when pressed and
+    /// consumed by a fired trigger. Platforms whose output device already
+    /// released the modifier (Linux, Windows) swallow it; platforms where
+    /// forwarded events never reach the output device (macOS) pass it through,
+    /// because the physical release is the application's only source of truth.
+    ConsumedRelease,
 }
 
 /// Per-keyboard key-fate and modifier bookkeeping.
@@ -157,25 +168,42 @@ impl<K: Ord> KeyTracker<K> {
         }
     }
 
-    /// Decide the fate of a key-up. Returns `Some(mask)` when the release is
-    /// swallowed (its key-down fired a trigger, or the modifier was consumed
-    /// by one), with *mask* the held output modifier bits to release on
-    /// the output device (0 when none). Returns `None` when the release is
-    /// forwarded; for a forwarded modifier the tracking bit is cleared.
-    fn release(&mut self, key: K, usage: HidUsage) -> Option<u8> {
+    /// Decide the fate of a key-up. Returns [`ReleaseFate::Swallow`] when the
+    /// release is swallowed (its key-down fired a trigger), with *mask* the
+    /// held output modifier bits to release on the output device (0 when
+    /// none); [`ReleaseFate::Consumed`] when the modifier was consumed by a
+    /// fired trigger (the executor decides whether to swallow or forward it);
+    /// and `None` when the release is forwarded, in which case the tracking
+    /// bit of a forwarded modifier is cleared.
+    fn release(&mut self, key: K, usage: HidUsage) -> Option<ReleaseFate> {
         if self.swallowed_keys.remove(&key) {
-            return Some(self.held_output_modifiers.remove(&key).unwrap_or(0));
+            return Some(ReleaseFate::Swallow(
+                self.held_output_modifiers.remove(&key).unwrap_or(0),
+            ));
         }
         if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
             let mask = 1u8 << bit;
             if self.consumed_modifiers & mask != 0 {
                 self.consumed_modifiers &= !mask;
-                return Some(0);
+                return Some(ReleaseFate::Consumed);
             }
             self.forwarded_modifiers &= !mask;
         }
         None
     }
+}
+
+/// The fate of a key-up, as decided by the tracker from its bookkeeping.
+#[derive(Debug, PartialEq, Eq)]
+enum ReleaseFate {
+    /// The release is swallowed; the payload is the mask of held output
+    /// modifier bits to release on the output device (0 when none).
+    Swallow(u8),
+    /// The release belongs to a modifier that was forwarded when pressed and
+    /// consumed by a fired trigger. The executor decides whether to swallow
+    /// it (the output device already released the modifier) or pass it
+    /// through (forwarded events never reach the output device).
+    Consumed,
 }
 
 /// The unified mapping engine: one instance per captured keyboard (or one
@@ -358,17 +386,19 @@ impl<K: Ord + Copy> MappingEngine<K> {
             self.modifier_state &= !(1 << bit);
         }
 
-        // A key whose key-down was mapped (or a consumed modifier) is
-        // swallowed on release; any other key passes through. For a
-        // swallowed key whose output held modifier bits, those bits
-        // are released now and cleared from the lookup state.
+        // A key whose key-down was mapped is swallowed on release; a consumed
+        // modifier's release is handed to the executor (which swallows or
+        // forwards it depending on its output device); any other key passes
+        // through. For a swallowed key whose output held modifier bits, those
+        // bits are released now and cleared from the lookup state.
         match self.tracker.release(key, usage) {
-            Some(release) => {
+            Some(ReleaseFate::Swallow(release)) => {
                 if release != 0 {
                     self.modifier_state &= !release;
                 }
                 Decision::Swallow { release }
             }
+            Some(ReleaseFate::Consumed) => Decision::ConsumedRelease,
             None => Decision::Pass,
         }
     }
@@ -426,7 +456,7 @@ mod tests {
         t.swallowed_keys.insert(A);
         // Its key-up is swallowed regardless of the modifier state, and the
         // record is consumed.
-        assert_eq!(t.release(A, HidUsage::A), Some(0));
+        assert_eq!(t.release(A, HidUsage::A), Some(ReleaseFate::Swallow(0)));
         assert_eq!(t.release(A, HidUsage::A), None);
     }
 
@@ -446,13 +476,16 @@ mod tests {
         assert_eq!(t.consume_triggered(1), (1, 0));
         t.swallowed_keys.insert(A);
 
-        // Ctrl up: consumed by the trigger, so swallowed.
-        assert_eq!(t.release(CTRL, HidUsage::LeftControl), Some(0));
+        // Ctrl up: consumed by the trigger.
+        assert_eq!(
+            t.release(CTRL, HidUsage::LeftControl),
+            Some(ReleaseFate::Consumed)
+        );
 
         // Base up: modifier state is now empty, but the base's key-down fired
         // a trigger, so its release is swallowed (not a phantom
         // key-up).
-        assert_eq!(t.release(A, HidUsage::A), Some(0));
+        assert_eq!(t.release(A, HidUsage::A), Some(ReleaseFate::Swallow(0)));
     }
 
     #[test]
@@ -469,8 +502,12 @@ mod tests {
         // Ctrl is forwarded, then consumed by a fired trigger.
         t.record_forwarded_down(0);
         assert_eq!(t.consume_triggered(1), (1, 0));
-        // Its release is swallowed (already released on the output device).
-        assert_eq!(t.release(CTRL, HidUsage::LeftControl), Some(0));
+        // Its release is a consumed release: the executor swallows it on
+        // platforms whose output device already released the modifier.
+        assert_eq!(
+            t.release(CTRL, HidUsage::LeftControl),
+            Some(ReleaseFate::Consumed)
+        );
     }
 
     #[test]
@@ -503,7 +540,10 @@ mod tests {
         t.swallowed_keys.insert(CAPS);
         t.hold_output_modifiers(CAPS, 1); // LeftControl bit.
 
-        assert_eq!(t.release(CAPS, HidUsage::CapsLock), Some(1));
+        assert_eq!(
+            t.release(CAPS, HidUsage::CapsLock),
+            Some(ReleaseFate::Swallow(1))
+        );
         // A second release finds no record and is forwarded.
         assert_eq!(t.release(CAPS, HidUsage::CapsLock), None);
     }
@@ -518,8 +558,11 @@ mod tests {
         t.swallowed_keys.insert(F1);
         t.hold_output_modifiers(F1, 2); // LeftShift
 
-        assert_eq!(t.release(CAPS, HidUsage::CapsLock), Some(1));
-        assert_eq!(t.release(F1, HidUsage::F1), Some(2));
+        assert_eq!(
+            t.release(CAPS, HidUsage::CapsLock),
+            Some(ReleaseFate::Swallow(1))
+        );
+        assert_eq!(t.release(F1, HidUsage::F1), Some(ReleaseFate::Swallow(2)));
     }
 
     #[test]
@@ -533,7 +576,10 @@ mod tests {
         t.hold_output_modifiers(CAPS, 1);
 
         assert_eq!(t.consume_triggered(1), (1, 1));
-        assert_eq!(t.release(CAPS, HidUsage::CapsLock), Some(0));
+        assert_eq!(
+            t.release(CAPS, HidUsage::CapsLock),
+            Some(ReleaseFate::Swallow(0))
+        );
     }
 
     #[test]
@@ -546,7 +592,10 @@ mod tests {
         t.hold_output_modifiers(CAPS, 3); // LeftControl | LeftShift
 
         assert_eq!(t.consume_triggered(1), (1, 1));
-        assert_eq!(t.release(CAPS, HidUsage::CapsLock), Some(2));
+        assert_eq!(
+            t.release(CAPS, HidUsage::CapsLock),
+            Some(ReleaseFate::Swallow(2))
+        );
     }
 
     #[test]
@@ -606,8 +655,14 @@ mod tests {
         assert_eq!(t.forwarded_modifiers, 0);
         assert_eq!(t.consumed_modifiers, 0b0000_0011);
 
-        assert_eq!(t.release(CTRL, HidUsage::LeftControl), Some(0));
-        assert_eq!(t.release(SHIFT, HidUsage::LeftShift), Some(0));
+        assert_eq!(
+            t.release(CTRL, HidUsage::LeftControl),
+            Some(ReleaseFate::Consumed)
+        );
+        assert_eq!(
+            t.release(SHIFT, HidUsage::LeftShift),
+            Some(ReleaseFate::Consumed)
+        );
         assert_eq!(t.consumed_modifiers, 0);
     }
 
@@ -623,7 +678,10 @@ mod tests {
         assert_eq!(t.forwarded_modifiers, 0);
         assert_eq!(t.consumed_modifiers, 0b0000_0100);
 
-        assert_eq!(t.release(ALT, HidUsage::LeftAlt), Some(0)); // consumed
+        assert_eq!(
+            t.release(ALT, HidUsage::LeftAlt), // consumed
+            Some(ReleaseFate::Consumed)
+        );
         assert_eq!(t.release(META, HidUsage::LeftCommand), None); // never forwarded
     }
 
@@ -659,7 +717,7 @@ mod tests {
         // swallowed and clears the record.
         let mut t = KeyTracker::<u16>::default();
         t.swallowed_keys.insert(A);
-        assert_eq!(t.release(A, HidUsage::A), Some(0));
+        assert_eq!(t.release(A, HidUsage::A), Some(ReleaseFate::Swallow(0)));
         assert!(t.swallowed_keys.is_empty());
     }
 
@@ -681,8 +739,11 @@ mod tests {
         let (released, _) = t.consume_triggered(0b0000_0010);
         assert_eq!(released, 0b0000_0010);
 
-        // LeftShift was consumed: swallow.
-        assert_eq!(t.release(SHIFT, HidUsage::LeftShift), Some(0));
+        // LeftShift was consumed: its release is a consumed release.
+        assert_eq!(
+            t.release(SHIFT, HidUsage::LeftShift),
+            Some(ReleaseFate::Consumed)
+        );
         // RightShift was only forwarded: forward and untrack.
         assert_eq!(t.release(RSHIFT, HidUsage::RightShift), None);
         assert_eq!(t.forwarded_modifiers, 0);
@@ -801,12 +862,11 @@ mod tests {
             up(&mut e, HidUsage::Backspace),
             Decision::Swallow { release: 0 }
         );
-        // The modifier was consumed by the trigger, so its release is
-        // swallowed rather than forwarded a second time.
-        assert_eq!(
-            up(&mut e, HidUsage::LeftShift),
-            Decision::Swallow { release: 0 }
-        );
+        // The modifier was consumed by the trigger, so its release is a
+        // consumed release: the executor swallows it on platforms whose
+        // output device already released the modifier, and forwards it where
+        // forwarded events never reach the output device.
+        assert_eq!(up(&mut e, HidUsage::LeftShift), Decision::ConsumedRelease);
     }
 
     #[test]
@@ -842,7 +902,7 @@ mod tests {
         // A modifier held at grab time is noted as held: its bit is active
         // for rule lookup, so a chord pressed while it is held fires. The
         // modifier was forwarded (not mapped), so the trigger consumes it and
-        // its physical release is swallowed.
+        // its physical release is a consumed release.
         let mut e = engine("- mappings:\n    LeftControl+A: B");
         e.note_held_key(HidUsage::LeftControl.id(), HidUsage::LeftControl);
         assert_eq!(
@@ -855,7 +915,7 @@ mod tests {
         assert_eq!(up(&mut e, HidUsage::A), Decision::Swallow { release: 0 });
         assert_eq!(
             up(&mut e, HidUsage::LeftControl),
-            Decision::Swallow { release: 0 }
+            Decision::ConsumedRelease
         );
     }
 
@@ -951,11 +1011,13 @@ mod tests {
             Decision::Swallow { release: 0 }
         );
 
-        // Ctrl up: consumed by the trigger, so swallowed (not forwarded
-        // twice).
+        // Ctrl up: consumed by the trigger, so it is a consumed release
+        // (the executor swallows it on platforms whose output device already
+        // released the modifier, and forwards it where forwarded events never
+        // reach the output device).
         assert_eq!(
             up(&mut e, HidUsage::LeftControl),
-            Decision::Swallow { release: 0 }
+            Decision::ConsumedRelease
         );
     }
 

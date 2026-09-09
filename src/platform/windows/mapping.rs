@@ -583,15 +583,17 @@ extern "system" fn low_level_keyboard_proc(
             }
             LRESULT(1)
         }
-        // A mapped key-up (or a consumed modifier release): swallow the
-        // event and, for a remapped modifier key, release the output bits
-        // that have been held since the key-down.
+        // A mapped key-up: swallow the event and, for a remapped modifier
+        // key, release the output bits that have been held since the key-down.
         Decision::Swallow { release } => {
             if release != 0 {
                 release_modifiers(release);
             }
             LRESULT(1)
         }
+        // A consumed modifier release: the synthetic key-up was already sent
+        // when the trigger fired, so swallow the physical release.
+        Decision::ConsumedRelease => LRESULT(1),
     }
 }
 

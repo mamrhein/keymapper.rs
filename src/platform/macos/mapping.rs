@@ -11,11 +11,19 @@
 //!
 //! A `kCGHIDEventTap` observes every keyboard event at the earliest point in
 //! the input pipeline.  Each event is translated to a [`HidUsage`] and handed
-//! to the shared decision core: unmapped keys are passed through unchanged,
+//! to the unified mapping engine: unmapped keys are passed through unchanged,
 //! mapped keys are swallowed and their outputs handed to the virtkbdd IPC
 //! client for re-emission through the DriverKit virtual keyboard.  The tap's
 //! mach port is scheduled on the main CFRunLoop, which is polled until a
 //! shutdown signal (SIGINT or SIGTERM) is received.
+//!
+//! The engine's [`Decision`] is interpreted according to this platform's
+//! additive virtual-device architecture: the `release` masks are inert (the
+//! virtual keyboard's modifier state is isolated from physical typing, so
+//! there is nothing to release on the output device), modifier-key outputs
+//! are tapped rather than held (a remapped modifier therefore does not modify
+//! subsequent physical keys), and a consumed modifier's physical release is
+//! passed through, because forwarded events never touch the virtual keyboard.
 //!
 //! This runs in the user domain (keymapperd): a CGEventTap requires a
 //! WindowServer connection, which a root daemon cannot have.  It needs the
@@ -47,7 +55,7 @@ use super::{ipc_client::IpcClient, keycode::keycode_to_hid_usage};
 use crate::{
     common::{hid_usage::HidUsage, keyboard::KeyboardSpecifier},
     daemon::{
-        decision::{Decision, DecisionContext},
+        engine::{Decision, MappingEngine},
         mapping_cache::NativeKey,
         state::Lookup,
     },
@@ -56,7 +64,7 @@ use crate::{
 /// Start keyboard input capture via a CGEventTap.
 ///
 /// Creates a `kCGHIDEventTap` that observes keyboard events, decides each one
-/// with the shared decision core, and re-emits mapped outputs through the
+/// with the unified mapping engine, and re-emits mapped outputs through the
 /// virtkbdd IPC client.  The CFRunLoop is polled until a shutdown signal
 /// (SIGINT or SIGTERM) is received.
 ///
@@ -83,9 +91,9 @@ pub fn start_mapping(
     // passes through natively, so a dead emitter never breaks typing.
     let ipc = IpcClient::start()?;
 
-    // Create the decision context.  `device_id` is `None` on macOS because
+    // Create the mapping engine.  `device_id` is `None` on macOS because
     // CGEvents cannot be correlated with an IOKit device.
-    let decision = DecisionContext::new(lookup, None);
+    let engine = MappingEngine::new(lookup);
 
     // Build the tap context.  The callback is a plain function pointer, so all
     // state travels through the refcon; the context is a local that stays
@@ -95,7 +103,7 @@ pub fn start_mapping(
     // placeholder here and stored after creation (no events flow until the
     // run loop starts, so this is race-free).
     let mut ctx = TapContext {
-        decision: Mutex::new(decision),
+        engine: Mutex::new(engine),
         tx: ipc.sender(),
         reachable: ipc.reachable_flag(),
         tap_port: std::ptr::null(),
@@ -196,8 +204,8 @@ fn flags_changed_state(usage: HidUsage, flags: CGEventFlags) -> Option<bool> {
 
 /// The state shared with the CGEventTap callback via its refcon.
 struct TapContext {
-    /// The decision core, guarded because `decide` takes `&mut self`.
-    decision: Mutex<DecisionContext>,
+    /// The mapping engine, guarded because `decide` takes `&mut self`.
+    engine: Mutex<MappingEngine<HidUsage>>,
     /// The virtkbdd batch sender (fire-and-forget).
     tx: mpsc::SyncSender<Vec<NativeKey>>,
     /// The virtkbdd reachability flag.
@@ -263,18 +271,31 @@ unsafe extern "C-unwind" fn tap_callback(
 
     let reachable = ctx.reachable.load(Ordering::Acquire);
     let decision = {
-        let mut d = ctx.decision.lock();
-        d.decide(usage, is_down, reachable)
+        let mut e = ctx.engine.lock();
+        // The HID usage is the key identity: it is page-specific and
+        // unambiguous, and CGEvents expose no finer-grained identity.
+        e.decide(usage, usage, is_down, None, reachable)
     };
 
     match decision {
         Decision::Pass => event.as_ptr(),
-        Decision::Emit(outputs) => {
-            // Fire-and-forget; drop the batch if the channel is full.
+        Decision::Emit {
+            release: _,
+            outputs,
+        } => {
+            // The release mask is inert on macOS: the virtual keyboard's
+            // modifier state is isolated from physical typing, so there is
+            // nothing to release on the output device.  Fire-and-forget; drop
+            // the batch if the channel is full.
             let _ = ctx.tx.try_send(outputs);
             std::ptr::null_mut()
         }
-        Decision::Swallow => std::ptr::null_mut(),
+        // The release mask is inert for the same reason.
+        Decision::Swallow { release: _ } => std::ptr::null_mut(),
+        // The physical release of a consumed modifier must reach the
+        // application: forwarded events never touch the virtual keyboard, so
+        // swallowing it would leave the modifier stuck.
+        Decision::ConsumedRelease => event.as_ptr(),
     }
 }
 

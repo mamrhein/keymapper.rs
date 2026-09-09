@@ -18,17 +18,20 @@ For every event, the tap callback decides synchronously:
 - **Unmapped keys** are returned to the system and pass through natively — no re-emission, no IPC.
 - **Mapped keys** are swallowed (the callback returns `NULL`) and the mapped output is sent to virtkbdd asynchronously.
 
-The tap callback must return immediately (the system disables taps that block), so the decision is made locally in keymapperd; see [the decision core](#the-decision-core). If the system disables the tap (`TapDisabledByTimeout` or `TapDisabledByUserInput`), keymapperd re-enables it.
+The tap callback must return immediately (the system disables taps that block), so the decision is made locally in keymapperd; see [the mapping engine](#the-mapping-engine). If the system disables the tap (`TapDisabledByTimeout` or `TapDisabledByUserInput`), keymapperd re-enables it.
 
 Creating the tap requires two TCC permissions for `keymapperd`: **Input Monitoring** (to see keyboard events) and **Accessibility** (to swallow them). If either is missing, tap creation fails with an actionable error in the log.
 
-### The decision core
+### The mapping engine
 
-The mapping decision lives in a platform-agnostic, unit-tested core (`src/daemon/decision.rs`). For each key event it produces one of three outcomes:
+The mapping decision lives in the unified, platform-agnostic mapping engine (`src/daemon/engine.rs`), shared with the Linux and Windows backends. It owns all of the modifier-state bookkeeping (pressed/swallowed keys, forwarded/consumed modifier masks, held output modifiers) and produces one of four outcomes per key event:
 
-- **Pass** — return the event unchanged (unmapped keys, consumer-page media keys, and the Fn/Caps Lock modifiers).
+- **Pass** — return the event unchanged (unmapped keys, consumer-page media keys, and keys with no HID equivalent such as Fn).
 - **Emit** — swallow the event and send the mapped output to virtkbdd.
 - **Swallow** — drop the event without emitting (e.g., auto-repeat of a mapped key).
+- **ConsumedRelease** — the physical release of a modifier that a fired trigger consumed.
+
+macOS interprets the engine's decisions according to its additive virtual-device architecture: the `release` masks on Emit and Swallow are inert, because the virtual keyboard's modifier state is isolated from physical typing (there is nothing to release on the output device), and a consumed modifier's physical release is passed through, because forwarded events never touch the virtual keyboard — swallowing it would leave the modifier stuck in the application.
 
 Emission is fire-and-forget: the output batch is pushed into a bounded channel with `try_send`, and a batch is dropped if the channel is full (the tap callback never blocks).
 
@@ -243,7 +246,8 @@ Mappings resume as soon as keymapperd reconnects — there is no need to restart
 ## Known limitations
 
 - **Keyboard filtering is disabled on macOS.** CGEvents do not expose the originating device's location ID, so lookups pass `device_id = None` and global and per-rule `keyboards:` filters are skipped.
-- **Modifier-trigger semantics.** Trigger modifiers pass through natively and remain held when the virtual-keyboard output arrives. `Shift+Backspace → Delete` may be seen by applications as `Shift+Delete` (usually harmless on macOS, where Shift+Delete behaves like Delete, but app-dependent).
+- **Modifier-trigger semantics.** Trigger modifiers pass through natively, but the application does not union modifier state across devices: a virtual-keyboard output arrives clean even while a physical modifier is still held, so `Shift+Backspace → Delete` produces a plain `Delete` (verified empirically against the DriverKit virtual keyboard).
+- **Held remapped modifiers are unsupported.** An output whose base is a modifier key (e.g. `CapsLock: LeftControl`) is tapped, not held: the virtual keyboard releases it immediately, so the remapped modifier does not modify subsequent physical keys (the virtual keyboard's modifier state is isolated from physical typing). Rule matching still sees the remapped modifier as held while the physical key is down, consistent with the other platforms.
 - **Consumer-page (media) keys pass through** and cannot be triggers.
 - **Auto-repeat of mapped keys is swallowed.** One virtual-keyboard tap per physical press.
 - **TCC re-grant on every rebuild** under ad-hoc signing (development builds).

@@ -253,14 +253,18 @@ pub(super) fn process_device_events(
                     }
                 }
             }
-            // A mapped key-up (or a consumed modifier release): swallow the
-            // event and, for a remapped modifier key, release the output bits
-            // that have been held since the key-down.
+            // A mapped key-up: swallow the event and, for a remapped modifier
+            // key, release the output bits that have been held since the
+            // key-down.
             Decision::Swallow { release } => {
                 if release != 0 {
                     release_consumed_modifiers(virtual_device, release);
                 }
             }
+            // A consumed modifier release: the virtual device already released
+            // the modifier when the trigger fired, so swallow the physical
+            // release.
+            Decision::ConsumedRelease => {}
         }
     }
 }
