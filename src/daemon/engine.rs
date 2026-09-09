@@ -11,8 +11,8 @@
 //!
 //! [`MappingEngine`] is the shared heart of every platform's capture path. It
 //! owns all of the modifier-state bookkeeping that turns a stream of raw key
-//! events into mapping decisions, so the three backends (Linux, macOS, Windows)
-//! share one implementation instead of three divergent copies:
+//! events into mapping decisions, so the three backends (Linux, macOS,
+//! Windows) share one implementation instead of three divergent copies:
 //!
 //! - **pressed / swallowed keys** — a key-up's fate is decided from its
 //!   key-down's own record, not from a re-run of the lookup (whose modifier
@@ -23,8 +23,8 @@
 //!   when a trigger fires while an unmapped modifier is held, that modifier is
 //!   released on the output device first (and marked consumed so its physical
 //!   release is swallowed), so the emitted output is not an unintended chord.
-//! - **held output modifiers** — a rule whose output is a modifier key holds it
-//!   on the output device until the physical key-up, so a remapped modifier
+//! - **held output modifiers** — a rule whose output is a modifier key holds
+//!   it on the output device until the physical key-up, so a remapped modifier
 //!   stays active for the key presses that follow it.
 //!
 //! The engine is generic over the platform's key identity `K` (any `Ord` type:
@@ -36,9 +36,9 @@
 //! [`MappingEngine::decide`] returns a [`Decision`] that the platform's
 //! emission layer interprets according to its own architecture. The `release`
 //! mask on [`Decision::Emit`] and [`Decision::Swallow`] is the clean-tap /
-//! held-output mechanism; a platform whose output device does not need it (macOS,
-//! where the virtual keyboard's modifier state is isolated from physical
-//! typing) simply ignores it.
+//! held-output mechanism; a platform whose output device does not need it
+//! (macOS, where the virtual keyboard's modifier state is isolated from
+//! physical typing) simply ignores it.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -62,7 +62,10 @@ pub enum Decision {
     /// `release` is the mask of modifier bits the emitter must release on the
     /// output device before emitting, so the output is a clean tap (the
     /// trigger's forwarded or held modifiers do not leak into the chord).
-    Emit { release: u8, outputs: Vec<NativeKey> },
+    Emit {
+        release: u8,
+        outputs: Vec<NativeKey>,
+    },
     /// Swallow the event without emitting (a mapped key-up, a consumed
     /// modifier release, or the auto-repeat of a mapped key).
     ///
@@ -80,16 +83,16 @@ struct KeyTracker<K: Ord> {
     /// Keys currently down (auto-repeat deduplication).
     pressed_keys: BTreeSet<K>,
     /// Keys whose key-down fired a mapped trigger and was swallowed. Their
-    /// key-ups are swallowed unconditionally, regardless of the modifier state
-    /// at release time.
+    /// key-ups are swallowed unconditionally, regardless of the modifier
+    /// state at release time.
     swallowed_keys: BTreeSet<K>,
-    /// Swallowed key-downs whose mapped output is a modifier key, with the mask
-    /// of the modifier bits that are therefore held on the output device. The
-    /// bits are released when the physical key is released, or when a later
-    /// fired trigger consumes them.
+    /// Swallowed key-downs whose mapped output is a modifier key, with the
+    /// mask of the modifier bits that are therefore held on the output
+    /// device. The bits are released when the physical key is released,
+    /// or when a later fired trigger consumes them.
     held_output_modifiers: BTreeMap<K, u8>,
-    /// Bitmask of forwarded (unmapped) modifier keys that are still held on the
-    /// output device.
+    /// Bitmask of forwarded (unmapped) modifier keys that are still held on
+    /// the output device.
     forwarded_modifiers: u8,
     /// Bitmask of modifier keys that were part of a fired trigger and have
     /// already been released on the output device. Their physical release is
@@ -122,10 +125,10 @@ impl<K: Ord> KeyTracker<K> {
     /// Consume the modifiers of a fired trigger and return `(released, held)`:
     /// *released* is the mask the emitter must release on the output device —
     /// the forwarded subset (moved into the consumed mask, so its physical
-    /// release is swallowed) plus any held output modifier that was part of the
-    /// trigger — and *held* is the subset of that mask that came from held
-    /// outputs, so the caller can clear those bits from the lookup modifier
-    /// state.
+    /// release is swallowed) plus any held output modifier that was part of
+    /// the trigger — and *held* is the subset of that mask that came from
+    /// held outputs, so the caller can clear those bits from the lookup
+    /// modifier state.
     fn consume_triggered(&mut self, modifiers: u8) -> (u8, u8) {
         let forwarded = modifiers & self.forwarded_modifiers;
         self.forwarded_modifiers &= !forwarded;
@@ -155,15 +158,13 @@ impl<K: Ord> KeyTracker<K> {
     }
 
     /// Decide the fate of a key-up. Returns `Some(mask)` when the release is
-    /// swallowed (its key-down fired a trigger, or the modifier was consumed by
-    /// one), with *mask* the held output modifier bits to release on the output
-    /// device (0 when none). Returns `None` when the release is forwarded; for
-    /// a forwarded modifier the tracking bit is cleared.
+    /// swallowed (its key-down fired a trigger, or the modifier was consumed
+    /// by one), with *mask* the held output modifier bits to release on
+    /// the output device (0 when none). Returns `None` when the release is
+    /// forwarded; for a forwarded modifier the tracking bit is cleared.
     fn release(&mut self, key: K, usage: HidUsage) -> Option<u8> {
         if self.swallowed_keys.remove(&key) {
-            return Some(
-                self.held_output_modifiers.remove(&key).unwrap_or(0)
-            );
+            return Some(self.held_output_modifiers.remove(&key).unwrap_or(0));
         }
         if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
             let mask = 1u8 << bit;
@@ -182,8 +183,8 @@ impl<K: Ord> KeyTracker<K> {
 pub struct MappingEngine<K: Ord + Copy> {
     /// Shared lookup for remapping rules.
     lookup: Arc<RwLock<dyn Lookup>>,
-    /// Bitmask of modifier bits currently active for rule lookup: the physical
-    /// modifiers plus any held output modifiers.
+    /// Bitmask of modifier bits currently active for rule lookup: the
+    /// physical modifiers plus any held output modifiers.
     modifier_state: u8,
     /// Key-fate and forwarded/consumed modifier tracking.
     tracker: KeyTracker<K>,
@@ -227,8 +228,8 @@ impl<K: Ord + Copy> MappingEngine<K> {
     /// natively so typing keeps working and mappings are simply inactive.
     ///
     /// The bookkeeping is maintained regardless of `reachable`, so a key-up is
-    /// swallowed only if its key-down was decided [`Decision::Emit`], no matter
-    /// when the reachability flag flips.
+    /// swallowed only if its key-down was decided [`Decision::Emit`], no
+    /// matter when the reachability flag flips.
     pub fn decide(
         &mut self,
         key: K,
@@ -283,9 +284,7 @@ impl<K: Ord + Copy> MappingEngine<K> {
         let guard = self.lookup.read();
         let outputs = guard
             .for_active_app(usage, lookup_modifiers, device_id)
-            .or_else(|| {
-                guard.global(usage, lookup_modifiers, device_id)
-            })
+            .or_else(|| guard.global(usage, lookup_modifiers, device_id))
             .map(|v| v.to_vec());
         drop(guard);
 
@@ -296,27 +295,27 @@ impl<K: Ord + Copy> MappingEngine<K> {
                 self.tracker.swallowed_keys.insert(key);
 
                 // The trigger's modifiers were forwarded when pressed (or are
-                // held by another remapped key's modifier output). Release them
-                // now so the output is emitted as a clean tap; forwarded marks
-                // are consumed so their physical release is swallowed, and held
-                // bits are cleared from the lookup state since no physical key
+                // held by another remapped key's modifier output). Release
+                // them now so the output is emitted as a clean
+                // tap; forwarded marks are consumed so their
+                // physical release is swallowed, and held bits
+                // are cleared from the lookup state since no physical key
                 // tracks them.
                 let (consumed, held_consumed) =
                     self.tracker.consume_triggered(lookup_modifiers);
                 self.modifier_state &= !held_consumed;
 
                 // If the physical key is itself a modifier, its bit was set
-                // above for the pre-update lookup; it is mapped, not forwarded,
-                // so clear it again.
-                if let Some(bit) =
-                    HidUsage::hid_usage_to_modifier_bit(usage)
-                {
+                // above for the pre-update lookup; it is mapped, not
+                // forwarded, so clear it again.
+                if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
                     self.modifier_state &= !(1 << bit);
                 }
 
-                // An output whose base is itself a modifier key is held down on
-                // the output device (not tapped) so the remapped modifier stays
-                // active for subsequent key presses; the matching release is
+                // An output whose base is itself a modifier key is held down
+                // on the output device (not tapped) so the
+                // remapped modifier stays active for
+                // subsequent key presses; the matching release is
                 // emitted when the physical key-up arrives.
                 let mut held_mask: u8 = 0;
                 for native_key in &outputs {
@@ -337,9 +336,7 @@ impl<K: Ord + Copy> MappingEngine<K> {
             // Unmapped: track a forwarded modifier press so a later fired
             // trigger can release it cleanly, then let the event through.
             None => {
-                if let Some(bit) =
-                    HidUsage::hid_usage_to_modifier_bit(usage)
-                {
+                if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
                     self.tracker.record_forwarded_down(bit);
                 }
                 Decision::Pass
@@ -361,10 +358,10 @@ impl<K: Ord + Copy> MappingEngine<K> {
             self.modifier_state &= !(1 << bit);
         }
 
-        // A key whose key-down was mapped (or a consumed modifier) is swallowed
-        // on release; any other key passes through. For a swallowed key whose
-        // output held modifier bits, those bits are released now and cleared
-        // from the lookup state.
+        // A key whose key-down was mapped (or a consumed modifier) is
+        // swallowed on release; any other key passes through. For a
+        // swallowed key whose output held modifier bits, those bits
+        // are released now and cleared from the lookup state.
         match self.tracker.release(key, usage) {
             Some(release) => {
                 if release != 0 {
@@ -437,9 +434,9 @@ mod tests {
     fn mapped_base_release_swallowed_after_modifier_state_change() {
         // Models `Ctrl+Semicolon -> C` where the modifier is released before
         // the base. The base's key-down fired the trigger (recorded); its
-        // key-up arrives after the modifier state changed (Ctrl released), so a
-        // re-derived lookup would not match and the release would leak as a
-        // phantom key-up. The record keeps it swallowed.
+        // key-up arrives after the modifier state changed (Ctrl released), so
+        // a re-derived lookup would not match and the release would
+        // leak as a phantom key-up. The record keeps it swallowed.
         let mut t = KeyTracker::<u16>::default();
 
         // Ctrl down: forwarded (unmapped).
@@ -452,8 +449,9 @@ mod tests {
         // Ctrl up: consumed by the trigger, so swallowed.
         assert_eq!(t.release(CTRL, HidUsage::LeftControl), Some(0));
 
-        // Base up: modifier state is now empty, but the base's key-down fired a
-        // trigger, so its release is swallowed (not a phantom key-up).
+        // Base up: modifier state is now empty, but the base's key-down fired
+        // a trigger, so its release is swallowed (not a phantom
+        // key-up).
         assert_eq!(t.release(A, HidUsage::A), Some(0));
     }
 
@@ -512,8 +510,8 @@ mod tests {
 
     #[test]
     fn two_remapped_modifiers_held_independently() {
-        // Two physical keys remapped to different modifiers: releasing one must
-        // not affect the other.
+        // Two physical keys remapped to different modifiers: releasing one
+        // must not affect the other.
         let mut t = KeyTracker::<u16>::default();
         t.swallowed_keys.insert(CAPS);
         t.hold_output_modifiers(CAPS, 1); // LeftControl
@@ -527,9 +525,9 @@ mod tests {
     #[test]
     fn fired_trigger_consumes_held_output_modifier() {
         // Models `CapsLock: LeftControl` (held) followed by `Ctrl+Base: X`
-        // fired while the remapped Ctrl is still held: the held bit is released
-        // with the trigger's modifiers and removed from the map, so the
-        // physical CapsLock key-up releases nothing.
+        // fired while the remapped Ctrl is still held: the held bit is
+        // released with the trigger's modifiers and removed from the
+        // map, so the physical CapsLock key-up releases nothing.
         let mut t = KeyTracker::<u16>::default();
         t.swallowed_keys.insert(CAPS);
         t.hold_output_modifiers(CAPS, 1);
@@ -657,8 +655,8 @@ mod tests {
 
     #[test]
     fn release_swallows_release_of_mapped_key() {
-        // A release of a key whose key-down fired a mapped trigger is swallowed
-        // and clears the record.
+        // A release of a key whose key-down fired a mapped trigger is
+        // swallowed and clears the record.
         let mut t = KeyTracker::<u16>::default();
         t.swallowed_keys.insert(A);
         assert_eq!(t.release(A, HidUsage::A), Some(0));
@@ -674,8 +672,9 @@ mod tests {
 
     #[test]
     fn release_swallows_consumed_modifier_release() {
-        // A modifier consumed by a fired trigger swallows its physical release;
-        // a plain forwarded modifier's release forwards and untracks.
+        // A modifier consumed by a fired trigger swallows its physical
+        // release; a plain forwarded modifier's release forwards and
+        // untracks.
         let mut t = KeyTracker::<u16>::default();
         t.record_forwarded_down(1); // LeftShift
         t.record_forwarded_down(5); // RightShift
@@ -723,12 +722,18 @@ mod tests {
     }
 
     /// Decide a key-down with the emitter unreachable.
-    fn down_unreachable(e: &mut MappingEngine<u16>, usage: HidUsage) -> Decision {
+    fn down_unreachable(
+        e: &mut MappingEngine<u16>,
+        usage: HidUsage,
+    ) -> Decision {
         e.decide(usage.id(), usage, true, None, false)
     }
 
     /// Decide a key-up with the emitter unreachable.
-    fn up_unreachable(e: &mut MappingEngine<u16>, usage: HidUsage) -> Decision {
+    fn up_unreachable(
+        e: &mut MappingEngine<u16>,
+        usage: HidUsage,
+    ) -> Decision {
         e.decide(usage.id(), usage, false, None, false)
     }
 
@@ -743,8 +748,8 @@ mod tests {
     #[test]
     fn simple_remap() {
         let mut e = engine("- mappings:\n    A: B");
-        // The key-down is mapped to 'B' and swallowed; the release is swallowed
-        // so the OS never sees the original key.
+        // The key-down is mapped to 'B' and swallowed; the release is
+        // swallowed so the OS never sees the original key.
         assert_eq!(
             down(&mut e, HidUsage::A),
             Decision::Emit {
@@ -759,9 +764,10 @@ mod tests {
     fn modifier_only_trigger_holds_its_output() {
         let mut e = engine("- mappings:\n    RightAlt: LeftControl");
         // A bare modifier trigger fires with no other modifiers held. The
-        // lookup captures the modifier state before setting RightAlt's own bit,
-        // so the trigger does not match itself. The output is a modifier base,
-        // so it is held (not tapped) and released on the physical key-up.
+        // lookup captures the modifier state before setting RightAlt's own
+        // bit, so the trigger does not match itself. The output is a
+        // modifier base, so it is held (not tapped) and released on
+        // the physical key-up.
         assert_eq!(
             down(&mut e, HidUsage::RightAlt),
             Decision::Emit {
@@ -795,8 +801,8 @@ mod tests {
             up(&mut e, HidUsage::Backspace),
             Decision::Swallow { release: 0 }
         );
-        // The modifier was consumed by the trigger, so its release is swallowed
-        // rather than forwarded a second time.
+        // The modifier was consumed by the trigger, so its release is
+        // swallowed rather than forwarded a second time.
         assert_eq!(
             up(&mut e, HidUsage::LeftShift),
             Decision::Swallow { release: 0 }
@@ -816,7 +822,10 @@ mod tests {
         );
         // The auto-repeat of a mapped key is swallowed (the OS never saw the
         // original key-down, so it must not see the repeat either).
-        assert_eq!(down(&mut e, HidUsage::A), Decision::Swallow { release: 0 });
+        assert_eq!(
+            down(&mut e, HidUsage::A),
+            Decision::Swallow { release: 0 }
+        );
         // The release is swallowed as well.
         assert_eq!(up(&mut e, HidUsage::A), Decision::Swallow { release: 0 });
     }
@@ -904,8 +913,8 @@ mod tests {
             }
         );
         // The emitter dies before the release. The key-up is still swallowed:
-        // the OS never saw the key-down (it was emitted via the emitter), so it
-        // must not see a stray release.
+        // the OS never saw the key-down (it was emitted via the emitter), so
+        // it must not see a stray release.
         assert_eq!(
             up_unreachable(&mut e, HidUsage::A),
             Decision::Swallow { release: 0 }
@@ -919,8 +928,8 @@ mod tests {
     #[test]
     fn clean_tap_releases_forwarded_trigger_modifiers() {
         // Models `Ctrl+Semicolon -> C`. Ctrl is forwarded when pressed; when
-        // Semicolon fires the trigger, the held Ctrl is released (clean tap) and
-        // marked consumed so its physical release is swallowed.
+        // Semicolon fires the trigger, the held Ctrl is released (clean tap)
+        // and marked consumed so its physical release is swallowed.
         let mut e = engine("- mappings:\n    LeftControl+Semicolon: C");
 
         // Ctrl down: unmapped, forwarded.
@@ -942,7 +951,8 @@ mod tests {
             Decision::Swallow { release: 0 }
         );
 
-        // Ctrl up: consumed by the trigger, so swallowed (not forwarded twice).
+        // Ctrl up: consumed by the trigger, so swallowed (not forwarded
+        // twice).
         assert_eq!(
             up(&mut e, HidUsage::LeftControl),
             Decision::Swallow { release: 0 }
@@ -951,8 +961,9 @@ mod tests {
 
     #[test]
     fn held_modifier_output_released_on_physical_release() {
-        // Models `CapsLock: LeftControl`: the key-down holds the output modifier
-        // on the output device; the physical key-up releases it.
+        // Models `CapsLock: LeftControl`: the key-down holds the output
+        // modifier on the output device; the physical key-up releases
+        // it.
         let mut e = engine("- mappings:\n    CapsLock: LeftControl");
 
         assert_eq!(
@@ -972,10 +983,11 @@ mod tests {
 
     #[test]
     fn held_modifier_output_stays_active_for_subsequent_keys() {
-        // Models `CapsLock: LeftControl` (remap CapsLock to hold Ctrl) followed
-        // by `Ctrl+A: B`. While the remapped Ctrl is held, A fires the Ctrl+A
-        // rule; the held bit is consumed by that trigger (released for a clean
-        // tap), so the physical CapsLock key-up releases nothing.
+        // Models `CapsLock: LeftControl` (remap CapsLock to hold Ctrl)
+        // followed by `Ctrl+A: B`. While the remapped Ctrl is held, A
+        // fires the Ctrl+A rule; the held bit is consumed by that
+        // trigger (released for a clean tap), so the physical CapsLock
+        // key-up releases nothing.
         let mut e = engine(
             "- mappings:\n    CapsLock: LeftControl\n    LeftControl+A: B",
         );
@@ -989,8 +1001,8 @@ mod tests {
             }
         );
 
-        // With the remapped Ctrl held, A fires the Ctrl+A rule. The held Ctrl is
-        // consumed by the trigger (released for a clean tap).
+        // With the remapped Ctrl held, A fires the Ctrl+A rule. The held Ctrl
+        // is consumed by the trigger (released for a clean tap).
         assert_eq!(
             down(&mut e, HidUsage::A),
             Decision::Emit {

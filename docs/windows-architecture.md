@@ -13,7 +13,7 @@ This is the final architecture for Windows: there is no virtual HID driver, and 
 
 `keymapperd` runs two threads:
 
-1. **Hook thread** — installs the `WH_KEYBOARD_LL` hook (session-global) and runs the message loop. The hook procedure performs the entire decision and emission itself: it matches the event against the raw input buffer for device identification (non-blocking, with a bounded 3 ms retry), performs the mapping lookup, and either emits the mapped output via `SendInput` and swallows the key, or passes the key through. A key-up is decided by its own lookup, so no decision cache is needed.
+1. **Hook thread** — installs the `WH_KEYBOARD_LL` hook (session-global) and runs the message loop. The hook procedure performs the entire decision and emission itself: it matches the event against the raw input buffer for device identification (non-blocking, with a bounded 3 ms retry), asks the shared mapping engine for the event's fate, and either emits the mapped output via `SendInput` and swallows the key, or passes the key through. A key-up is decided from its key-down's own record in the engine, not from a re-run of the lookup.
 
    The message loop exists only to keep the hook alive and to drain the deferred-emission queue (fed exclusively by standalone consumer events, see [Standalone consumer control](#standalone-consumer-control)): the hook callback runs re-entrantly inside the blocked message wait, and a swallowed hook event produces no message of its own — a bare `GetMessageW` loop would block forever and never run its body. The loop therefore blocks in `MsgWaitForMultipleObjects` on the input queue, drains the queue with the non-blocking `PeekMessageW`, and then runs the emission drain.
 2. **Raw input thread** — owns a message-only window registered for raw input (`RIDEV_INPUTSINK`) on both keyboard and consumer control devices, so events arrive even when the daemon is not in the foreground. It pumps `WM_INPUT` messages, buffers keyboard key-downs in the shared device-identification buffer, and processes standalone consumer events directly (see [Standalone consumer control](#standalone-consumer-control)).
@@ -38,7 +38,12 @@ Compiled rules are keyed by `HidUsage`, not by virtual-key code:
 
 ### Modifier tracking
 
-The hook thread maintains the pressed-modifier state from its own event stream rather than `GetAsyncKeyState`: the async state lags behind the very event being processed (fast chords would miss their modifiers) and is poisoned by session leftovers such as a modifier stuck "down" after an interrupted input sequence. Since every key event — physical or injected — passes through the low-level hook, tracking from the events is both faster and exact. The current key's own modifier bit is cleared before lookup so that bare-modifier triggers (e.g. `LeftControl: A`) match correctly.
+All bookkeeping — pressed and swallowed keys, forwarded/consumed modifier masks, held output modifiers — lives in the shared mapping engine (`src/daemon/engine.rs`), which the hook procedure asks on every event. The engine maintains the pressed-modifier state from its own event stream rather than `GetAsyncKeyState`: the async state lags behind the very event being processed (fast chords would miss their modifiers) and is poisoned by session leftovers such as a modifier stuck "down" after an interrupted input sequence. Since every key event — physical or injected — passes through the low-level hook, tracking from the events is both faster and exact. The current key's own modifier bit is cleared before lookup so that bare-modifier triggers (e.g. `LeftControl: A`) match correctly.
+
+Two consequences of the shared bookkeeping:
+
+- **Clean tap.** When a trigger fires while an unmapped modifier is held, the engine releases that modifier on the output side first (a tagged key-up) and marks it consumed, so the emitted output is not an unintended chord and the modifier's physical release is swallowed.
+- **Held remapped modifiers.** An output whose base is itself a modifier key (e.g. `CapsLock: LeftControl`) is held down on the output side until the physical key-up, so the remapped modifier stays active for subsequent key presses.
 
 `GetAsyncKeyState` is used only for standalone consumer control events, which have no hook event to derive the state from.
 
@@ -46,7 +51,7 @@ The hook thread maintains the pressed-modifier state from its own event stream r
 
 In normal mode the `SendInput` is performed by the hook procedure directly in the callback. A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches other hooks and the target window — the capture-mode e2e tests capture the tagged re-emission through a separate process's hook — so the previous design (worker thread, one-shot reply channel, deferred emission) is not load-bearing. The deferred queue remains only for standalone consumer events, whose emission originates on the raw input thread: a `SendInput` issued there can race a keyboard hook chain in progress and be dropped, so those outputs are queued and posted to the message loop, which drains them where the hook chain is idle.
 
-A mapped output is emitted as a complete tap via `SendInput`: modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
+A mapped output is emitted as a complete tap via `SendInput`: modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. An output whose base is itself a modifier key is the exception: only its key-downs are sent, and the matching key-ups go out when the physical key-up arrives (see [Modifier tracking](#modifier-tracking)). The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
 
 In capture mode (e2e only) the hook procedure emits the tagged outputs in callback, as in normal mode, since the e2e monitor observes the session's hook chain and the tagged re-emission must not be queued. Standalone consumer outputs are the exception: the raw input thread emits them directly on its own thread, because they have no hook event to decide on.
 
@@ -74,7 +79,7 @@ For end-to-end testing, an `e2e` build can be started with the `KEYMAPPER_CAPTUR
 
 | File | Responsibility |
 | ---- | -------------- |
-| `src/platform/windows/mapping.rs` | Hook thread, lookup, emission, self-exclusion, capture mode |
+| `src/platform/windows/mapping.rs` | Hook thread, engine decision, emission, self-exclusion, capture mode |
 | `src/platform/windows/raw_input.rs` | Raw input window, HID report decoding |
 | `src/platform/windows/raw_worker.rs` | Raw input thread, standalone consumer events |
 | `src/platform/windows/device_match.rs` | Device-identification buffer, device path cache |
@@ -89,4 +94,3 @@ For end-to-end testing, an `e2e` build can be started with the `KEYMAPPER_CAPTUR
 - [Raw Input](https://learn.microsoft.com/en-us/windows/win32/inputdev/raw-input)
 - [SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
 - [WM_APPCOMMAND](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-appcommand)
-x
