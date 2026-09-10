@@ -71,7 +71,7 @@ These are accepted trade-offs of the final architecture:
 
 ## E2e capture
 
-For end-to-end testing, the e2e monitor installs its own `WH_KEYBOARD_LL` hook in a separate process and captures every key event that reaches the session's hook chain. Because the daemon's hook is installed first, it swallows remapped inputs before the monitor sees them, so the monitor observes exactly the daemon's tagged outputs plus forwarded passthroughs — never the raw injected inputs.
+The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd`, and focuses a dedicated test window so the active-app query resolves to a known application. For capture, the e2e monitor installs its own `WH_KEYBOARD_LL` hook in a separate process and logs every key event that reaches the session's hook chain to stdout. Because the daemon's hook is installed first, it swallows remapped inputs before the monitor sees them, so the monitor observes exactly the daemon's tagged outputs plus forwarded passthroughs — never the raw injected inputs.
 
 ## Source files
 

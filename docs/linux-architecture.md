@@ -83,7 +83,7 @@ These are accepted trade-offs of the architecture:
 
 ## E2e capture
 
-For end-to-end testing, the e2e monitor (a separate process) does not create a GUI window — whose focus is controlled by the window manager and can be stolen at any time. Instead, it locates the daemon's uinput device by scanning `/sys/class/input` for the device name and grabs it, logging the raw key events the daemon emits. This makes the capture deterministic and headless-friendly, and guarantees the daemon's output never leaks into the compositor or any focused window.
+The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd`, and focuses a dedicated test window (an X11 window that claims `_NET_ACTIVE_WINDOW` itself, so no window manager is needed) whose PID resolves to a known `.desktop` application id. For capture, the e2e monitor (a separate process) does not create a GUI window — whose focus is controlled by the window manager and can be stolen at any time. Instead, it locates the daemon's uinput device by scanning `/sys/class/input` for the device name and grabs it, logging the raw key events the daemon emits to stdout. This makes the capture deterministic and headless-friendly, and guarantees the daemon's output never leaks into the compositor or any focused window.
 
 ## Source files
 

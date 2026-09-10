@@ -386,11 +386,10 @@ extern "system" fn low_level_keyboard_proc(
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
 
     // Every key the daemon injects through `SendInput` is stamped with
-    // [`INJECTED_TAG`].  Let those flow on without re-mapping them: in
-    // capture mode the monitor's hook captures them, in normal mode the
-    // target window receives them.  Matching on the tag is exact, so a
-    // physical press of the same key can never be swallowed as one of our
-    // own injections.
+    // [`INJECTED_TAG`].  Let those flow on without re-mapping them, so the
+    // target window (or the e2e monitor's hook) receives them.  Matching on
+    // the tag is exact, so a physical press of the same key can never be
+    // swallowed as one of our own injections.
     if kbd_struct.dwExtraInfo == INJECTED_TAG {
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
