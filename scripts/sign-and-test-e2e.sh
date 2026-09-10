@@ -28,13 +28,13 @@ if ! systemextensionsctl list 2>/dev/null \
 fi
 
 # Build the daemon binary.  E2E tests spawn keymapperd as a subprocess and
-# resolve it relative to their own location in target/debug/.  The `e2e`
-# feature compiles the test hooks (readiness file, active-app override,
-# capture mode) into the daemon so the harness can drive it.
-cargo build --features e2e --bin keymapperd
+# resolve it relative to their own location in target/debug/.  The daemon is
+# a plain production build; the harness drives it and observes its output
+# through the monitor.
+cargo build --bin keymapperd
 
 # Build and sign the test binary without running it.
-cargo nextest run --features e2e --test e2e_tests --no-run
+cargo nextest run --test e2e_tests --no-run
 bin=$(find target/debug/deps -maxdepth 1 -name 'e2e_tests-*' \
       ! -name '*.*' -type f 2>/dev/null | head -1)
 if [ -n "$bin" ]; then
@@ -43,4 +43,4 @@ fi
 
 # Run the tests. Running as root bypasses TCC Accessibility permission checks
 # required for CGEventTap creation.
-sudo -E PATH="$PATH" $(which cargo) nextest run --features e2e --no-capture --test e2e_tests
+sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests

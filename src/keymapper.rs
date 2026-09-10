@@ -132,15 +132,20 @@ enum KeysCommands {
 #[derive(Subcommand)]
 enum ConfigCommands {
     /// Print the configuration file to stdout.
-    List,
+    List {
+        /// Path to a config file or directory containing `config.yaml`.
+        ///
+        /// When omitted, the standard search locations are used (the
+        /// platform-specific application config directory).
+        path: Option<PathBuf>,
+    },
 
     /// Validate and diagnose the configuration.
     Check {
         /// Path to a config file or directory containing `config.yaml`.
         ///
         /// When omitted, the standard search locations are used (the
-        /// platform-specific application config directory; the current
-        /// working directory is also searched in e2e builds).
+        /// platform-specific application config directory).
         path: Option<PathBuf>,
     },
 
@@ -185,6 +190,12 @@ enum ConfigCommands {
         /// at all.
         #[arg(long)]
         keyboards_global: Option<Vec<String>>,
+
+        /// Path to a config file or directory containing `config.yaml`.
+        ///
+        /// When omitted, the standard search locations are used (the
+        /// platform-specific application config directory).
+        path: Option<PathBuf>,
     },
 }
 
@@ -194,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Appnames => cmd_appnames()?,
         Commands::Config { command } => match command {
-            ConfigCommands::List => cmd_config_list()?,
+            ConfigCommands::List { path } => cmd_config_list(path)?,
             ConfigCommands::Check { path } => cmd_config_check(path)?,
             ConfigCommands::Create { dir } => cmd_config_create(dir)?,
             ConfigCommands::Add {
@@ -204,6 +215,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 apps,
                 keyboard,
                 keyboards_global,
+                path,
             } => cmd_config_add(
                 &trigger,
                 &output,
@@ -211,6 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 apps,
                 keyboard,
                 keyboards_global,
+                path,
             )?,
         },
         Commands::Keys { command } => match command {
@@ -320,8 +333,13 @@ fn cmd_appnames() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn cmd_config_list() -> Result<(), Box<dyn std::error::Error>> {
-    let (path, contents) = load_config()?;
+fn cmd_config_list(
+    target: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (path, contents) = match target {
+        Some(t) => load_config_at(&t)?,
+        None => load_config()?,
+    };
     println!("{}:", path.display());
     print!("{contents}");
     Ok(())
@@ -466,6 +484,7 @@ fn cmd_config_add(
     apps: Option<Vec<String>>,
     keyboard_args: Option<Vec<String>>,
     keyboards_global_args: Option<Vec<String>>,
+    target: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Parse the trigger and output.
     let trigger = KeyEvent::parse(trigger_str)
@@ -479,18 +498,25 @@ fn cmd_config_add(
     let global_keyboards = parse_keyboard_specs(keyboards_global_args)
         .map_err(|e| format!("invalid --keyboards-global: {e}"))?;
 
-    // Find an existing config file.
-    let path = find_config_path().ok_or_else(|| {
-        eprintln!(
-            "No configuration file found. Create one with `keymapper config \
-             create`"
-        );
-        "configuration file not found"
-    })?;
+    // Find and load the existing config file.
+    let (path, contents) = match target {
+        Some(t) => load_config_at(&t)?,
+        None => {
+            let path = find_config_path().ok_or_else(|| {
+                eprintln!(
+                    "No configuration file found. Create one with `keymapper \
+                     config create`"
+                );
+                "configuration file not found"
+            })?;
 
-    // Load existing config.  `find_config_path` guarantees the file exists.
-    reject_symlink(&path)?;
-    let contents = fs_err::read_to_string(&path)?;
+            // `find_config_path` guarantees the file exists.
+            reject_symlink(&path)?;
+            let contents = fs_err::read_to_string(&path)?;
+
+            (path, contents)
+        }
+    };
     let mut config = AppConfig::load_from_str(&contents)
         .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
 

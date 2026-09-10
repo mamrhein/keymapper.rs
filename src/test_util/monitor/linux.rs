@@ -93,11 +93,9 @@ fn wait_for_and_grab_device() -> Device {
 /// Entry point for the Linux direct-capture monitor.
 ///
 /// Waits for the daemon's virtual output device, grabs it, and logs every
-/// key event to the output file until SIGTERM/SIGINT, or until the daemon
-/// destroys its device on shutdown (whichever comes first).
-pub fn run(output_path: &Path) {
-    let mut writer = EventWriter::new(output_path)
-        .expect("failed to open output file for event logging");
+/// key event until SIGTERM/SIGINT, or until the daemon destroys its device
+/// on shutdown (whichever comes first).
+pub fn run(mut writer: EventWriter) {
     let mut device = wait_for_and_grab_device();
     let shutdown = register_signal_handlers();
 

@@ -3,6 +3,11 @@
 # Global rules exercise single-key remaps, chord outputs, and modifier
 # triggers.  App-specific rules verify that scoped groups parse and load
 # correctly without interfering with the global mappings.
+#
+# `__TEST_APP__` is a placeholder the e2e harness replaces with the live
+# active-app name (the focused test window's resolved identity) before
+# planting the config, so the app-scoped rule fires deterministically on
+# every platform.
 
 - name: "global mappings"
   mappings:
@@ -16,7 +21,7 @@
   mappings:
     Ctrl+Q: Escape
 
-- name: "keymapper_monitor"
-  apps: [keymapper_monitor]
+- name: "test app"
+  apps: [__TEST_APP__]
   mappings:
     Tab: Return

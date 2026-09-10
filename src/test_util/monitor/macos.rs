@@ -27,7 +27,6 @@
 use std::{
     collections::HashSet,
     ffi::c_void,
-    path::Path,
     sync::atomic::Ordering,
     time::{Duration, Instant},
 };
@@ -218,13 +217,11 @@ fn wait_for_virtual_keyboard(manager: &HidDeviceManager) -> HidDevice {
 /// Entry point for the macOS IOKit-seizure monitor.
 ///
 /// Seizes the daemon's Karabiner DriverKit virtual keyboard and logs every key
-/// event it emits to the output file until SIGTERM/SIGINT.  A CGEventTap
-/// additionally consumes every keyboard event, so the daemon's output never
-/// leaks into the compositor or any focused window (see
-/// `install_suppression_tap` for why seizure alone is not enough).
-pub fn run(output_path: &Path) {
-    let writer = EventWriter::new(output_path)
-        .expect("failed to open output file for event logging");
+/// event it emits until SIGTERM/SIGINT.  A CGEventTap additionally consumes
+/// every keyboard event, so the daemon's output never leaks into the
+/// compositor or any focused window (see `install_suppression_tap` for why
+/// seizure alone is not enough).
+pub fn run(writer: EventWriter) {
     let shutdown = register_signal_handlers();
 
     // Discover keyboards and wait for the virtual keyboard to appear.

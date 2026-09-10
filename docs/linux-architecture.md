@@ -81,9 +81,9 @@ These are accepted trade-offs of the architecture:
 - **Keys without a resolvable HID identity cannot be mapped** (see [Key identity](#key-identity)).
 - **Application scoping depends on compositor support.** If the active application cannot be determined, only global rules apply.
 
-## Capture mode (e2e)
+## E2e capture
 
-For end-to-end testing, the Linux monitor does not create a GUI window — whose focus is controlled by the window manager and can be stolen at any time. Instead, it locates the daemon's uinput device by scanning `/sys/class/input` for the device name and grabs it, logging the raw key events the daemon emits. This makes the capture deterministic and headless-friendly, and guarantees the daemon's output never leaks into the compositor or any focused window.
+For end-to-end testing, the e2e monitor (a separate process) does not create a GUI window — whose focus is controlled by the window manager and can be stolen at any time. Instead, it locates the daemon's uinput device by scanning `/sys/class/input` for the device name and grabs it, logging the raw key events the daemon emits. This makes the capture deterministic and headless-friendly, and guarantees the daemon's output never leaks into the compositor or any focused window.
 
 ## Source files
 

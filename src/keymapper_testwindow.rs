@@ -7,10 +7,12 @@
 // $Source$
 // $Revision$
 
-//! Test and monitoring helpers for the e2e test harness: the key event
-//! injector, the `keymapper_monitor` capture backend, and the
-//! `keymapper_testwindow` deterministic-active-app helper.
+//! The `keymapper_testwindow` binary.
+//!
+//! A thin entry point around [`keymapper::test_util::test_window::run`].  It
+//! opens and focuses a window whose owning process resolves to a known app
+//! name, so the e2e harness can make `get_active_app_name()` deterministic.
 
-pub mod key_injector;
-pub mod monitor;
-pub mod test_window;
+fn main() {
+    keymapper::test_util::test_window::run();
+}

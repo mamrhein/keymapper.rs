@@ -29,14 +29,9 @@ use parking_lot::RwLock;
 
 #[cfg(not(test))]
 use crate::platform::windows::mapping::queue_emission;
-// `capture_enabled` and `emit_key_event` are only referenced from the
-// e2e-gated capture branch below, and `queue_emission` is compiled out of
-// unit tests, so each is imported only where its call site exists.
-#[cfg(feature = "e2e")]
-use crate::platform::windows::mapping::{capture_enabled, emit_key_event};
-// The emission helpers are only called on paths that are compiled out of
-// unit tests (see `process_consumer_event`); the imports stay
-// unconditional so the non-capture build compiles on every target.
+// `queue_emission` is only called on a path that is compiled out of unit
+// tests (see `process_consumer_event`), so it is imported only there; the
+// remaining imports are used unconditionally.
 use crate::{
     common::hid_usage::{HidUsage, PAGE_CONSUMER},
     daemon::state::Lookup,
@@ -129,20 +124,10 @@ fn process_consumer_event(
         return;
     };
 
-    // Capture mode (e2e only): emit the tagged output directly on this
-    // non-hook thread, as with mapped keyboard events.
-    #[cfg(feature = "e2e")]
-    if capture_enabled() {
-        for native_key in &outputs {
-            emit_key_event(native_key);
-        }
-        return;
-    }
-
-    // Normal mode: queue for the main message loop.  A `SendInput` issued
-    // directly from this thread can race a keyboard hook chain in progress
-    // and be dropped by the input system.  Compiled out of unit tests so
-    // they never drive a real `SendInput`.
+    // Queue for the main message loop.  A `SendInput` issued directly from
+    // this thread can race a keyboard hook chain in progress and be dropped
+    // by the input system.  Compiled out of unit tests so they never drive a
+    // real `SendInput`.
     #[cfg(not(test))]
     {
         queue_emission(outputs);

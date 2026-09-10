@@ -30,31 +30,34 @@ pub struct LogEvent {
 /// Lines that are empty or cannot be parsed are silently skipped.
 pub fn parse(path: &Path) -> std::io::Result<Vec<LogEvent>> {
     let content = fs::read_to_string(path)?;
-    let mut events = Vec::new();
+    Ok(content
+        .lines()
+        .filter_map(parse_line)
+        .collect::<Vec<LogEvent>>())
+}
 
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let Some((direction, key)) = line.split_once(' ') else {
-            continue;
-        };
-
-        let down = match direction {
-            "down" => true,
-            "up" => false,
-            _ => continue,
-        };
-
-        events.push(LogEvent {
-            down,
-            key: key.to_string(),
-        });
+/// Parse a single `down <Key>` / `up <Key>` line into a `[LogEvent]`.
+///
+/// Returns `None` for empty or malformed lines.  Shared by the file parser
+/// and the live stdout reader so both use identical line semantics.
+pub fn parse_line(line: &str) -> Option<LogEvent> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
     }
 
-    Ok(events)
+    let (direction, key) = line.split_once(' ')?;
+
+    let down = match direction {
+        "down" => true,
+        "up" => false,
+        _ => return None,
+    };
+
+    Some(LogEvent {
+        down,
+        key: key.to_string(),
+    })
 }
 
 /// Assert that *actual* events match *expected* exactly.

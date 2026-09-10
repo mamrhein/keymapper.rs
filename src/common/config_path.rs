@@ -29,11 +29,9 @@ pub fn default_config_path() -> Option<PathBuf> {
 
 /// Search standard platform directories for the user configuration file.
 ///
-/// Searches the locations from [`search_dirs`] in priority order: current
-/// working directory first (e2e builds only, where the test harness runs
-/// from a scratch directory with a planted config), then — on macOS when
-/// running as root — the console user's application config directory, then
-/// the process's own platform-specific application config directory.
+/// Searches the locations from [`search_dirs`] in priority order: on macOS
+/// when running as root, the console user's application config directory;
+/// then the process's own platform-specific application config directory.
 ///
 /// Symbolic links are rejected; `config.yaml` must be a regular file.
 /// Returns `None` when no configuration file exists in any search location.
@@ -80,24 +78,18 @@ pub fn find_config_path_strict() -> Result<PathBuf, String> {
 
 /// Return the search locations in priority order.
 fn search_dirs() -> Vec<PathBuf> {
-    ordered_search_dirs(
-        cwd_path(),
-        console_user_config_dir(),
-        platform_config_dir(),
-    )
+    ordered_search_dirs(console_user_config_dir(), platform_config_dir())
 }
 
 /// Order the search locations, dropping duplicates while preserving
-/// priority: the current working directory (e2e builds only), then the
-/// console user's configuration directory (macOS, root only), then the
-/// process's own platform configuration directory.
+/// priority: the console user's configuration directory (macOS, root only),
+/// then the process's own platform configuration directory.
 fn ordered_search_dirs(
-    cwd: Option<PathBuf>,
     console_user_dir: Option<PathBuf>,
     platform_dir: Option<PathBuf>,
 ) -> Vec<PathBuf> {
     let mut dirs = Vec::<PathBuf>::new();
-    for dir in [cwd, console_user_dir, platform_dir].iter().flatten() {
+    for dir in [console_user_dir, platform_dir].iter().flatten() {
         if !dirs.contains(dir) {
             dirs.push(dir.clone());
         }
@@ -132,23 +124,6 @@ fn console_user_config_dir() -> Option<PathBuf> {
     None
 }
 
-/// Return the current working directory, or `None` if it cannot be determined.
-///
-/// The CWD is only part of the search path in e2e builds, where the test
-/// harness runs the daemon from a scratch directory with a planted config.
-/// Production builds never search the CWD, so a daemon started from an
-/// attacker-writable directory cannot load a planted `config.yaml`.
-#[cfg(feature = "e2e")]
-fn cwd_path() -> Option<PathBuf> {
-    std::env::current_dir().ok()
-}
-
-/// The CWD is not searched in production builds (see the e2e variant).
-#[cfg(not(feature = "e2e"))]
-fn cwd_path() -> Option<PathBuf> {
-    None
-}
-
 /// Print the directories searched and the expected file name so that the
 /// user knows where to create their configuration.
 pub fn print_search_locations() {
@@ -159,14 +134,8 @@ pub fn print_search_locations() {
 
     // Drive off `search_dirs()` so the printed order can never drift from
     // the actual search order.
-    let cwd = cwd_path();
     for (i, dir) in search_dirs().into_iter().enumerate() {
-        let label = if Some(dir.as_path()) == cwd.as_deref() {
-            "Current working directory".to_string()
-        } else {
-            dir.display().to_string()
-        };
-        eprintln!("  {}. {label}", i + 1);
+        eprintln!("  {}. {}", i + 1, dir.display());
     }
 }
 
@@ -189,54 +158,34 @@ fn platform_config_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// CWD is searched before the other locations in e2e builds.  All lookup
-    /// functions and `print_search_locations` drive off this order.
-    #[cfg(feature = "e2e")]
+    /// The CWD is not part of the search path, so a daemon started from an
+    /// attacker-writable directory cannot load a planted `config.yaml`.
     #[test]
-    fn search_dirs_prioritises_cwd_over_other_dirs() {
-        let cwd = std::env::current_dir().unwrap();
-        let dirs = search_dirs();
-
-        assert_eq!(dirs.first(), Some(&cwd));
-        if let Some(platform) = platform_config_dir() {
-            assert!(dirs.contains(&platform));
-        }
-    }
-
-    /// The CWD is not part of the search path in production builds, so a
-    /// daemon started from an attacker-writable directory cannot load a
-    /// planted `config.yaml`.
-    #[cfg(not(feature = "e2e"))]
-    #[test]
-    fn search_dirs_excludes_cwd_in_production_builds() {
+    fn search_dirs_excludes_cwd() {
         let cwd = std::env::current_dir().unwrap();
         let dirs = search_dirs();
 
         assert!(!dirs.iter().any(|d| d == &cwd));
     }
 
-    /// The search order is cwd, console-user dir, platform dir; duplicates
-    /// are dropped while preserving the first (highest-priority) position.
+    /// The search order is console-user dir, platform dir; duplicates are
+    /// dropped while preserving the first (highest-priority) position.
     #[test]
     fn ordered_search_dirs_preserves_priority_and_dedupes() {
-        let cwd = PathBuf::from("/tmp/e2e");
         let console = PathBuf::from(
             "/Users/alice/Library/Application Support/keymapperd",
         );
         let platform =
             PathBuf::from("/var/root/Library/Application Support/keymapperd");
 
-        let dirs = ordered_search_dirs(
-            Some(cwd.clone()),
-            Some(console.clone()),
-            Some(platform.clone()),
-        );
-        assert_eq!(dirs, vec![cwd.clone(), console, platform]);
+        let dirs =
+            ordered_search_dirs(Some(console.clone()), Some(platform.clone()));
+        assert_eq!(dirs, vec![console.clone(), platform]);
 
         let dirs =
-            ordered_search_dirs(Some(cwd.clone()), Some(cwd.clone()), None);
-        assert_eq!(dirs, vec![cwd]);
+            ordered_search_dirs(Some(console.clone()), Some(console.clone()));
+        assert_eq!(dirs, vec![console]);
 
-        assert!(ordered_search_dirs(None, None, None).is_empty());
+        assert!(ordered_search_dirs(None, None).is_empty());
     }
 }

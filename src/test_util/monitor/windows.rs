@@ -12,16 +12,18 @@
 //! Instead of a focused GUI window — whose capture depends on the window
 //! manager keeping keyboard focus on it, and which is therefore brittle and
 //! steals focus from the user on an interactive session — the Windows
-//! monitor installs a `WH_KEYBOARD_LL` hook and captures only the keys the
-//! daemon re-emits through its virtual keyboard.  The daemon tags every
-//! re-emitted key with a magic `dwExtraInfo` (see
-//! [`crate::platform::INJECTED_TAG`]); the hook logs the matching keys to the
-//! output file and swallows them, so they never leak into the compositor or
-//! any focused window.  This mirrors the Linux direct-capture backend: it is
+//! monitor installs a `WH_KEYBOARD_LL` hook and captures every key that
+//! reaches the session's hook chain.  The harness starts the daemon before
+//! the monitor, so the daemon's hook (installed first) swallows remapped
+//! inputs before this hook sees them: what remains is exactly the daemon's
+//! re-emitted outputs plus forwarded passthroughs (including the `Ctrl+Esc`
+//! round delimiter), never the raw injected inputs.  The hook logs every
+//! captured key and swallows it, so nothing leaks into the compositor or any
+//! focused window.  This mirrors the Linux direct-capture backend: it is
 //! deterministic, needs no window or keyboard focus, and is headless
 //! friendly.
 
-use std::{path::Path, sync::atomic::Ordering};
+use std::sync::atomic::Ordering;
 
 use windows::Win32::{
     Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
@@ -33,7 +35,7 @@ use windows::Win32::{
 };
 
 use super::{OutputEvent, register_signal_handlers, writer::EventWriter};
-use crate::platform::{INJECTED_TAG, Key};
+use crate::platform::Key;
 
 /// The writer is set once from [`run`] before the hook is installed, and
 /// written from the hook callback.  A `Mutex` guards it because the hook
@@ -45,9 +47,8 @@ static WRITER: std::sync::OnceLock<parking_lot::Mutex<EventWriter>> =
 
 /// Low-level keyboard hook used by the monitor.
 ///
-/// Only keys carrying the daemon's magic tag are captured; everything else
-/// (the user's real keystrokes, and the test injector's untagged keys) is
-/// passed through untouched.
+/// Every key reaching the hook chain is captured and swallowed (see the
+/// module docs for why that is exactly the daemon's output).
 unsafe extern "system" fn monitor_hook_proc(
     code: i32,
     w_param: WPARAM,
@@ -58,11 +59,6 @@ unsafe extern "system" fn monitor_hook_proc(
     }
 
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
-
-    // Ignore every key that the daemon did not emit.
-    if kbd_struct.dwExtraInfo != INJECTED_TAG {
-        return unsafe { CallNextHookEx(None, code, w_param, l_param) };
-    }
 
     let is_key_down =
         w_param.0 as u32 == WM_KEYDOWN || w_param.0 as u32 == WM_SYSKEYDOWN;
@@ -80,8 +76,8 @@ unsafe extern "system" fn monitor_hook_proc(
         // Written and flushed.
     }
 
-    // Swallow the tagged key so it does not leak to a focused window — the
-    // "grab" semantics of the Linux direct-capture backend.
+    // Swallow the key so it does not leak to a focused window — the "grab"
+    // semantics of the Linux direct-capture backend.
     LRESULT(1)
 }
 
@@ -92,10 +88,8 @@ unsafe extern "system" fn monitor_hook_proc(
 /// hard `TerminateProcess`; because events are written synchronously in the
 /// hook callback (and the daemon is stopped before the monitor), no captured
 /// event is lost on shutdown.
-pub fn run(output_path: &Path) {
-    let writer = EventWriter::new(output_path)
-        .expect("failed to open output file for event logging");
-    if WRITER.set(parking_lot::Mutex::new(writer)).is_err() {
+pub fn run(sink: EventWriter) {
+    if WRITER.set(parking_lot::Mutex::new(sink)).is_err() {
         panic!("monitor writer already initialized");
     }
 

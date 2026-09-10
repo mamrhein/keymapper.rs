@@ -28,11 +28,9 @@ path = "src/keymapper_monitor.rs"
 name = "virtkbdd"
 path = "src/virtkbdd.rs"
 
-[features]
-# Compile the e2e test hooks (readiness file, active-app override, and the
-# Windows capture / test-output modes) into the daemon.  Off by default so
-# the production binary ships with no env-gated test behaviour at all.
-e2e = []
+[[bin]]
+name = "keymapper_testwindow"
+path = "src/keymapper_testwindow.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"]}
@@ -65,7 +63,7 @@ zbus = { version = "5", features = ["blocking"] }
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSWorkspace"] }
 objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary", "CFMachPort"] }
 objc2-core-graphics = { version = "0.3", features = ["CGWindow", "CGEvent", "CGEventTypes"] }
 objc2-foundation = "0.3"

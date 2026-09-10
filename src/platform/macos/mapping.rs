@@ -71,13 +71,9 @@ use crate::{
 /// `keyboard_filter` is accepted for a uniform platform signature but ignored
 /// in this phase: CGEvents do not expose the originating device, so lookups
 /// pass `device_id = None` and per-keyboard filters are skipped.
-///
-/// `ready_signal` is invoked once the tap is live; it is injected by the
-/// caller so this module stays free of test-specific side effects.
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
     #[allow(unused_variables)] keyboard_filter: Option<Vec<KeyboardSpecifier>>,
-    ready_signal: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Register signal handlers for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -153,11 +149,6 @@ pub fn start_mapping(
     // now that its port is scheduled, so the callback can fire as soon as the
     // run loop starts below.
     CGEvent::tap_enable(&tap_port, true);
-
-    // The tap is live, so the daemon can now process events.
-    if let Some(signal) = ready_signal {
-        signal();
-    }
 
     run_event_loop(&shutdown);
 

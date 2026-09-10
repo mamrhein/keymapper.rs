@@ -11,15 +11,13 @@
 //!
 //! Each supported platform captures the daemon's output directly, without a
 //! window or keyboard-focus dependency: Linux grabs the daemon's uinput
-//! output device, Windows installs a low-level keyboard hook that filters on
-//! the daemon's capture tag, and macOS seizes the daemon's Karabiner
-//! DriverKit virtual keyboard.  Captured events are logged to an output file
-//! for the e2e test harness.
+//! output device, Windows installs a low-level keyboard hook that logs every
+//! key reaching the session's hook chain (the daemon's outputs plus forwarded
+//! passthroughs), and macOS seizes the daemon's Karabiner DriverKit virtual
+//! keyboard.  Captured events are written to a file or to stdout for the e2e
+//! test harness.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
-};
+use std::sync::{Arc, atomic::AtomicBool};
 
 use crate::common::hid_usage::HidUsage;
 
@@ -45,15 +43,15 @@ pub struct OutputEvent {
 /// Dispatches to the platform-specific capture backend (see the module
 /// docs).  All backends are windowless and headless-friendly, and exit
 /// cleanly on SIGTERM/SIGINT.
-pub fn run(output_path: PathBuf) {
+pub fn run(sink: writer::EventWriter) {
     #[cfg(target_os = "linux")]
-    linux::run(&output_path);
+    linux::run(sink);
 
     #[cfg(target_os = "macos")]
-    macos::run(&output_path);
+    macos::run(sink);
 
     #[cfg(target_os = "windows")]
-    windows::run(&output_path);
+    windows::run(sink);
 
     // The daemon itself only builds for the three platforms above, so the
     // monitor is useless anywhere else; fail loudly instead of exiting

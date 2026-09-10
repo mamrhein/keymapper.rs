@@ -14,8 +14,6 @@ pub mod config_io;
 pub mod engine;
 pub mod mapping_cache;
 pub mod state;
-#[cfg(feature = "e2e")]
-pub mod test_hooks;
 #[cfg(test)]
 pub(crate) mod test_lookup;
 pub mod watcher;

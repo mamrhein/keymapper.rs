@@ -10,16 +10,17 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use keymapper::test_util::monitor::writer::EventWriter;
 
 /// Cross-platform keyboard event monitor for e2e testing.
 ///
 /// On Linux, grabs the daemon's uinput output device and logs its raw key
 /// events (no window, deterministic, headless-friendly).  On Windows, a
-/// low-level keyboard hook captures the daemon's tagged output (no window,
-/// no keyboard-focus dependency).  On macOS, seizes the daemon's Karabiner
-/// DriverKit virtual keyboard (no window, no keyboard-focus dependency).
-/// Events are written to an output file in the format `down <Key>` /
-/// `up <Key>`.
+/// low-level keyboard hook captures every key reaching the session's hook
+/// chain (no window, no keyboard-focus dependency).  On macOS, seizes the
+/// daemon's Karabiner DriverKit virtual keyboard (no window, no
+/// keyboard-focus dependency).  Events are written to an output file or to
+/// stdout in the format `down <Key>` / `up <Key>`.
 #[derive(Parser, Debug)]
 #[command(
     name = "keymapper_monitor",
@@ -27,17 +28,35 @@ use clap::Parser;
     about = "Cross-platform keyboard event monitor for e2e testing.",
     long_about = "On Linux, grabs the daemon's uinput output device and logs \
                   its raw key\nevents. On Windows, a low-level hook captures \
-                  the daemon's tagged\noutput. On macOS, seizes the daemon's \
-                  Karabiner\nvirtual keyboard. Events are written to an \
-                  output file\nin the format `down <Key>` / `up <Key>`."
+                  every key reaching\nthe session's hook chain. On macOS, \
+                  seizes the daemon's\nKarabiner virtual keyboard. Events \
+                  are written to an output file\nor to stdout in the format \
+                  `down <Key>` / `up <Key>`."
 )]
 struct Args {
     /// Path to the output file where captured events are written.
     #[arg(short, long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+
+    /// Write captured events to stdout instead of a file.
+    #[arg(short = 's', long)]
+    stdout: bool,
 }
 
 fn main() {
     let args = Args::parse();
-    keymapper::test_util::monitor::run(args.output);
+
+    let sink = match (&args.output, args.stdout) {
+        (Some(path), false) => EventWriter::file(path).unwrap_or_else(|e| {
+            eprintln!("error: failed to open output file: {e}");
+            std::process::exit(1);
+        }),
+        (None, true) => EventWriter::stdout(),
+        _ => {
+            eprintln!("error: specify exactly one of --output or --stdout");
+            std::process::exit(2);
+        }
+    };
+
+    keymapper::test_util::monitor::run(sink);
 }

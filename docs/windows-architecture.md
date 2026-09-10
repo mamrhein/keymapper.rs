@@ -49,17 +49,15 @@ Two consequences of the shared bookkeeping:
 
 ### Emission and self-exclusion
 
-In normal mode the `SendInput` is performed by the hook procedure directly in the callback. A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches other hooks and the target window — the capture-mode e2e tests capture the tagged re-emission through a separate process's hook — so the previous design (worker thread, one-shot reply channel, deferred emission) is not load-bearing. The deferred queue remains only for standalone consumer events, whose emission originates on the raw input thread: a `SendInput` issued there can race a keyboard hook chain in progress and be dropped, so those outputs are queued and posted to the message loop, which drains them where the hook chain is idle.
+The `SendInput` is performed by the hook procedure directly in the callback. A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches other hooks and the target window — the e2e monitor captures the tagged re-emission through a separate process's hook — so the previous design (worker thread, one-shot reply channel, deferred emission) is not load-bearing. The deferred queue remains only for standalone consumer events, whose emission originates on the raw input thread: a `SendInput` issued there can race a keyboard hook chain in progress and be dropped, so those outputs are queued and posted to the message loop, which drains them where the hook chain is idle.
 
 A mapped output is emitted as a complete tap via `SendInput`: modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. An output whose base is itself a modifier key is the exception: only its key-downs are sent, and the matching key-ups go out when the physical key-up arrives (see [Modifier tracking](#modifier-tracking)). The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
-
-In capture mode (e2e only) the hook procedure emits the tagged outputs in callback, as in normal mode, since the e2e monitor observes the session's hook chain and the tagged re-emission must not be queued. Standalone consumer outputs are the exception: the raw input thread emits them directly on its own thread, because they have no hook event to decide on.
 
 Because the low-level hook is session-global, the daemon's own `SendInput` events reach it. Every injected event is stamped with a magic value in `dwExtraInfo` (`INJECTED_TAG`), and the hook procedure passes tagged events through without re-mapping, so its own output is never processed as new input. Matching on the tag is exact: a physical press of the same key can never be mistaken for one of the daemon's injections.
 
 ### Standalone consumer control
 
-Media keys from standalone consumer control devices (e.g. a USB media keypad) do not produce a virtual-key code and therefore never reach the low-level hook. The raw input thread processes their raw input events directly: it performs the lookup and queues the mapped output for the message loop (emitting it directly in capture mode), so standalone consumer emission is subject to the same delivery constraints as any emission that cannot run in the hook callback.
+Media keys from standalone consumer control devices (e.g. a USB media keypad) do not produce a virtual-key code and therefore never reach the low-level hook. The raw input thread processes their raw input events directly: it performs the lookup and queues the mapped output for the message loop, so standalone consumer emission is subject to the same delivery constraints as any emission that cannot run in the hook callback.
 
 The original media action cannot be suppressed: Windows delivers consumer control input to the shell as `WM_APPCOMMAND`, which no keyboard-level hook intercepts. A mapped media key therefore produces both the original action and the remapped output. (Media keys on keyboards that expose a VK code, e.g. `VK_MEDIA_PLAY_PAUSE`, go through the normal hook path and can be swallowed.)
 
@@ -71,15 +69,15 @@ These are accepted trade-offs of the final architecture:
 - **Standalone media actions cannot be suppressed** (see [Standalone consumer control](#standalone-consumer-control)).
 - **The document-level `keyboards` filter is a no-op.** Capture is a session-global hook; applying the global filter per device is out of scope. Per-group `keyboards` filters work via raw input device identification.
 
-## Capture mode (e2e)
+## E2e capture
 
-For end-to-end testing, an `e2e` build can be started with the `KEYMAPPER_CAPTURE` environment variable set. In capture mode the daemon swallows every key and re-emits it through `SendInput` tagged with a magic value in `dwExtraInfo`, so the e2e monitor's own `WH_KEYBOARD_LL` hook can capture exactly the daemon's output without depending on a focused window. As in normal mode, keyboard emission happens in the hook callback; only standalone consumer outputs are emitted by the raw input thread. Capture mode is compiled out of production builds, so the environment variable has no effect there.
+For end-to-end testing, the e2e monitor installs its own `WH_KEYBOARD_LL` hook in a separate process and captures every key event that reaches the session's hook chain. Because the daemon's hook is installed first, it swallows remapped inputs before the monitor sees them, so the monitor observes exactly the daemon's tagged outputs plus forwarded passthroughs — never the raw injected inputs.
 
 ## Source files
 
 | File | Responsibility |
 | ---- | -------------- |
-| `src/platform/windows/mapping.rs` | Hook thread, engine decision, emission, self-exclusion, capture mode |
+| `src/platform/windows/mapping.rs` | Hook thread, engine decision, emission, self-exclusion |
 | `src/platform/windows/raw_input.rs` | Raw input window, HID report decoding |
 | `src/platform/windows/raw_worker.rs` | Raw input thread, standalone consumer events |
 | `src/platform/windows/device_match.rs` | Device-identification buffer, device path cache |

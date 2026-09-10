@@ -9,12 +9,9 @@
 
 use std::sync::Arc;
 
-#[cfg(not(feature = "e2e"))]
-use keymapper::common::app_identity;
-#[cfg(feature = "e2e")]
-use keymapper::daemon::test_hooks::{active_app_name, signal_ready};
 use keymapper::{
     common::{
+        app_identity,
         config_path::find_config_path_strict,
         daemon_token,
         keyboard::{
@@ -88,12 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Inject the active-app source.  The e2e override is only compiled in
-    // with the `e2e` feature; production builds query the platform directly.
-    #[cfg(feature = "e2e")]
-    let active_app_source: Box<dyn Fn() -> String + Send + Sync> =
-        Box::new(active_app_name);
-    #[cfg(not(feature = "e2e"))]
+    // The active-app source queries the platform directly; the state struct
+    // keeps it as a closure so tests can supply a fixed value.
     let active_app_source: Box<dyn Fn() -> String + Send + Sync> =
         Box::new(app_identity::get_active_app_name);
 
@@ -113,19 +106,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _watcher = start_config_watcher(&config_path, watcher_state)?;
 
     println!("Cross-platform runtime engines fully synchronized.");
+    // Flush so consumers reading stdout (a service manager, or a test
+    // harness waiting for this readiness line) observe it before
+    // `start_mapping` blocks.  Rust block-buffers stdout on pipes, so the
+    // line would otherwise never arrive until the process exits.
+    {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }
 
     // The platform layer only needs the read-only interface; the concrete Arc
     // is coerced to `dyn Lookup` at the call site.
     let platform_state = Arc::clone(&state);
 
-    // The readiness hook is only compiled in with the `e2e` feature; in
-    // production builds the platform layer receives no hook at all, so the
-    // `KEYMAPPER_READY_FILE` branch is absent from the binary entirely.
-    #[cfg(feature = "e2e")]
-    let ready_signal: Option<Box<dyn FnOnce() + Send>> =
-        Some(Box::new(signal_ready));
-    #[cfg(not(feature = "e2e"))]
-    let ready_signal: Option<Box<dyn FnOnce() + Send>> = None;
-
-    start_mapping(platform_state, global_filter, ready_signal)
+    start_mapping(platform_state, global_filter)
 }

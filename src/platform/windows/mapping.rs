@@ -24,15 +24,10 @@
 //! on the output side until the physical key-up, so the remapped modifier
 //! stays active for subsequent key presses.
 //!
-//! In capture mode (e2e only) the same decisions are executed with every
-//! pass-through re-emitted through the virtual keyboard, tagged with
-//! [`INJECTED_TAG`], so the monitor's hook can capture the daemon's output.
-//!
-//! The in-callback emission is validated by the capture-mode e2e tests: the
-//! daemon's tagged re-emissions are issued from within the hook callback and
-//! captured by the monitor's own hook in a separate process, so the previous
-//! design (worker thread, one-shot reply channel, deferred emission) is no
-//! longer load-bearing.
+//! The mapped output is emitted directly in the hook callback: a `SendInput`
+//! issued from within a `WH_KEYBOARD_LL` callback reaches other hooks and the
+//! target window, so the previous design (worker thread, one-shot reply
+//! channel, deferred emission) is no longer load-bearing for keyboard events.
 //!
 //! Thread layout:
 //!
@@ -44,12 +39,6 @@
 //!    \`WM_INPUT\`.  Maintains the device-identification buffer and processes
 //!    standalone Consumer Control events, which never reach the hook.
 
-// Capture-mode-only imports: the debug log needs `Write`, and the capture
-// flag is an `AtomicBool`.  Both are compiled out of production builds.
-#[cfg(feature = "e2e")]
-use std::io::Write;
-#[cfg(feature = "e2e")]
-use std::sync::atomic::AtomicBool;
 use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
@@ -205,11 +194,6 @@ fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
 }
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
-    #[cfg(feature = "e2e")]
-    if capture_enabled() {
-        capture_debug(&format!("emit vk={:#04x} up={}", vk.0, is_key_up));
-    }
-
     let mut flags: u32 = if is_key_up { KEYEVENTF_KEYUP.0 } else { 0 };
     if is_extended_key(vk) {
         flags |= KEYEVENTF_EXTENDEDKEY.0;
@@ -386,76 +370,6 @@ fn drain_and_emit_emissions() {
 }
 
 // ---------------------------------------------------------------------------
-// Capture mode
-// ---------------------------------------------------------------------------
-//
-// Capture mode makes the daemon re-emit every key through its virtual
-// keyboard, tagged with [`INJECTED_TAG`], so the e2e monitor's
-// `WH_KEYBOARD_LL` hook can capture the daemon's output without depending on
-// a focused window.  It is gated on the `KEYMAPPER_CAPTURE` environment
-// variable so production behaviour (unmapped keys passing straight through)
-// is left untouched.
-
-/// Process start, for capture-debug timestamps.
-#[cfg(feature = "e2e")]
-static CAPTURE_T0: std::sync::OnceLock<std::time::Instant> =
-    std::sync::OnceLock::new();
-
-/// Capture-mode debug log, appended to from the hook and raw input threads.
-#[cfg(feature = "e2e")]
-static CAPTURE_DEBUG: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> =
-    std::sync::OnceLock::new();
-
-#[cfg(feature = "e2e")]
-pub(super) fn capture_debug(line: &str) {
-    let t0 = CAPTURE_T0.get_or_init(std::time::Instant::now);
-    let file = CAPTURE_DEBUG.get_or_init(|| {
-        let path = std::env::temp_dir().join("keymapper_capture_debug.log");
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map(std::sync::Mutex::new)
-            .expect("failed to open capture debug log")
-    });
-    let mut f = file.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = writeln!(f, "t={:6}ms {}", t0.elapsed().as_millis(), line);
-}
-
-/// Set once from `start_mapping` to record whether capture mode is active.
-#[cfg(feature = "e2e")]
-static CAPTURE_MODE: AtomicBool = AtomicBool::new(false);
-
-/// Whether capture mode is active (all emission tagged through the virtual
-/// keyboard).
-///
-/// Only compiled in with the `e2e` feature: without it, capture mode can
-/// never be enabled, so the query is dead code in production builds.
-#[cfg(feature = "e2e")]
-pub(super) fn capture_enabled() -> bool {
-    CAPTURE_MODE.load(Ordering::Relaxed)
-}
-
-/// Record the capture-mode flag determined at startup.
-///
-/// Only compiled in with the `e2e` feature: without it, capture mode can
-/// never be enabled, so the writer is dead code in production builds.
-#[cfg(feature = "e2e")]
-fn set_capture_mode(enabled: bool) {
-    CAPTURE_MODE.store(enabled, Ordering::Relaxed);
-}
-
-/// Forward a single (unmapped) key through the virtual keyboard in capture
-/// mode.  In normal mode unmapped keys pass straight through the OS, so this
-/// is a no-op.
-#[cfg(feature = "e2e")]
-pub(super) fn emit_forwarded_key(vk: u16, is_key_up: bool) {
-    if capture_enabled() {
-        simulate_key_event(VIRTUAL_KEY(vk), is_key_up);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Low-level keyboard hook procedure
 // ---------------------------------------------------------------------------
 
@@ -478,13 +392,6 @@ extern "system" fn low_level_keyboard_proc(
     // physical press of the same key can never be swallowed as one of our
     // own injections.
     if kbd_struct.dwExtraInfo == INJECTED_TAG {
-        #[cfg(feature = "e2e")]
-        if capture_enabled() {
-            capture_debug(&format!(
-                "hook tagged vk={:#04x} msg={:#06x}",
-                kbd_struct.vkCode, w_param.0
-            ));
-        }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
@@ -532,35 +439,13 @@ extern "system" fn low_level_keyboard_proc(
         true,
     );
 
-    #[cfg(feature = "e2e")]
-    if capture_enabled() {
-        capture_debug(&format!(
-            "hook vk={:#04x} up={} msg={:#06x} extra={:#010x} usage={:?} \
-             decision={:?}",
-            vk_code.0,
-            is_key_up,
-            w_param.0,
-            kbd_struct.dwExtraInfo,
-            usage,
-            decision
-        ));
-    }
-
     // A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches
     // other hooks and the target window (the capture-mode e2e tests capture
     // the tagged re-emission from a separate process's hook), so the mapped
     // output is emitted directly in the callback.
     match decision {
-        // Unmapped (or the repeat of an unmapped key): let the event
-        // through.  In capture mode it is re-emitted through the virtual
-        // keyboard (tagged) and the physical key swallowed to avoid double
-        // delivery.
+        // Unmapped (or the repeat of an unmapped key): let the event through.
         Decision::Pass => {
-            #[cfg(feature = "e2e")]
-            if capture_enabled() {
-                emit_forwarded_key(vk_code.0, is_key_up);
-                return LRESULT(1);
-            }
             unsafe {
                 CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
             }
@@ -634,13 +519,9 @@ fn match_usage_with_retry(usage: HidUsage) -> Option<usize> {
 /// platforms but is a no-op on Windows: capture is a session-global
 /// `WH_KEYBOARD_LL` hook, and applying the filter per device (via raw input
 /// device ids) is a feature deliberately out of scope for this phase.
-/// `ready_signal` is invoked once the daemon can process events; it is
-/// injected by the caller so this module stays free of test-specific side
-/// effects.
 pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
     #[allow(unused_variables)] keyboard_filter: Option<Vec<KeyboardSpecifier>>,
-    ready_signal: Option<Box<dyn FnOnce() + Send>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Start the raw input loop (spawns its own thread).
     let (_raw_loop, raw_rx) = start_raw_input_loop()?;
@@ -649,19 +530,6 @@ pub fn start_mapping(
     // struct only holds the HWND and has no Drop logic, so leaking is safe.
     // The background thread is already detached inside start_raw_input_loop.
     Box::leak(Box::new(_raw_loop));
-
-    // Capture mode (e2e only, gated on `KEYMAPPER_CAPTURE`): the daemon
-    // swallows every key and re-emits it through the virtual keyboard, tagged
-    // with [`INJECTED_TAG`], so the monitor's `WH_KEYBOARD_LL` hook can
-    // capture the output without depending on a focused window.  Emission
-    // happens in the hook proc's callback, which the monitor observes.
-    // Compiled in only with the `e2e` feature, so production builds can
-    // never be switched into capture mode via the environment.
-    #[cfg(feature = "e2e")]
-    if std::env::var("KEYMAPPER_CAPTURE").is_ok_and(|v| !v.is_empty()) {
-        set_capture_mode(true);
-        eprintln!("Windows: capture mode enabled (KEYMAPPER_CAPTURE).");
-    }
 
     // Record this thread's id so the raw input thread can post the drain
     // wake message to the message loop (done before the raw worker starts,
@@ -691,12 +559,6 @@ pub fn start_mapping(
     set_hook_handle(handle);
 
     println!("Windows low-level hook listening (two-thread mode).");
-
-    // The raw input loop, raw input thread, and keyboard hook are all live,
-    // so the daemon can now process events.
-    if let Some(signal) = ready_signal {
-        signal();
-    }
 
     // Run the message loop until WM_QUIT.  The low-level hook callback runs
     // re-entrantly inside the blocked `MsgWaitForMultipleObjects` call and
