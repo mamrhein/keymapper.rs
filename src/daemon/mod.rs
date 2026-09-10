@@ -7,10 +7,10 @@
 // $Source$
 // $Revision$
 
-//! Daemon runtime: mapping cache, state management, and config hot-reload.
+//! Daemon runtime: the unified mapping engine, mapping cache, state
+//! management, and config hot-reload.
 
 pub mod config_io;
-pub mod decision;
 pub mod engine;
 pub mod mapping_cache;
 pub mod state;
