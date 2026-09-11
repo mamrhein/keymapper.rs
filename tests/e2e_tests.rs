@@ -31,8 +31,10 @@
 //! 5. Start the daemon (waits for its readiness line on stdout).
 //! 6. Start the monitor (`--stdout`, piped) with a reader thread.
 //! 7. Spawn the injector thread (rounds every 5 s).
-//! 8. For each phase: read a matching round and compare; for later phases,
-//!    hot-reload the config and swap the injector's key set first.
+//! 8. For each phase: wait for a round built from the phase's key-set
+//!    generation, discard any stale rounds captured before that announcement,
+//!    read exactly one round, and compare; for later phases, hot-reload the
+//!    config and swap the injector's key set (bumping its generation) first.
 //! 9. Teardown: stop the injector, monitor, and daemon; restore the config.
 
 mod common;
@@ -548,20 +550,44 @@ impl DaemonChild {
             .expect("failed to spawn keymapperd");
 
         let stdout = child.stdout.take().expect("stdout is piped");
-        let reader = std::io::BufReader::new(stdout);
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let (ready_tx, ready_rx) = mpsc::channel::<()>();
 
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            eprintln!("daemon: {line}");
-            if line
-                .contains("Cross-platform runtime engines fully synchronized.")
-            {
-                break;
+        // Drain the daemon's stdout for its lifetime, echoing each line to
+        // stderr and signaling readiness.  The daemon logs after the
+        // readiness line (e.g. the Windows hook-install notice); if the
+        // pipe's read end were closed here, those writes would fail — on
+        // Windows the daemon's main thread panics on the broken pipe and
+        // dies, silently disabling all remapping.
+        thread::spawn(move || {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                eprintln!("daemon: {line}");
+                if line.contains(
+                    "Cross-platform runtime engines fully synchronized.",
+                ) {
+                    let _ = ready_tx.send(());
+                }
             }
-            if Instant::now() >= deadline {
-                child.kill().ok();
-                panic!("daemon did not signal readiness within 30 s");
+        });
+
+        // Wait for the readiness line with a timeout.  Polling (rather than
+        // blocking on recv) also catches a daemon that exits before it ever
+        // signals readiness.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match ready_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(()) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    child.kill().ok();
+                    panic!("daemon exited before signaling readiness");
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if Instant::now() >= deadline {
+                        child.kill().ok();
+                        panic!("daemon did not signal readiness within 30 s");
+                    }
+                }
             }
         }
 
@@ -710,84 +736,144 @@ impl Drop for Monitor {
     }
 }
 
+/// Segments a continuous event stream into `Ctrl+Esc`-delimited rounds.
+/// Holds the state of a partially captured round, so reading can be paused
+/// (e.g. to discard stale rounds) and resumed without losing events.
+struct RoundReader {
+    /// Events of the round currently being captured (excluding delimiters).
+    round: Vec<LogEvent>,
+    /// The last 4 events, for end-of-round delimiter detection.
+    recent: Vec<LogEvent>,
+    /// Whether a round is currently being captured.
+    in_round: bool,
+}
+
+impl RoundReader {
+    fn new() -> Self {
+        Self {
+            round: Vec::new(),
+            recent: Vec::new(),
+            in_round: false,
+        }
+    }
+
+    /// Feed one event; returns `Some(round)` when a complete round ends.
+    fn feed(&mut self, event: LogEvent) -> Option<Vec<LogEvent>> {
+        let delimiter = ctrl_esc_delimiter();
+        self.recent.push(event.clone());
+        if self.recent.len() > 4 {
+            self.recent.remove(0);
+        }
+        let is_delim = self.recent == delimiter;
+
+        if !self.in_round {
+            if is_delim {
+                self.in_round = true;
+                self.round.clear();
+            }
+            None
+        } else if is_delim {
+            // The last 3 events already in `round` plus this one form the end
+            // delimiter; drop them and return the completed round.
+            for _ in 0..3 {
+                self.round.pop();
+            }
+            self.in_round = false;
+            Some(std::mem::take(&mut self.round))
+        } else {
+            self.round.push(event);
+            None
+        }
+    }
+}
+
 /// Read events from the channel until a complete round (delimited by
 /// `Ctrl+Esc`) is captured, returning the round's events (excluding the
-/// delimiters).  Returns whatever was collected on timeout.
+/// delimiters).  Continues from *reader*'s current state, which may hold a
+/// partially captured round.  Returns whatever was collected on timeout.
 fn read_round(
     rx: &mpsc::Receiver<LogEvent>,
+    reader: &mut RoundReader,
     timeout: Duration,
 ) -> Vec<LogEvent> {
-    let delimiter = ctrl_esc_delimiter();
     let deadline = Instant::now() + timeout;
-    let mut round: Vec<LogEvent> = Vec::new();
-    let mut recent: Vec<LogEvent> = Vec::new();
-    let mut in_round = false;
-
     loop {
         if Instant::now() >= deadline {
             eprintln!(
                 "warning: timed out waiting for a complete round ({} events \
                  so far)",
-                round.len()
+                reader.round.len()
             );
-            return round;
+            return std::mem::take(&mut reader.round);
         }
 
         let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) else {
             continue;
         };
 
-        recent.push(event.clone());
-        if recent.len() > 4 {
-            recent.remove(0);
-        }
-        let is_delim = recent == delimiter;
-
-        if !in_round {
-            if is_delim {
-                in_round = true;
-                round.clear();
-            }
-        } else if is_delim {
-            // The last 3 events already in `round` plus this one form the end
-            // delimiter; drop them and return the completed round.
-            for _ in 0..3 {
-                round.pop();
-            }
+        if let Some(round) = reader.feed(event) {
             return round;
-        } else {
-            round.push(event);
         }
     }
 }
 
-/// Read rounds until one matches *expected*, returning it.  Rounds that do not
-/// match (e.g. produced before a hot-reload swapped the key set) are skipped.
-/// Panics on timeout.
-fn read_round_matching(
+/// Discard complete rounds already buffered in the channel.  Called right
+/// after the injector announces a round of the current key-set generation:
+/// the announced round is injected *after* the announcement, so any complete
+/// round already captured was built from an older key set (a round in flight
+/// when a hot-reload swapped the key set).  Drains until the channel is
+/// quiet, so a partially captured announced round is left in *reader* for
+/// [`read_round`] to complete.
+fn discard_stale_rounds(
     rx: &mpsc::Receiver<LogEvent>,
-    expected: &[LogEvent],
+    reader: &mut RoundReader,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if Instant::now() >= deadline {
+            eprintln!(
+                "warning: stale-round drain did not quiesce; proceeding"
+            );
+            return;
+        }
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(event) => {
+                if let Some(round) = reader.feed(event) {
+                    eprintln!(
+                        "discarding stale round ({} events) captured before \
+                         the current generation was announced",
+                        round.len()
+                    );
+                }
+            }
+            // The channel is quiet: no stale round is pending, and the
+            // announced round is either not yet injected or fully captured.
+            Err(_) => return,
+        }
+    }
+}
+
+/// Wait until the injector announces a round built from key-set generation
+/// *generation*, discarding announcements of older generations (rounds that
+/// were in flight when a hot-reload swapped the key set).  Panics on timeout.
+fn wait_for_round_generation(
+    rx: &mpsc::Receiver<u64>,
+    generation: u64,
     timeout: Duration,
-) -> Vec<LogEvent> {
+) {
     let deadline = Instant::now() + timeout;
     loop {
         if Instant::now() >= deadline {
             panic!(
-                "timed out waiting for a round matching the expected \
-                 sequence ({} events)",
-                expected.len()
+                "timed out waiting for the injector to start a round of \
+                 key-set generation {generation}"
             );
         }
-        let round = read_round(rx, Duration::from_secs(15));
-        if round == expected {
-            return round;
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(g) if g == generation => return,
+            Ok(g) => eprintln!("discarding round of stale generation {g}"),
+            Err(_) => {}
         }
-        eprintln!(
-            "round did not match expected ({} vs {} events); reading next \
-             round",
-            round.len(),
-            expected.len()
-        );
     }
 }
 
@@ -798,16 +884,22 @@ fn read_round_matching(
 /// Shared state for the injector thread: the current key set (swappable for
 /// hot-reload) and a stop flag.
 struct InjectorState {
-    steps: Mutex<Vec<InjectionStep>>,
+    /// The key set to inject, tagged with a generation that increments on
+    /// every hot-reload swap.  The injector reads both atomically and
+    /// announces the generation when it starts a round, so the harness can
+    /// wait for a round built from a specific key set.
+    keyset: Mutex<(u64, Vec<InjectionStep>)>,
     stop: AtomicBool,
 }
 
-/// Spawn the injector thread.  It loops: sleep 5 s, inject the `Ctrl+Esc`
-/// delimiter, then inject the current key set.  The key set is read from the
-/// shared state each round so a hot-reload can swap it.
+/// Spawn the injector thread.  It loops: sleep 5 s, announce the round's
+/// key-set generation on *round_tx*, inject the `Ctrl+Esc` delimiter, then
+/// inject the current key set.  The key set is read from the shared state
+/// each round so a hot-reload can swap it.
 fn spawn_injector(
     injector: Box<dyn KeyInjector + Send>,
     state: Arc<InjectorState>,
+    round_tx: mpsc::Sender<u64>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let delimiter = ctrl_esc_injection_step();
@@ -823,9 +915,15 @@ fn spawn_injector(
                 return;
             }
 
+            // Read the key set and its generation atomically, then announce
+            // the round so the harness can wait for a specific generation.
+            let (generation, steps) = state.keyset.lock().unwrap().clone();
+            if round_tx.send(generation).is_err() {
+                return; // the harness is gone.
+            }
+
             inject_step(&*injector, &delimiter);
 
-            let steps = state.steps.lock().unwrap().clone();
             for step in &steps {
                 if state.stop.load(Ordering::Relaxed) {
                     return;
@@ -1006,50 +1104,69 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
         initial_sequences.steps.len(),
         initial_sequences.expected.len()
     );
+    let (round_tx, round_rx) = mpsc::channel();
     let state = Arc::new(InjectorState {
-        steps: Mutex::new(initial_sequences.steps.clone()),
+        keyset: Mutex::new((0, initial_sequences.steps.clone())),
         stop: AtomicBool::new(false),
     });
-    let injector_handle = spawn_injector(injector, state.clone());
+    let injector_handle = spawn_injector(injector, state.clone(), round_tx);
+    let mut reader = RoundReader::new();
 
-    // 7. For each phase: read a matching round and compare.  Later phases
-    //    hot-reload the config and swap the injector's key set first.
+    // 7. For each phase: wait for a round built from the phase's key set,
+    //    discard any stale rounds captured before that announcement, read
+    //    exactly one round, and compare.  The injected sequence is constant
+    //    per phase, so the first complete round is the one to compare —
+    //    reading further rounds would only mask a real failure behind a
+    //    timeout.  Later phases hot-reload the config and swap the injector's
+    //    key set (bumping its generation) first.
     for (i, phase) in phases.iter().enumerate() {
+        let content = phase_content(*phase, &active_app);
+        let sequences = build_test_sequences(&content, &active_app);
+
         if i > 0 {
             eprintln!(
                 "hot-reloading config (phase {} of {})...",
                 i + 1,
                 phases.len()
             );
-            let new_content = phase_content(*phase, &active_app);
-            config.overwrite(&new_content);
+            config.overwrite(&content);
             // Wait for the daemon's reload debounce plus compilation time.
             thread::sleep(Duration::from_secs(2));
 
-            let new_sequences =
-                build_test_sequences(&new_content, &active_app);
-            *state.steps.lock().unwrap() = new_sequences.steps;
+            // Swap the injector's key set under a new generation and wait
+            // for it to start a round with that generation, so the round
+            // read below is built from this phase's key set (a round in
+            // flight during the reload is discarded).
+            let generation = {
+                let mut keyset = state.keyset.lock().unwrap();
+                keyset.0 += 1;
+                keyset.1 = sequences.steps.clone();
+                keyset.0
+            };
+            wait_for_round_generation(
+                &round_rx,
+                generation,
+                Duration::from_secs(30),
+            );
+        } else {
+            wait_for_round_generation(&round_rx, 0, Duration::from_secs(30));
         }
 
-        let expected = build_test_sequences(
-            &phase_content(*phase, &active_app),
-            &active_app,
-        )
-        .expected;
+        // The announced round is injected after the announcement, so any
+        // complete round already captured was built from an older key set;
+        // discard it before reading the round to compare.
+        discard_stale_rounds(&monitor.rx, &mut reader);
 
         eprintln!(
-            "phase {}: waiting for a matching round ({} expected events)...",
+            "phase {}: reading one round ({} expected events)...",
             i + 1,
-            expected.len()
+            sequences.expected.len()
         );
-        let actual = read_round_matching(
-            &monitor.rx,
-            &expected,
-            Duration::from_secs(60),
-        );
+        let actual =
+            read_round(&monitor.rx, &mut reader, Duration::from_secs(15));
         assert_events_match(
             &actual,
-            &expected,
+            &sequences.expected,
             "round does not match expected sequence",
         );
     }
