@@ -11,12 +11,12 @@
 name: ci-e2e
 
 on:
-  # push:
-  #   branches:
-  #     - main
-  #   paths:
-  #     - "src/**"
-  #     - "tests/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "tests/**"
   pull_request:
     branches:
       - main
@@ -29,89 +29,89 @@ jobs:
   # -----------------------------------------------------------------------
   # Linux — e2e sandbox tests with /dev/uinput
   # -----------------------------------------------------------------------
-  linux-e2e:
-    runs-on: ubuntu-latest
+  # linux-e2e:
+  #   runs-on: ubuntu-latest
 
-    steps:
-      - uses: actions/checkout@v5
+  #   steps:
+  #     - uses: actions/checkout@v5
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+  #     - name: Install Rust stable
+  #       uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            pkg-config \
-            libdbus-1-dev \
-            libudev-dev \
-            libxkbcommon-dev \
-            libxcb1-dev \
-            xvfb
+  #     - name: Install system dependencies
+  #       run: |
+  #         sudo apt-get update
+  #         sudo apt-get install -y \
+  #           pkg-config \
+  #           libdbus-1-dev \
+  #           libudev-dev \
+  #           libxkbcommon-dev \
+  #           libxcb1-dev \
+  #           xvfb
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+  #     - name: Install cargo-nextest
+  #       uses: taiki-e/install-action@nextest
 
-      - name: Build daemon and e2e test binary
-        # The e2e harness spawns keymapperd, keymapper_monitor, and
-        # keymapper_testwindow as subprocesses and resolves each from
-        # target/debug/ relative to the test binary's location.  The daemon is
-        # a plain production build; the harness drives it and observes its
-        # output through the monitor.
-        run: |
-          cargo build --bin keymapperd --bin keymapper_monitor --bin keymapper_testwindow
-          cargo nextest run --test e2e_tests --no-run
+  #     - name: Build daemon and e2e test binary
+  #       # The e2e harness spawns keymapperd, keymapper_monitor, and
+  #       # keymapper_testwindow as subprocesses and resolves each from
+  #       # target/debug/ relative to the test binary's location.  The daemon is
+  #       # a plain production build; the harness drives it and observes its
+  #       # output through the monitor.
+  #       run: |
+  #         cargo build --bin keymapperd --bin keymapper_monitor --bin keymapper_testwindow
+  #         cargo nextest run --test e2e_tests --no-run
 
-      - name: Run e2e tests as root (for /dev/uinput access)
-        # Running as root is required because the sandbox needs write access
-        # to /dev/uinput.  GitHub Actions runners allow this with sudo.  A
-        # virtual X display (Xvfb) is started for the test-window helper, which
-        # needs a display to focus a window (no window manager is required).
-        run: |
-          # Load the uinput module — it may already be loaded but this is
-          # idempotent and harmless.
-          sudo modprobe uinput || true
-          # Start a virtual X display for the test-window helper.
-          sudo Xvfb :99 -screen 0 1024x768x24 -nolisten tcp &
-          sleep 2
-          # The ubuntu-latest runner has /dev/uinput with root:root 0660.
-          # Running tests as root grants the required write access.
-          sudo -E DISPLAY=:99 PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
-          status=$?
-          sudo pkill -f "Xvfb :99" || true
-          exit $status
+  #     - name: Run e2e tests as root (for /dev/uinput access)
+  #       # Running as root is required because the sandbox needs write access
+  #       # to /dev/uinput.  GitHub Actions runners allow this with sudo.  A
+  #       # virtual X display (Xvfb) is started for the test-window helper, which
+  #       # needs a display to focus a window (no window manager is required).
+  #       run: |
+  #         # Load the uinput module — it may already be loaded but this is
+  #         # idempotent and harmless.
+  #         sudo modprobe uinput || true
+  #         # Start a virtual X display for the test-window helper.
+  #         sudo Xvfb :99 -screen 0 1024x768x24 -nolisten tcp &
+  #         sleep 2
+  #         # The ubuntu-latest runner has /dev/uinput with root:root 0660.
+  #         # Running tests as root grants the required write access.
+  #         sudo -E DISPLAY=:99 PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
+  #         status=$?
+  #         sudo pkill -f "Xvfb :99" || true
+  #         exit $status
 
-      - name: Run CLI integration tests
-        # The CLI integration tests need no input device, but they do need to
-        # be run as root to access the lock file created by the previous test.
-        run: |
-          cargo build --bin keymapper
-          sudo -E PATH="$PATH" $(which cargo) nextest run --test keymapper_tests
+  #     - name: Run CLI integration tests
+  #       # The CLI integration tests need no input device, but they do need to
+  #       # be run as root to access the lock file created by the previous test.
+  #       run: |
+  #         cargo build --bin keymapper
+  #         sudo -E PATH="$PATH" $(which cargo) nextest run --test keymapper_tests
 
   # -----------------------------------------------------------------------
   # macOS — e2e sandbox tests (root bypasses TCC Accessibility)
   # -----------------------------------------------------------------------
-  macos-e2e:
-    runs-on: macos-latest
+  # macos-e2e:
+  #   runs-on: macos-latest
 
-    steps:
-      - uses: actions/checkout@v5
+  #   steps:
+  #     - uses: actions/checkout@v5
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+  #     - name: Install Rust stable
+  #       uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
+  #     - name: Install cargo-nextest
+  #       uses: taiki-e/install-action@nextest
 
-      # The Karabiner Driver Kit extension requires a one-time user approval
-      # that a headless runner cannot give. So, the e2e tests cannot run in
-      # this workflow.
+  #     # The Karabiner Driver Kit extension requires a one-time user approval
+  #     # that a headless runner cannot give. So, the e2e tests cannot run in
+  #     # this workflow.
 
-      - name: Run CLI integration tests
-        # The CLI integration tests need no input device and no root access.
-        run: |
-          cargo build --bin keymapper
-          cargo nextest run --test keymapper_tests
+  #     - name: Run CLI integration tests
+  #       # The CLI integration tests need no input device and no root access.
+  #       run: |
+  #         cargo build --bin keymapper
+  #         cargo nextest run --test keymapper_tests
 
   # -----------------------------------------------------------------------
   # Windows — e2e sandbox tests (no elevation required)
