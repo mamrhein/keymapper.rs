@@ -544,6 +544,9 @@ impl DaemonChild {
     fn spawn(config_dir: &Path) -> Self {
         let mut child = Command::new(bin_path("keymapperd"))
             .current_dir(config_dir)
+            // Log each key-down and its decision so a failure shows whether
+            // the daemon's hook fires and what it decides.
+            .env("KEYMAPPER_HOOK_LOG", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()

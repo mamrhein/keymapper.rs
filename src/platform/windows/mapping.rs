@@ -376,6 +376,15 @@ fn drain_and_emit_emissions() {
 // Low-level keyboard hook procedure
 // ---------------------------------------------------------------------------
 
+/// Whether per-event hook diagnostics are enabled (set `KEYMAPPER_HOOK_LOG`
+/// to any value).  Read once and cached so the hot path never calls
+/// `getenv`.  Used by the e2e harness to confirm the hook fires and to see
+/// the decision made for each key-down.
+fn hook_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("KEYMAPPER_HOOK_LOG").is_some())
+}
+
 extern "system" fn low_level_keyboard_proc(
     code: i32,
     w_param: WPARAM,
@@ -387,6 +396,7 @@ extern "system" fn low_level_keyboard_proc(
 
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
+    let vk = vk_code.0;
 
     // Every key the daemon injects through `SendInput` is stamped with
     // [`INJECTED_TAG`].  Let those flow on without re-mapping them, so the
@@ -406,6 +416,9 @@ extern "system" fn low_level_keyboard_proc(
     // (e.g. Print Screen); such keys always pass through.
     let Some(usage) = Key::from_native(vk_code.0).map(Key::to_hid_usage)
     else {
+        if !is_key_up && hook_log_enabled() {
+            eprintln!("hook: down vk={vk:#04x} -> no usage (pass)");
+        }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
@@ -429,6 +442,12 @@ extern "system" fn low_level_keyboard_proc(
     let Some(engine) = engine() else {
         // The engine is not up (or is shutting down); never block the
         // input chain on that.
+        if !is_key_up && hook_log_enabled() {
+            eprintln!(
+                "hook: down vk={vk:#04x} usage={} -> no engine (pass)",
+                usage.as_str()
+            );
+        }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
@@ -440,6 +459,28 @@ extern "system" fn low_level_keyboard_proc(
         device_path.as_deref(),
         true,
     );
+
+    // Diagnostic (enabled with `KEYMAPPER_HOOK_LOG`): log each key-down and
+    // its decision so a CI failure shows whether the hook fires, what usage
+    // it computes, and whether the lookup finds a rule.  Key-ups are omitted
+    // to keep the log readable.
+    if !is_key_up && hook_log_enabled() {
+        let summary = match &decision {
+            Decision::Pass => "pass".to_string(),
+            Decision::Emit { outputs, .. } => {
+                format!("emit({})", outputs.len())
+            }
+            Decision::Swallow { .. } => "swallow".to_string(),
+            Decision::ConsumedRelease => "consumed-release".to_string(),
+        };
+        eprintln!(
+            "hook: down vk={vk:#04x} scan={:02x} ext={} usage={} -> {}",
+            kbd_struct.scanCode,
+            kbd_struct.flags.0 & 1 != 0,
+            usage.as_str(),
+            summary,
+        );
+    }
 
     // A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches
     // other hooks and the target window (the capture-mode e2e tests capture
