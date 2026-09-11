@@ -60,7 +60,8 @@ use windows::Win32::{
     UI::{
         Input::KeyboardAndMouse::{
             GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC,
+            MapVirtualKeyW, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
             CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
@@ -185,17 +186,19 @@ fn modifier_bit_to_vk(bit: u8) -> Option<VIRTUAL_KEY> {
     Some(VIRTUAL_KEY(key.as_native()))
 }
 
-fn is_extended_key(vk: VIRTUAL_KEY) -> bool {
-    matches!(
-        vk.0,
-        0xA3 | 0xA5 | 0x21 | 0x22 | 0x23 | 0x25
-            ..=0x28 | 0x2D | 0x2E | 0x6F | 0x92
-    )
+/// The hardware scan code and extended-key flag for *vk*, as reported by
+/// `MapVirtualKeyW` (whose high scan bit marks extended keys).  A zero scan
+/// code means the VK has no hardware scan code (e.g. some multimedia keys);
+/// such events are emitted with `wScan: 0` as before.
+fn scan_code_and_extended(vk: VIRTUAL_KEY) -> (u16, bool) {
+    let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) };
+    ((scan & 0xFF) as u16, scan & 0x100 != 0)
 }
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
+    let (scan, extended) = scan_code_and_extended(vk);
     let mut flags: u32 = if is_key_up { KEYEVENTF_KEYUP.0 } else { 0 };
-    if is_extended_key(vk) {
+    if extended {
         flags |= KEYEVENTF_EXTENDEDKEY.0;
     }
 
@@ -206,7 +209,7 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: vk,
-                wScan: 0,
+                wScan: scan,
                 dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
                 time: 0,
                 dwExtraInfo: INJECTED_TAG,
@@ -612,31 +615,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_extended_key_returns_true_for_right_control() {
-        assert!(is_extended_key(VIRTUAL_KEY(0xA3)));
+    fn scan_code_and_extended_marks_extended_keys() {
+        // Delete and the right-hand modifiers are extended keys; their scan
+        // codes carry the high bit regardless of keyboard layout.
+        for vk in [0x2D, 0xA3, 0xA5] {
+            let (_, extended) = scan_code_and_extended(VIRTUAL_KEY(vk));
+            assert!(extended, "VK {vk:#04x} should be extended");
+        }
     }
 
     #[test]
-    fn is_extended_key_returns_true_for_right_alt() {
-        assert!(is_extended_key(VIRTUAL_KEY(0xA5)));
-    }
-
-    #[test]
-    fn is_extended_key_returns_true_for_arrow_keys() {
-        assert!(is_extended_key(VIRTUAL_KEY(0x25))); // Left
-        assert!(is_extended_key(VIRTUAL_KEY(0x26))); // Up
-        assert!(is_extended_key(VIRTUAL_KEY(0x27))); // Right
-        assert!(is_extended_key(VIRTUAL_KEY(0x28))); // Down
-    }
-
-    #[test]
-    fn is_extended_key_returns_true_for_delete() {
-        assert!(is_extended_key(VIRTUAL_KEY(0x2E)));
-    }
-
-    #[test]
-    fn is_extended_key_returns_false_for_normal_key() {
-        assert!(!is_extended_key(VIRTUAL_KEY(0x41))); // 'A'
+    fn scan_code_and_extended_marks_normal_keys() {
+        // A regular letter is not extended and has a non-zero scan code.
+        let (scan, extended) = scan_code_and_extended(VIRTUAL_KEY(0x41));
+        assert!(!extended);
+        assert_ne!(scan, 0);
     }
 
     #[test]
