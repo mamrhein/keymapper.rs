@@ -13,7 +13,8 @@
 //! visible to both the daemon's hook and external observers.
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, SendInput, VIRTUAL_KEY,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, MapVirtualKeyW, SendInput,
+    VIRTUAL_KEY, MAPVK_VK_TO_VSC,
 };
 
 use super::{InjectorError, KeyInjector};
@@ -49,18 +50,28 @@ impl WindowsInjector {
             },
         )?;
 
-        let flags: u32 = if is_down {
+        // Stamp the event with the key's hardware scan code so it is
+        // indistinguishable from a physical press.  The daemon identifies
+        // keys by (scan code, extended), and a zero scan code would collapse
+        // every key into one identity, corrupting its modifier bookkeeping.
+        // For extended keys `MapVirtualKeyW` sets the high bit of the scan
+        // code, which maps to the `KEYEVENTF_EXTENDEDKEY` flag.
+        let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) };
+        let mut flags: u32 = if is_down {
             0
         } else {
             0x0002 // KEYEVENTF_KEYUP
         };
+        if scan & 0x100 != 0 {
+            flags |= 0x0001; // KEYEVENTF_EXTENDEDKEY
+        }
 
         let input = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
                     wVk: VIRTUAL_KEY(vk),
-                    wScan: 0,
+                    wScan: (scan & 0xFF) as u16,
                     dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(flags),
                     time: 0,
                     dwExtraInfo: 0,
