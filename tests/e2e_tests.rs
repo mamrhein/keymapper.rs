@@ -684,10 +684,10 @@ impl Monitor {
             for line in reader.lines() {
                 match line {
                     Ok(line) => {
-                        if let Some(event) = parse_line(&line) {
-                            if tx.send(event).is_err() {
-                                break;
-                            }
+                        if let Some(event) = parse_line(&line)
+                            && tx.send(event).is_err()
+                        {
+                            break;
                         }
                     }
                     Err(_) => break,
@@ -881,25 +881,19 @@ fn create_injector()
     {
         use keymapper::test_util::key_injector::MacOSInjector;
         let injector = MacOSInjector::new()?;
-        return Ok(
-            injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>)
-        );
+        Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>))
     }
     #[cfg(target_os = "linux")]
     {
         use keymapper::test_util::key_injector::LinuxInjector;
         let injector = LinuxInjector::new()?;
-        return Ok(
-            injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>)
-        );
+        Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>))
     }
     #[cfg(target_os = "windows")]
     {
         use keymapper::test_util::key_injector::WindowsInjector;
         let injector = WindowsInjector::new()?;
-        return Ok(
-            injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>)
-        );
+        Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>))
     }
     #[cfg(not(any(
         target_os = "macos",
