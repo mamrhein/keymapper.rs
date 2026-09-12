@@ -48,14 +48,12 @@ use parking_lot::RwLock;
 // The drain wake post is only compiled into non-test builds (see
 // `queue_emission`); unit tests never queue an emission.
 #[cfg(not(test))]
-use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_APP};
+use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
 use windows::Win32::{
-    Foundation::{
-        GetLastError, HINSTANCE, LPARAM, LRESULT, WAIT_FAILED, WPARAM,
-    },
+    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::{
         LibraryLoader::GetModuleHandleW,
-        Threading::{GetCurrentThreadId, INFINITE},
+        Threading::GetCurrentThreadId,
     },
     UI::{
         Input::KeyboardAndMouse::{
@@ -64,10 +62,10 @@ use windows::Win32::{
             MapVirtualKeyW, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG,
-            MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
-            SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-            WM_KEYDOWN, WM_QUIT, WM_SYSKEYDOWN,
+            CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK,
+            KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN,
+            WM_SYSKEYDOWN,
         },
     },
 };
@@ -603,43 +601,30 @@ pub fn start_mapping(
 
     println!("Windows low-level hook listening (two-thread mode).");
 
-    // Run the message loop until WM_QUIT.  The low-level hook callback runs
-    // re-entrantly inside the blocked `MsgWaitForMultipleObjects` call and
-    // emits mapped keyboard output itself, so the only queueing emission is
-    // from standalone consumer events: the wake for the drain is the `WM_APP`
-    // message the raw input thread posts through `queue_emission` when it
-    // queues a consumer output.  The loop blocks in
-    // `MsgWaitForMultipleObjects` (which returns for any posted message),
-    // then drains the queue with the non-blocking `PeekMessageW` — a
-    // blocking `GetMessageW` here would consume the wake message and then
-    // block on the next one, starving the drain.  Messages are removed but
-    // neither translated nor dispatched: the hook callback already handled
-    // everything else.
+    // Run the message loop until WM_QUIT.  A `WH_KEYBOARD_LL` callback is
+    // only invoked while the installing thread pumps messages through the
+    // blocking `GetMessageW`; a non-blocking `PeekMessageW` drain (the
+    // previous approach) never triggered the callback, so every key passed
+    // through without being remapped.  The only queueing emission is from
+    // standalone consumer events: the raw input thread posts a `WM_APP` wake
+    // through `queue_emission`, which we intercept here to drain the pending
+    // consumer outputs.  All other messages — including the raw input
+    // window's `WM_INPUT`, which is owned by this thread — are translated and
+    // dispatched normally.
     unsafe {
+        let mut msg = MSG::default();
         loop {
-            let wait =
-                MsgWaitForMultipleObjects(None, false, INFINITE, QS_ALLINPUT);
-            if wait == WAIT_FAILED {
-                eprintln!(
-                    "Windows: MsgWaitForMultipleObjects failed: {:?}",
-                    GetLastError()
-                );
+            let got_message = GetMessageW(&mut msg, None, 0, 0);
+            // `GetMessageW` returns FALSE on WM_QUIT (and on error).
+            if !got_message.as_bool() {
                 break;
             }
-            let mut quit = false;
-            let mut msg = MSG::default();
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT {
-                    quit = true;
-                    break;
-                }
-                // Consumed without dispatch; the hook callback already
-                // handled it.
+            if msg.message == WM_APP {
+                drain_and_emit_emissions();
+                continue;
             }
-            drain_and_emit_emissions();
-            if quit {
-                break;
-            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
         UnhookWindowsHookEx(handle)?;
     }
