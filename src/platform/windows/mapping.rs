@@ -51,7 +51,7 @@ use parking_lot::RwLock;
 #[cfg(not(test))]
 use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
 use windows::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Foundation::{GetLastError, HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::{
         LibraryLoader::GetModuleHandleW,
         Threading::GetCurrentThreadId,
@@ -623,6 +623,15 @@ pub fn start_mapping(
             let got_message = GetMessageW(&mut msg, None, 0, 0);
             // `GetMessageW` returns FALSE on WM_QUIT (and on error).
             if !got_message.as_bool() {
+                // Distinguish WM_QUIT (0) from an error (-1): the loop exit
+                // ends the daemon, so a CI log must show why it happened.
+                if hook_log_enabled() {
+                    let last_error = GetLastError();
+                    eprintln!(
+                        "hook: message loop exited, got={}, last_error={}",
+                        got_message.0, last_error.0
+                    );
+                }
                 break;
             }
             if !logged_first_message && hook_log_enabled() {

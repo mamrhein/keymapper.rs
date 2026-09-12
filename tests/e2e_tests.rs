@@ -574,6 +574,10 @@ impl DaemonChild {
                     let _ = ready_tx.send(());
                 }
             }
+            // EOF or read error: the daemon process has exited.  Log it so a
+            // mid-test death is visible in the CI output — otherwise it is
+            // silent and surfaces only as "the hook never fired".
+            eprintln!("daemon: stdout closed (daemon exited)");
         });
 
         // Wait for the readiness line with a timeout.  Polling (rather than
@@ -597,6 +601,19 @@ impl DaemonChild {
         }
 
         DaemonChild { child: Some(child) }
+    }
+
+    /// Panic with the exit status if the daemon has already exited.
+    ///
+    /// A daemon that dies mid-test (e.g. its message loop exits right after
+    /// hook install) is otherwise invisible: the stdout drain thread sees EOF
+    /// silently and `stop`'s kill is a no-op, so the failure surfaces only as
+    /// "the hook never fired".
+    fn assert_alive(&mut self, context: &str) {
+        let Some(child) = &mut self.child else { return };
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!("daemon exited before {context}: status {status}");
+        }
     }
 
     /// Stop the daemon: SIGTERM (unix) with a grace period, then SIGKILL.
@@ -1106,6 +1123,10 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     // 6. Start the monitor (piped stdout + reader thread).
     let mut monitor = Monitor::spawn();
 
+    // The sleep above gave the daemon time to finish `start_mapping`; if its
+    // message loop exited early, the process is already gone.
+    daemon.assert_alive("the monitor started");
+
     // 7. Build the initial key set and spawn the injector thread.
     let initial_sequences =
         build_test_sequences(&initial_content, &active_app);
@@ -1172,6 +1193,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
             i + 1,
             sequences.expected.len()
         );
+        daemon.assert_alive(&format!("reading the phase {} round", i + 1));
         let actual =
             read_round(&monitor.rx, &mut reader, Duration::from_secs(15));
         assert_events_match(
