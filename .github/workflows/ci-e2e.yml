@@ -11,6 +11,9 @@
 name: ci-e2e
 
 on:
+  workflow_dispatch:
+    branches:
+      - main
   push:
     branches:
       - main
