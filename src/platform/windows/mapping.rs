@@ -31,13 +31,14 @@
 //!
 //! Thread layout:
 //!
-//! 1. **Hook thread** — \`WH_KEYBOARD_LL\` hook + message loop
-//!    (\`MsgWaitForMultipleObjects\` + \`PeekMessageW\`).  Decides and emits
-//!    in-callback, and drains the emission queue (fed only by standalone
-//!    consumer events) after each wait.
-//! 2. **Raw input thread** — Message-only window + \`GetMessageW\` loop for
-//!    \`WM_INPUT\`.  Maintains the device-identification buffer and processes
-//!    standalone Consumer Control events, which never reach the hook.
+//! 1. **Hook thread** — Installs the \`WH_KEYBOARD_LL\` hook and runs a
+//!    blocking \`GetMessageW\` loop.  The loop dispatches the raw input
+//!    window's \`WM_INPUT\` (the window is owned by this thread) and drains
+//!    the emission queue on a \`WM_APP\` wake (fed only by standalone
+//!    consumer events).  Decides and emits in-callback.
+//! 2. **Raw worker thread** — Consumes the raw input channel, maintains the
+//!    device-identification buffer, and processes standalone Consumer Control
+//!    events, which never reach the hook.
 
 use std::sync::{
     Arc,
@@ -550,7 +551,7 @@ fn match_usage_with_retry(usage: HidUsage) -> Option<usize> {
 
 /// Starts the keyboard mapping engine.
 ///
-/// Initialises the raw input loop, spawns the raw input thread, installs
+/// Initialises the raw input loop, spawns the raw worker thread, installs
 /// the `WH_KEYBOARD_LL` hook, and runs the message loop.  Blocks the
 /// calling thread until the message loop exits (i.e. on `WM_QUIT`).
 ///
@@ -564,21 +565,21 @@ pub fn start_mapping(
     lookup: Arc<RwLock<dyn Lookup>>,
     #[allow(unused_variables)] keyboard_filter: Option<Vec<KeyboardSpecifier>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Start the raw input loop (spawns its own thread).
+    // Start the raw input loop (creates the message-only window on this
+    // thread, which owns its `WM_INPUT` messages).
     let (_raw_loop, raw_rx) = start_raw_input_loop()?;
 
     // Keep the raw input loop handle alive for the process lifetime.  The
     // struct only holds the HWND and has no Drop logic, so leaking is safe.
-    // The background thread is already detached inside start_raw_input_loop.
     Box::leak(Box::new(_raw_loop));
 
-    // Record this thread's id so the raw input thread can post the drain
-    // wake message to the message loop (done before the raw worker starts,
-    // so no emission can be queued before the id is recorded).
+    // Record this thread's id so the raw worker can post the drain wake
+    // message to the message loop (done before the raw worker starts, so no
+    // emission can be queued before the id is recorded).
     set_main_thread_id(unsafe { GetCurrentThreadId() });
 
     // Park the engine where the hook proc can find it, then spawn the raw
-    // input thread (which consumes the raw input channel).
+    // worker (which consumes the raw input channel).
     set_engine(MappingEngine::new(Arc::clone(&lookup)));
     spawn_raw_worker(lookup, raw_rx);
 
@@ -601,23 +602,32 @@ pub fn start_mapping(
 
     println!("Windows low-level hook listening (two-thread mode).");
 
+    if hook_log_enabled() {
+        eprintln!("hook: installed, pumping on main thread");
+    }
+
     // Run the message loop until WM_QUIT.  A `WH_KEYBOARD_LL` callback is
     // only invoked while the installing thread pumps messages through the
     // blocking `GetMessageW`; a non-blocking `PeekMessageW` drain (the
     // previous approach) never triggered the callback, so every key passed
     // through without being remapped.  The only queueing emission is from
-    // standalone consumer events: the raw input thread posts a `WM_APP` wake
+    // standalone consumer events: the raw worker posts a `WM_APP` wake
     // through `queue_emission`, which we intercept here to drain the pending
     // consumer outputs.  All other messages — including the raw input
     // window's `WM_INPUT`, which is owned by this thread — are translated and
     // dispatched normally.
     unsafe {
         let mut msg = MSG::default();
+        let mut logged_first_message = false;
         loop {
             let got_message = GetMessageW(&mut msg, None, 0, 0);
             // `GetMessageW` returns FALSE on WM_QUIT (and on error).
             if !got_message.as_bool() {
                 break;
+            }
+            if !logged_first_message && hook_log_enabled() {
+                logged_first_message = true;
+                eprintln!("hook: first message 0x{:08x}", msg.message);
             }
             if msg.message == WM_APP {
                 drain_and_emit_emissions();

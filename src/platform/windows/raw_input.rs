@@ -22,7 +22,10 @@
 //! Architecture:
 //! - A message-only window receives `WM_INPUT` via `RegisterRawInputDevices`
 //!   with `RIDEV_INPUTSINK` for both keyboard and Consumer Control devices.
-//! - A dedicated thread runs the `GetMessageW` pump for this window.
+//! - The window is created on the hook thread, which dispatches `WM_INPUT` in
+//!   its own message loop.  A message-only window's messages are delivered to
+//!   the thread that created it, so a separate pump thread could never receive
+//!   them.
 //! - Extracted `RawInputEvent`s are sent through a `crossbeam-channel`.
 
 use std::ptr;
@@ -44,9 +47,8 @@ use windows::{
             },
             WindowsAndMessaging::{
                 CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW,
-                DefWindowProcW, DispatchMessageW, GetMessageW, HCURSOR, HICON,
-                HWND_MESSAGE, MSG, PostMessageW, PostQuitMessage,
-                RegisterClassExW, TranslateMessage, WINDOW_EX_STYLE,
+                DefWindowProcW, HCURSOR, HICON, HWND_MESSAGE, PostMessageW,
+                PostQuitMessage, RegisterClassExW, WINDOW_EX_STYLE,
                 WINDOW_STYLE, WM_CREATE, WM_DESTROY, WM_INPUT, WM_KEYUP,
                 WM_SYSKEYUP, WM_USER, WNDCLASSEXW,
             },
@@ -496,11 +498,14 @@ fn register_keyboards(hwnd: HWND) -> Result<(), Box<dyn std::error::Error>> {
 // Public API: start the raw input message loop
 // ---------------------------------------------------------------------------
 
-/// Starts the Raw Input message loop in a background thread.
+/// Sets up Raw Input capture on the calling (hook) thread.
 ///
-/// Creates a message-only window, registers all keyboards for Raw Input,
-/// and spawns a dedicated thread that pumps `WM_INPUT` messages.  Extracted
-/// events are sent through the returned channel receiver.
+/// Creates a message-only window, registers all keyboards for Raw Input, and
+/// returns the event channel.  The window is created on the calling thread so
+/// that its `WM_INPUT` messages are delivered to that thread's message queue;
+/// the hook thread's message loop dispatches them (a separate pump thread
+/// could never receive a window owned by another thread).  Extracted events
+/// are sent through the returned channel receiver.
 ///
 /// Returns a tuple of:
 /// - `RawInputLoop`: holds the `HWND` and must be kept alive while receiving
@@ -519,50 +524,14 @@ pub fn start_raw_input_loop() -> Result<
     // Store the sender so the window procedure can access it.
     set_raw_input_tx(tx);
 
-    // `HWND` is not `Send` in the `windows` crate, but it is an opaque OS
-    // handle with no Rust-level thread affinity.  We pass it as a raw usize
-    // and reconstruct it inside the spawned thread.
-    let hwnd_ptr = hwnd.0 as usize;
-    let handle = std::thread::spawn(move || {
-        let hwnd = HWND(hwnd_ptr as *mut std::ffi::c_void);
-        run_message_loop(hwnd);
-    });
-
-    // We don't join the handle — the thread lives for the lifetime of the
-    // application.  Drop the JoinHandle to detach.
-    std::mem::forget(handle);
-
     Ok((RawInputLoop { hwnd }, rx))
 }
 
-/// Runs the Windows message pump for the message-only window.  Blocks until
-/// a `WM_QUIT` or `WM_STOP` message is received.
+/// Stops the message loop by posting the `WM_STOP` message to the raw input
+/// window.
 ///
-/// Uses `GetMessageW` with the specific `HWND` so that only messages destined
-/// for this window are processed.  This avoids competing with the main
-/// thread's message loop, which handles the `WH_KEYBOARD_LL` hook callbacks.
-fn run_message_loop(hwnd: HWND) {
-    let mut msg = MSG::default();
-
-    loop {
-        let got_message = unsafe { GetMessageW(&mut msg, Some(hwnd), 0, 0) };
-
-        // `GetMessageW` returns FALSE (BOOL(0)) on WM_QUIT, or FALSE on error.
-        if !got_message.as_bool() {
-            break;
-        }
-
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-}
-
-/// Stops the raw input message loop by posting the `WM_STOP` message.
-///
-/// The background thread will exit its `GetMessageW` loop after processing
-/// this message.
+/// The window procedure turns `WM_STOP` into a `PostQuitMessage`, which ends
+/// the hook thread's message loop.
 #[allow(dead_code)]
 pub fn stop_raw_input_loop(hwnd: HWND) {
     unsafe {
