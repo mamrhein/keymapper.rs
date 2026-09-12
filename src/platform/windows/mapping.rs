@@ -51,7 +51,7 @@ use parking_lot::RwLock;
 #[cfg(not(test))]
 use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
 use windows::Win32::{
-    Foundation::{GetLastError, HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
     System::{
         LibraryLoader::GetModuleHandleW,
         Threading::GetCurrentThreadId,
@@ -375,15 +375,6 @@ fn drain_and_emit_emissions() {
 // Low-level keyboard hook procedure
 // ---------------------------------------------------------------------------
 
-/// Whether per-event hook diagnostics are enabled (set `KEYMAPPER_HOOK_LOG`
-/// to any value).  Read once and cached so the hot path never calls
-/// `getenv`.  Used by the e2e harness to confirm the hook fires and to see
-/// the decision made for each key-down.
-fn hook_log_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("KEYMAPPER_HOOK_LOG").is_some())
-}
-
 extern "system" fn low_level_keyboard_proc(
     code: i32,
     w_param: WPARAM,
@@ -395,7 +386,6 @@ extern "system" fn low_level_keyboard_proc(
 
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
-    let vk = vk_code.0;
 
     // Every key the daemon injects through `SendInput` is stamped with
     // [`INJECTED_TAG`].  Let those flow on without re-mapping them, so the
@@ -415,9 +405,6 @@ extern "system" fn low_level_keyboard_proc(
     // (e.g. Print Screen); such keys always pass through.
     let Some(usage) = Key::from_native(vk_code.0).map(Key::to_hid_usage)
     else {
-        if !is_key_up && hook_log_enabled() {
-            eprintln!("hook: down vk={vk:#04x} -> no usage (pass)");
-        }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
@@ -441,12 +428,6 @@ extern "system" fn low_level_keyboard_proc(
     let Some(engine) = engine() else {
         // The engine is not up (or is shutting down); never block the
         // input chain on that.
-        if !is_key_up && hook_log_enabled() {
-            eprintln!(
-                "hook: down vk={vk:#04x} usage={} -> no engine (pass)",
-                usage.as_str()
-            );
-        }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
@@ -458,28 +439,6 @@ extern "system" fn low_level_keyboard_proc(
         device_path.as_deref(),
         true,
     );
-
-    // Diagnostic (enabled with `KEYMAPPER_HOOK_LOG`): log each key-down and
-    // its decision so a CI failure shows whether the hook fires, what usage
-    // it computes, and whether the lookup finds a rule.  Key-ups are omitted
-    // to keep the log readable.
-    if !is_key_up && hook_log_enabled() {
-        let summary = match &decision {
-            Decision::Pass => "pass".to_string(),
-            Decision::Emit { outputs, .. } => {
-                format!("emit({})", outputs.len())
-            }
-            Decision::Swallow { .. } => "swallow".to_string(),
-            Decision::ConsumedRelease => "consumed-release".to_string(),
-        };
-        eprintln!(
-            "hook: down vk={vk:#04x} scan={:02x} ext={} usage={} -> {}",
-            kbd_struct.scanCode,
-            kbd_struct.flags.0 & 1 != 0,
-            usage.as_str(),
-            summary,
-        );
-    }
 
     // A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches
     // other hooks and the target window (the capture-mode e2e tests capture
@@ -602,10 +561,6 @@ pub fn start_mapping(
 
     println!("Windows low-level hook listening (two-thread mode).");
 
-    if hook_log_enabled() {
-        eprintln!("hook: installed, pumping on main thread");
-    }
-
     // Run the message loop until WM_QUIT.  A `WH_KEYBOARD_LL` callback is
     // only invoked while the installing thread pumps messages through the
     // blocking `GetMessageW`; a non-blocking `PeekMessageW` drain (the
@@ -618,25 +573,11 @@ pub fn start_mapping(
     // dispatched normally.
     unsafe {
         let mut msg = MSG::default();
-        let mut logged_first_message = false;
         loop {
             let got_message = GetMessageW(&mut msg, None, 0, 0);
             // `GetMessageW` returns FALSE on WM_QUIT (and on error).
             if !got_message.as_bool() {
-                // Distinguish WM_QUIT (0) from an error (-1): the loop exit
-                // ends the daemon, so a CI log must show why it happened.
-                if hook_log_enabled() {
-                    let last_error = GetLastError();
-                    eprintln!(
-                        "hook: message loop exited, got={}, last_error={}",
-                        got_message.0, last_error.0
-                    );
-                }
                 break;
-            }
-            if !logged_first_message && hook_log_enabled() {
-                logged_first_message = true;
-                eprintln!("hook: first message 0x{:08x}", msg.message);
             }
             if msg.message == WM_APP {
                 drain_and_emit_emissions();

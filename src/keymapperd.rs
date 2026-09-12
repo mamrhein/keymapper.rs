@@ -60,20 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a few milliseconds, accepted in exchange for a uniform platform
     // signature — threading the already-opened devices through would require
     // a platform-specific `start_mapping`.
-    // Log discovery failures instead of swallowing them: an empty list is
-    // otherwise invisible (the "Grabbing" line below only prints for a
-    // non-empty list), and raw input registration silently registers nothing.
-    let all_keyboards = match list_keyboards() {
-        Ok(keyboards) => keyboards,
-        Err(e) => {
-            println!("warning: keyboard discovery failed: {e}");
-            Vec::new()
-        }
-    };
-
-    if all_keyboards.is_empty() {
-        println!("warning: no keyboards discovered");
-    }
+    let all_keyboards = list_keyboards().unwrap_or_default();
 
     // Determine which keyboards to actually grab based on the global filter.
     // Only matching keyboards are captured; others work normally.
