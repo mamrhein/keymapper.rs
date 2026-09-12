@@ -1107,27 +1107,47 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     injector.setup().expect("failed to set up injector");
     wait_for_injector_device(&*injector);
 
-    // 5. Start the daemon (waits for its readiness line).
+    // 5. Start the monitor and daemon in platform-specific order.
+    //
+    // Windows: the monitor must install its hook before the daemon does.
+    // Low-level hooks are called in reverse installation order (most recent
+    // first), and the monitor swallows every key it sees; if its hook were
+    // installed after the daemon's, it would sit in front of the daemon in
+    // the chain and swallow every key before the daemon's hook ever runs,
+    // silently disabling all remapping.  Starting the monitor first puts the
+    // daemon's hook in front: it remaps (and swallows) the original key, and
+    // its tagged emissions pass through its own hook to the monitor.
+    //
+    // Linux: the daemon must start first — the monitor grabs the daemon's
+    // uinput device, which only exists once the daemon has started.
     let config_dir = keymapper::common::config_path::default_config_path()
         .expect("no default config path")
         .parent()
         .unwrap()
         .to_path_buf();
-    let mut daemon = DaemonChild::spawn(&config_dir);
+    #[cfg(windows)]
+    let (mut daemon, mut monitor) = {
+        let monitor = Monitor::spawn();
+        // Let the monitor install its hook before the daemon starts, so the
+        // installation order (and thus the chain order) is deterministic.
+        thread::sleep(Duration::from_millis(500));
+        let daemon = DaemonChild::spawn(&config_dir);
+        // Give the daemon a moment to finish `start_mapping` (install its
+        // hook) before injection starts.
+        thread::sleep(Duration::from_millis(500));
+        (daemon, monitor)
+    };
+    #[cfg(not(windows))]
+    let (mut daemon, mut monitor) = {
+        let daemon = DaemonChild::spawn(&config_dir);
+        let monitor = Monitor::spawn();
+        (daemon, monitor)
+    };
 
-    // Give the daemon a moment to finish `start_mapping` (install its hook /
-    // create its output device) before the monitor starts, so on Windows the
-    // daemon's hook is installed first.
-    thread::sleep(Duration::from_millis(500));
+    // If the daemon's message loop exited early, the process is already gone.
+    daemon.assert_alive("injection started");
 
-    // 6. Start the monitor (piped stdout + reader thread).
-    let mut monitor = Monitor::spawn();
-
-    // The sleep above gave the daemon time to finish `start_mapping`; if its
-    // message loop exited early, the process is already gone.
-    daemon.assert_alive("the monitor started");
-
-    // 7. Build the initial key set and spawn the injector thread.
+    // 6. Build the initial key set and spawn the injector thread.
     let initial_sequences =
         build_test_sequences(&initial_content, &active_app);
     eprintln!(
@@ -1143,7 +1163,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     let injector_handle = spawn_injector(injector, state.clone(), round_tx);
     let mut reader = RoundReader::new();
 
-    // 8. For each phase: wait for a round built from the phase's key set,
+    // 7. For each phase: wait for a round built from the phase's key set,
     //    discard any stale rounds captured before that announcement, read
     //    exactly one round, and compare.  The injected sequence is constant
     //    per phase, so the first complete round is the one to compare —
@@ -1203,7 +1223,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
         );
     }
 
-    // 9. Teardown: stop the injector, monitor, and daemon; restore the config
+    // 8. Teardown: stop the injector, monitor, and daemon; restore the config
     //    (via ConfigGuard's Drop) and kill the test window (via its Drop).
     state.stop.store(true, Ordering::Relaxed);
     let _ = injector_handle.join();
