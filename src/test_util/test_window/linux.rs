@@ -59,7 +59,7 @@ pub fn run() {
         320,
         200,
         0,
-        WindowClass::InputOutput,
+        WindowClass::INPUT_OUTPUT,
         visual,
         &CreateWindowAux::default(),
     ) {

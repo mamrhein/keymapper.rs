@@ -23,7 +23,9 @@
 //! [`in_ci`]).  The original config is backed up and restored on teardown.
 //!
 //! The test flow is:
-//! 1. Acquire the cross-process e2e lock and kill any stale daemons.
+//! 1. Acquire the cross-process e2e lock, kill any stale daemons, and install
+//!    the test-window `.desktop` fixture (Linux) — before any active-app
+//!    query, because the `.desktop` cache is built lazily on first use.
 //! 2. Focus the test window and query the live active-app name.
 //! 3. Plant the fixture config (substituting the app-name placeholder).
 //! 4. Create and set up the key injector (its virtual device must exist before
@@ -652,10 +654,11 @@ impl Drop for TestWindowChild {
     }
 }
 
-/// Install the test-window `.desktop` fixture so the daemon's app-id
-/// resolution maps the helper's executable name to a known app id (Linux
-/// only).  Must run before the daemon's first active-app query, because the
-/// daemon's `.desktop` cache is built lazily on first use.
+/// Install the test-window `.desktop` fixture so app-id resolution maps the
+/// helper's executable name to a known app id (Linux only).  Must run before
+/// any active-app query in this process (and before the daemon starts),
+/// because the `.desktop` cache is built lazily on first use and never
+/// rebuilt.
 #[cfg(target_os = "linux")]
 fn install_desktop_fixture() {
     let src =
@@ -1065,17 +1068,21 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     let _lock = E2eLock::acquire();
     kill_orphaned_daemons();
 
-    // 1. Focus the test window and query the live active-app name.
+    // 1. Install the app-id fixture (Linux) before any active-app query: the
+    //    .desktop cache is built lazily on first use in this process as well,
+    //    so the fixture must be in place before step 2 runs.
+    install_desktop_fixture();
+
+    // 2. Focus the test window and query the live active-app name.
     let _window = TestWindowChild::spawn();
     let active_app = query_active_app();
     eprintln!("active app: {active_app}");
 
-    // 2. Plant the initial config and install the app-id fixture (Linux).
+    // 3. Plant the initial config.
     let initial_content = phase_content(phases[0], &active_app);
     let config = ConfigGuard::plant(&initial_content);
-    install_desktop_fixture();
 
-    // 3. Create and set up the injector (its virtual device must exist before
+    // 4. Create and set up the injector (its virtual device must exist before
     //    the daemon starts so the daemon grabs it at startup).
     let mut injector = create_injector()
         .expect("failed to create injector")
@@ -1083,7 +1090,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     injector.setup().expect("failed to set up injector");
     wait_for_injector_device(&*injector);
 
-    // 4. Start the daemon (waits for its readiness line).
+    // 5. Start the daemon (waits for its readiness line).
     let config_dir = keymapper::common::config_path::default_config_path()
         .expect("no default config path")
         .parent()
@@ -1096,10 +1103,10 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     // daemon's hook is installed first.
     thread::sleep(Duration::from_millis(500));
 
-    // 5. Start the monitor (piped stdout + reader thread).
+    // 6. Start the monitor (piped stdout + reader thread).
     let mut monitor = Monitor::spawn();
 
-    // 6. Build the initial key set and spawn the injector thread.
+    // 7. Build the initial key set and spawn the injector thread.
     let initial_sequences =
         build_test_sequences(&initial_content, &active_app);
     eprintln!(
@@ -1115,7 +1122,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     let injector_handle = spawn_injector(injector, state.clone(), round_tx);
     let mut reader = RoundReader::new();
 
-    // 7. For each phase: wait for a round built from the phase's key set,
+    // 8. For each phase: wait for a round built from the phase's key set,
     //    discard any stale rounds captured before that announcement, read
     //    exactly one round, and compare.  The injected sequence is constant
     //    per phase, so the first complete round is the one to compare —
@@ -1174,7 +1181,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
         );
     }
 
-    // 8. Teardown: stop the injector, monitor, and daemon; restore the config
+    // 9. Teardown: stop the injector, monitor, and daemon; restore the config
     //    (via ConfigGuard's Drop) and kill the test window (via its Drop).
     state.stop.store(true, Ordering::Relaxed);
     let _ = injector_handle.join();

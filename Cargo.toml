@@ -33,12 +33,12 @@ name = "keymapper_testwindow"
 path = "src/keymapper_testwindow.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"]}
-dirs = "6" # platform config directory resolution
+clap = { version = "4", features = ["derive"] }
+dirs = "6"                                         # platform config directory resolution
 fs-err = "3"
-getrandom = "0.4" # CSPRNG for the PID-file token
+getrandom = "0.4"                                  # CSPRNG for the PID-file token
 indexmap = { version = "2", features = ["serde"] }
-notify = "8" # cross-platform file watching
+notify = "8"                                       # cross-platform file watching
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
@@ -51,7 +51,9 @@ signal-hook = "0.4"
 
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
-cosmic-protocols = { version = "0.2", default-features = false, features = ["client"] } # COSMIC active-window query
+cosmic-protocols = { version = "0.2", default-features = false, features = [
+    "client",
+] } # COSMIC active-window query
 evdev = "0.13"
 nix = { version = "0.31.3", features = ["event"] }
 sysinfo = "0.39" # process enumeration for `keymapper appnames`
@@ -63,9 +65,23 @@ zbus = { version = "5", features = ["blocking"] }
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSWindow", "NSWorkspace"] }
-objc2-core-foundation = { version = "0.3", features = ["CFRunLoop", "CFString", "CFNumber", "CFDictionary", "CFMachPort"] }
-objc2-core-graphics = { version = "0.3", features = ["CGWindow", "CGEvent", "CGEventTypes"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSWindow",
+    "NSWorkspace",
+] }
+objc2-core-foundation = { version = "0.3", features = [
+    "CFRunLoop",
+    "CFString",
+    "CFNumber",
+    "CFDictionary",
+    "CFMachPort",
+] }
+objc2-core-graphics = { version = "0.3", features = [
+    "CGWindow",
+    "CGEvent",
+    "CGEventTypes",
+] }
 objc2-foundation = "0.3"
 
 # Windows-specific dependencies
