@@ -26,7 +26,7 @@
 //! 1. Acquire the cross-process e2e lock, kill any stale daemons, and install
 //!    the test-window `.desktop` fixture (Linux) — before any active-app
 //!    query, because the `.desktop` cache is built lazily on first use.
-//! 2. Focus the test window and query the live active-app name.
+//! 2. Focus the test window and wait until it is the active app.
 //! 3. Plant the fixture config (substituting the app-name placeholder).
 //! 4. Create and set up the key injector (its virtual device must exist before
 //!    the daemon starts so the daemon grabs it at startup).
@@ -672,17 +672,48 @@ fn install_desktop_fixture() {
 #[cfg(not(target_os = "linux"))]
 fn install_desktop_fixture() {}
 
-/// Query the live active-app name (the focused test window's resolved
-/// identity), retrying briefly to let focus settle.
+/// The app name the focused test window resolves to on this platform.
+///
+/// Windows resolves it to the helper's executable file name, Linux to the
+/// `.desktop` application id of the installed fixture (see
+/// [`install_desktop_fixture`]), and macOS to the CoreGraphics window owner
+/// name (the helper's process name).
+fn expected_test_window_app() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "keymapper_testwindow.exe"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "keymapper.testwindow"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "keymapper_testwindow"
+    }
+}
+
+/// Wait until the focused test window is the active app and return its
+/// resolved name.
+///
+/// The helper process needs a moment to start, create its window, and take
+/// the foreground, so poll until the active app is the test window itself.
+/// Accepting any other name (e.g. the terminal that launched the test) would
+/// plant a config scoped to the wrong app and fail confusingly downstream.
 fn query_active_app() -> String {
-    for _ in 0..10 {
-        let name = app_identity::get_active_app_name();
-        if !name.is_empty() && name != "unknown" {
-            return name;
+    let expected = expected_test_window_app();
+    let mut last = String::new();
+    for _ in 0..50 {
+        last = app_identity::get_active_app_name();
+        if last == expected {
+            return last;
         }
         thread::sleep(Duration::from_millis(300));
     }
-    panic!("could not resolve the test window's active app name");
+    panic!(
+        "the test window did not become the active app (expected {expected}, \
+         last observed {last})"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1070,7 +1101,8 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     //    so the fixture must be in place before step 2 runs.
     install_desktop_fixture();
 
-    // 2. Focus the test window and query the live active-app name.
+    // 2. Focus the test window and wait until it is the active app, then
+    //    capture its resolved name.
     let _window = TestWindowChild::spawn();
     let active_app = query_active_app();
     eprintln!("active app: {active_app}");
