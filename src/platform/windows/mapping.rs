@@ -185,13 +185,43 @@ fn modifier_bit_to_vk(bit: u8) -> Option<VIRTUAL_KEY> {
     Some(VIRTUAL_KEY(key.as_native()))
 }
 
-/// The hardware scan code and extended-key flag for *vk*, as reported by
-/// `MapVirtualKeyW` (whose high scan bit marks extended keys).  A zero scan
-/// code means the VK has no hardware scan code (e.g. some multimedia keys);
-/// such events are emitted with `wScan: 0` as before.
+/// Virtual-key codes that are extended keys on a standard 104/105-key
+/// keyboard.  `MapVirtualKeyW` does not reliably set the high scan bit for
+/// these (it omits it on at least some Windows versions), so the extended
+/// flag is derived from this list instead.
+const EXTENDED_VKS: &[u16] = &[
+    0x21, // VK_PRIOR (Page Up)
+    0x22, // VK_NEXT (Page Down)
+    0x23, // VK_END
+    0x24, // VK_HOME
+    0x25, // VK_LEFT
+    0x26, // VK_UP
+    0x27, // VK_RIGHT
+    0x28, // VK_DOWN
+    0x2C, // VK_SNAPSHOT (Print Screen)
+    0x2D, // VK_INSERT
+    0x2E, // VK_DELETE
+    0x5B, // VK_LWIN
+    0x5C, // VK_RWIN
+    0x5D, // VK_APPS (context menu)
+    0x6F, // VK_DIVIDE (numpad /)
+    0x90, // VK_NUMLOCK
+    0xA1, // VK_RSHIFT
+    0xA3, // VK_RCONTROL
+    0xA5, // VK_RMENU (Right Alt / AltGr)
+    0xD3, // numpad Enter (hook-reported VK code)
+];
+
+/// The hardware scan code and extended-key flag for *vk*.  The scan code
+/// comes from `MapVirtualKeyW`; the extended flag is derived from
+/// [`EXTENDED_VKS`] because `MapVirtualKeyW` does not reliably set the high
+/// scan bit for extended keys.  A zero scan code means the VK has no
+/// hardware scan code (e.g. some multimedia keys); such events are emitted
+/// with `wScan: 0` as before.
 fn scan_code_and_extended(vk: VIRTUAL_KEY) -> (u16, bool) {
     let scan = unsafe { MapVirtualKeyW(vk.0 as u32, MAPVK_VK_TO_VSC) };
-    ((scan & 0xFF) as u16, scan & 0x100 != 0)
+    let extended = scan & 0x100 != 0 || EXTENDED_VKS.contains(&vk.0);
+    ((scan & 0xFF) as u16, extended)
 }
 
 fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
@@ -602,9 +632,8 @@ mod tests {
 
     #[test]
     fn scan_code_and_extended_marks_extended_keys() {
-        // Delete and the right-hand modifiers are extended keys; their scan
-        // codes carry the high bit regardless of keyboard layout.
-        for vk in [0x2D, 0xA3, 0xA5] {
+        // Insert, Delete and the right-hand modifiers are extended keys.
+        for vk in [0x2D, 0x2E, 0xA3, 0xA5] {
             let (_, extended) = scan_code_and_extended(VIRTUAL_KEY(vk));
             assert!(extended, "VK {vk:#04x} should be extended");
         }
