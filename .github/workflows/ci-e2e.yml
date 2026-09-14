@@ -50,39 +50,36 @@ jobs:
             libudev-dev \
             libxkbcommon-dev \
             libxcb1-dev \
-            xvfb
+            kbd
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
       - name: Build daemon and e2e test binary
-        # The e2e harness spawns keymapperd, keymapper_monitor, and
-        # keymapper_testwindow as subprocesses and resolves each from
-        # target/debug/ relative to the test binary's location.  The daemon is
-        # a plain production build; the harness drives it and observes its
-        # output through the monitor.
+        # The e2e harness spawns keymapperd and keymapper_reader as
+        # subprocesses and resolves each from target/debug/ relative to the
+        # test binary's location.  The daemon is a plain production build; the
+        # harness drives it and observes its output through the reader, an
+        # ordinary raw-mode stdin app with keyboard focus.
         run: |
-          cargo build --bin keymapperd --bin keymapper_monitor --bin keymapper_testwindow
+          cargo build --bin keymapperd --bin keymapper_reader
           cargo nextest run --test e2e_tests --no-run
 
       - name: Run e2e tests as root (for /dev/uinput access)
         # Running as root is required because the sandbox needs write access
-        # to /dev/uinput.  GitHub Actions runners allow this with sudo.  A
-        # virtual X display (Xvfb) is started for the test-window helper, which
-        # needs a display to focus a window (no window manager is required).
+        # to /dev/uinput.  GitHub Actions runners allow this with sudo.  The
+        # console keymap is pinned to US so the reader's recorded bytes are
+        # deterministic; the harness itself stops getty@tty1 and switches to
+        # VT1 so the reader receives the daemon's uinput output.
         run: |
           # Load the uinput module — it may already be loaded but this is
           # idempotent and harmless.
           sudo modprobe uinput || true
-          # Start a virtual X display for the test-window helper.
-          sudo Xvfb :99 -screen 0 1024x768x24 -nolisten tcp &
-          sleep 2
+          # Pin the console keymap to US for deterministic byte comparison.
+          sudo loadkeys us
           # The ubuntu-latest runner has /dev/uinput with root:root 0660.
           # Running tests as root grants the required write access.
-          sudo -E DISPLAY=:99 PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
-          status=$?
-          sudo pkill -f "Xvfb :99" || true
-          exit $status
+          sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
 
       - name: Run CLI integration tests
         # The CLI integration tests need no input device, but they do need to
@@ -132,17 +129,17 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Build daemon and e2e test binary
-        # The e2e harness spawns keymapperd, keymapper_monitor, and
-        # keymapper_testwindow as subprocesses and resolves each from
-        # target/debug/ relative to the test binary's location.
+        # The e2e harness spawns keymapperd and keymapper_reader as
+        # subprocesses and resolves each from target/debug/ relative to the
+        # test binary's location.
         run: |
-          cargo build --bin keymapperd --bin keymapper_monitor --bin keymapper_testwindow
+          cargo build --bin keymapperd --bin keymapper_reader
           cargo nextest run --test e2e_tests --no-run
 
       - name: Run e2e tests
         # SendInput and WH_KEYBOARD_LL work at session level; no elevation
-        # is required.  The runner has a desktop session, so the test-window
-        # helper can focus a window.
+        # is required.  The runner has a desktop session, so the harness can
+        # bring the reader's console window to the foreground.
         run: cargo nextest run --no-capture --test e2e_tests
 
       - name: Run CLI integration tests

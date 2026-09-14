@@ -29,9 +29,11 @@ fi
 
 # Build the binaries the harness spawns as subprocesses, resolving each
 # relative to its own location in target/debug/.  The daemon is a plain
-# production build; the harness drives it, focuses a window with the test
-# helper, and observes its output through the monitor.
-cargo build --bin keymapperd --bin keymapper_monitor --bin keymapper_testwindow
+# production build; the harness drives it and observes its output through
+# the reader, an ordinary raw-mode stdin app that the harness starts in a
+# Terminal.app window (which must be reachable via osascript, i.e. the
+# script should run in a GUI session).
+cargo build --bin keymapperd --bin keymapper_reader
 
 # Build and sign the test binary without running it.
 cargo nextest run --test e2e_tests --no-run
