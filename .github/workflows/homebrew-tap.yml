@@ -33,6 +33,19 @@ jobs:
     runs-on: macos-latest
 
     steps:
+      # Fail early with an actionable message if the secret is missing; a
+      # missing secret would otherwise surface as "Input required and not
+      # supplied: token" from actions/checkout.
+      - name: Verify tap token is configured
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "$TOKEN" ]]; then
+            echo "Error: the HOMEBREW_TAP_TOKEN secret is not set." >&2
+            echo "Create a token with write access to ${{ env.HOMEBREW_TAP_OWNER }}/${{ env.HOMEBREW_TAP_REPO }} and add it as a repository secret." >&2
+            exit 1
+          fi
+
       - name: Checkout formula repository
         uses: actions/checkout@v5
         with:
