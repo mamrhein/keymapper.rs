@@ -3,54 +3,86 @@
 # Builds the Rust crate from source.  On macOS, remapped keys are emitted
 # through the Karabiner DriverKit VirtualHIDDevice driver (installed via the
 # karabiner-driverkit-virtualhiddevice cask dependency); the formula then
-# activates the driver and registers its daemon LaunchDaemon.
+# registers the virtkbdd LaunchDaemon (root, emits mapped keys) and the
+# keymapperd LaunchAgent (user domain, captures keyboard events), activates
+# the DriverKit extension, and registers the Karabiner daemon LaunchDaemon.
+# On Linux, it registers the keymapperd systemd user service.  The services
+# are managed by launchd / systemctl --user and controlled with
+# `keymapper daemon status|start|stop` (not by `brew services`).
 #
-# Install locally (not yet in a tap):
-#   brew install --build-from-source path/to/brew/keymapper.rb
+# Install:
+#   brew install mamrhein/keymapper/keymapper
 
 class Keymapper < Formula
-    desc "Cross-platform key-remapping daemon"
-    homepage "https://github.com/mamrhein/keymapper.rs"
+  desc "Cross-platform key-remapping daemon"
+  homepage "https://github.com/mamrhein/keymapper.rs"
 
-    # Update url and version for each release.
-    url "https://github.com/mamrhein/keymapper.rs/archive/refs/tags/v0.1.0.tar.gz"
-    version "0.1.0"
+  # Update version for each release (the url interpolates it).
+  version "0.2.0-alpha.4"
+  url "https://github.com/mamrhein/keymapper.rs/archive/refs/tags/v#{version}.tar.gz"
 
-    license "SEE LICENSE IN LICENSE.TXT"
+  license "BSD-3-Clause"
 
-    depends_on "rust" => :build
+  depends_on "rust" => :build
+
+  on_macos do
+    # The driver through which virtkbdd emits remapped keys.  The cask
+    # installs the package only; activation happens in install below.
+    depends_on "mamrhein/keymapper/karabiner-driverkit-virtualhiddevice"
+  end
+
+  def install
+    # Build and install all Rust binaries (keymapper, keymapperd, virtkbdd,
+    # keymapper_reader).
+    system "cargo", "install", "--path", ".", "--root", prefix, "--locked"
+
+    # Keep the uninstall scripts in the prefix so `brew uninstall` can stop
+    # and remove the services registered below.
+    on_macos do
+      libexec.install "scripts/uninstall-macos.sh", "scripts/uninstall-karabiner-macos.sh"
+    end
+    on_linux do
+      libexec.install "scripts/uninstall-linux.sh"
+    end
 
     on_macos do
-        # The driver through which keymapperd emits remapped keys.  The cask
-        # installs the package only; activation happens in install below.
-        depends_on "mamrhein/keymapper/karabiner-driverkit-virtualhiddevice"
+      # Register the virtkbdd LaunchDaemon and the keymapperd LaunchAgent,
+      # install the Karabiner DriverKit package (if not already installed by
+      # the cask), activate the extension, and register the Karabiner daemon
+      # LaunchDaemon.  Requires sudo.
+      system "sudo", "scripts/install-macos.sh",
+        prefix/"bin/keymapperd", prefix/"bin/virtkbdd"
     end
 
-    def install
-        # Build and install both Rust binaries (keymapper, keymapperd).
-        system "cargo", "install", "--root", prefix, "--locked"
-
-        on_macos do
-            # Install the Karabiner DriverKit package (if not already
-            # installed), activate the extension, and register the daemon
-            # LaunchDaemon.  Requires sudo.
-            system "sudo", "scripts/install-karabiner-macos.sh"
-        end
+    on_linux do
+      # Register the keymapperd systemd user service (no root required).
+      system "scripts/install-linux.sh", prefix/"bin/keymapperd"
     end
+  end
 
-    def caveats
-        <<~EOS
-            On first run, the Karabiner DriverKit extension may need to be
-            enabled once in:
-            System Settings > General > Login Items & Extensions > Driver Extensions.
-
-            No reboot is required.
-        EOS
+  def uninstall
+    on_macos do
+      system "sudo", libexec/"uninstall-macos.sh" if (libexec/"uninstall-macos.sh").exist?
     end
-
-    service do
-        run [opt_bin / "keymapperd"]
-        keep_alive true
-        sudo true  # LaunchDaemon is required for IOKit device seizure.
+    on_linux do
+      system libexec/"uninstall-linux.sh" if (libexec/"uninstall-linux.sh").exist?
     end
+  end
+
+  def caveats
+    <<~EOS
+      On first run, the Karabiner DriverKit extension may need to be
+      enabled once in:
+      System Settings > General > Login Items & Extensions > Driver Extensions.
+
+      No reboot is required.
+
+      keymapperd also needs the Input Monitoring and Accessibility
+      permissions (System Settings > Privacy & Security).
+
+      The keymapperd and virtkbdd services are managed by launchd (macOS)
+      or the systemd user session (Linux); control them with:
+        keymapper daemon status | start | stop
+    EOS
+  end
 end
