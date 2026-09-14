@@ -10,35 +10,35 @@
 //! End-to-end integration tests that drive a *production* daemon.
 //!
 //! The harness plants a fixture config in the real user config directory,
-//! starts `keymapperd` (a production build with no test features), focuses a
-//! known test window so the daemon's active-app query is deterministic, and
-//! captures the daemon's output through a live pipe from `keymapper_monitor
-//! --stdout`.  A dedicated injector thread repeatedly injects a `Ctrl+Esc`
-//! round delimiter followed by the config's trigger and passthrough keys; the
-//! reader segments the captured stream on `Ctrl+Esc` and compares each round
-//! against the expected output derived from the config.
+//! starts `keymapperd` (a production build with no test features), and
+//! focuses a "normal" application — `keymapper_reader`, an ordinary raw-mode
+//! stdin reader with no capture machinery of its own — so the daemon's
+//! output reaches it through the OS's regular input path, exactly as if a
+//! user had typed the keys.  The harness injects each phase's key sequence
+//! once, waits for the reader to record the expected number of bytes, and
+//! compares them against the character-space translation of the config's
+//! expected output events (see [`char_translate`]).
 //!
 //! Because the harness clobbers the real user config directory and injects
 //! session-wide keys, it refuses to run outside a CI environment (see
 //! [`in_ci`]).  The original config is backed up and restored on teardown.
 //!
 //! The test flow is:
-//! 1. Acquire the cross-process e2e lock, kill any stale daemons, and install
-//!    the test-window `.desktop` fixture (Linux) — before any active-app
-//!    query, because the `.desktop` cache is built lazily on first use.
-//! 2. Focus the test window and wait until it is the active app.
-//! 3. Plant the fixture config (substituting the app-name placeholder).
-//! 4. Create and set up the key injector (its virtual device must exist before
+//! 1. Acquire the cross-process e2e lock and kill any stale daemons.
+//! 2. Plant the fixture config (global rules only; app-scoped groups are
+//!    rejected by the sequence builder).
+//! 3. Create and set up the key injector (its virtual device must exist before
 //!    the daemon starts so the daemon grabs it at startup).
-//! 5. Start the daemon (waits for its readiness line on stdout).
-//! 6. Start the monitor (`--stdout`, piped) with a reader thread.
-//! 7. Spawn the injector thread (rounds every 5 s).
-//! 8. For each phase: wait for a round built from the phase's key-set
-//!    generation, discard any stale rounds captured before that announcement,
-//!    read exactly one round, and compare; for later phases, hot-reload the
-//!    config and swap the injector's key set (bumping its generation) first.
-//! 9. Teardown: stop the injector, monitor, and daemon; restore the config.
+//! 4. Start the daemon (waits for its readiness line on stdout).
+//! 5. Start the reader and wait until it has keyboard focus (its output file
+//!    is created only after focus and raw mode are established).
+//! 6. For each phase: record the reader's byte offset, inject the phase's
+//!    sequence once, wait for the expected bytes (plus a quiescence check for
+//!    unexpected extras), and compare; for later phases, hot-reload the config
+//!    first.
+//! 7. Teardown: stop the daemon and reader; restore the config.
 
+mod char_translate;
 mod common;
 mod event_log;
 
@@ -47,19 +47,16 @@ use std::{
     io::BufRead,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
+use char_translate::{Platform, current_platform, events_to_bytes};
 use common::E2eLock;
-use event_log::{LogEvent, assert_events_match, event_str, parse_line};
+use event_log::{LogEvent, event_str};
 use keymapper::{
-    common::{app_identity, config::AppConfig, hid_usage::HidUsage},
+    common::{config::AppConfig, hid_usage::HidUsage},
     test_util::key_injector::{InjectorError, KeyInjector, is_injectable},
 };
 
@@ -105,11 +102,6 @@ const CONFIG_COMPREHENSIVE: &str =
 /// hot-reload behavior.
 const CONFIG_RELOADED: &str = "tests/fixtures/configs/config_reloaded.yaml";
 
-/// Placeholder in the config fixtures that the harness replaces with the live
-/// active-app name (the focused test window's resolved identity) before
-/// planting, so the app-scoped rule fires deterministically on every platform.
-const APP_PLACEHOLDER: &str = "__TEST_APP__";
-
 // ---------------------------------------------------------------------------
 // Binary path resolution
 // ---------------------------------------------------------------------------
@@ -130,8 +122,24 @@ fn bin_path(name: &str) -> PathBuf {
 // Config-driven sequence builders
 // ---------------------------------------------------------------------------
 
+/// The fixed passthrough keys: plain letters that no fixture rule uses, so
+/// they are forwarded unchanged and compare as lowercase bytes on every
+/// platform.
+const PASSTHROUGH_KEYS: [HidUsage; 5] = [
+    HidUsage::D,
+    HidUsage::E,
+    HidUsage::F,
+    HidUsage::G,
+    HidUsage::H,
+];
+
+/// The probe key for modifier→modifier chords: a plain letter that no fixture
+/// rule uses, pressed while the remapped modifier is held so the remap
+/// produces an observable byte (e.g. Ctrl+X = 0x18).
+const CHORD_PROBE_KEY: HidUsage = HidUsage::X;
+
 /// Represents a single injection step in the test sequence.  Each step injects
-/// a down event followed by an up event with a small delay between.
+/// down events followed by up events with small delays between.
 #[derive(Debug, Clone)]
 struct InjectionStep {
     /// The usages to press (modifiers first, then base key).
@@ -148,54 +156,45 @@ struct TestSequences {
     expected: Vec<LogEvent>,
 }
 
-/// A rule collected from the config, annotated with its app scope.
+/// A rule collected from the config.  The harness supports global rules only
+/// (first iteration); app-scoped groups are rejected by the builder.
 struct CollectedRule<'a> {
     /// The trigger key event (base plus held modifiers).
     trigger: &'a keymapper::common::config::KeyEvent,
     /// The rule's output key events.
     outputs: Vec<&'a keymapper::common::config::KeyEvent>,
-    /// App names the rule is scoped to; empty means global.
-    apps: Vec<String>,
-}
-
-impl CollectedRule<'_> {
-    /// Whether the rule is expected to fire while *active_app* is the active
-    /// application.
-    fn fires_for_app(&self, active_app: &str) -> bool {
-        self.apps.is_empty() || self.apps.iter().any(|a| a == active_app)
-    }
 }
 
 /// Build test sequences for one config phase.
 ///
-/// *config_content* is the (already app-name-substituted) config YAML.  All
-/// trigger rules are collected (keeping app scope), and the expected sequence
-/// simulates the daemon's per-event behaviour against *active_app*.
-///
-/// Passthrough keys that no rule uses are interleaved with the triggers to
-/// exercise both remapping and transparent forwarding.
-fn build_test_sequences(
-    config_content: &str,
-    active_app: &str,
-) -> TestSequences {
+/// *config_content* is the config YAML (global rules only).  All trigger
+/// rules are collected, and the expected sequence simulates the daemon's
+/// per-event behaviour.  Passthrough keys that no rule uses are interleaved
+/// with the triggers to exercise both remapping and transparent forwarding.
+fn build_test_sequences(config_content: &str) -> TestSequences {
     let app_config = AppConfig::load_from_str(config_content)
         .unwrap_or_else(|e| panic!("failed to parse config: {e}"));
 
-    // Collect all rules from every group, keeping app scope so firing
-    // expectations can account for the active app.
+    // Collect all rules from every group; app-scoped groups are rejected
+    // because the harness cannot control which app is active.
     let mut rules: Vec<CollectedRule> = Vec::new();
     for group in &app_config.groups {
+        assert!(
+            group.apps.is_empty(),
+            "app-scoped rules are not supported by the e2e harness (first \
+             iteration); group {:?} is scoped to apps {:?}",
+            group.name,
+            group.apps
+        );
         for (trigger, output_events) in group.mappings.iter() {
             rules.push(CollectedRule {
                 trigger,
                 outputs: output_events.iter().collect(),
-                apps: group.apps.clone(),
             });
         }
     }
 
-    // Collect all keys used in triggers and outputs to find passthrough
-    // candidates.
+    // Collect all keys used in triggers and outputs.
     let mut used_keys = std::collections::HashSet::new();
     for rule in &rules {
         used_keys.insert(rule.trigger.base);
@@ -220,42 +219,50 @@ fn build_test_sequences(
         );
     }
 
-    // Pick 5 passthrough keys that are not used by any rule and that the
-    // platform injector can actually inject.
-    let passthrough_keys: Vec<HidUsage> = HidUsage::all()
-        .iter()
-        .skip(9) // skip modifier keys and CapsLock
-        .copied()
-        .filter(|k| is_injectable(*k))
-        .filter(|k| !used_keys.contains(k))
-        .filter(|k| !platform_excludes_passthrough(*k))
-        .take(5)
-        .collect();
-
-    if passthrough_keys.len() < 5 {
-        panic!(
-            "config uses too many unique keys to find 5 passthrough \
-             candidates (used {} out of {})",
-            used_keys.len(),
-            HidUsage::all().len()
+    // The fixed passthrough keys and the chord probe key must not be used by
+    // any rule; otherwise their expected bytes would be wrong.
+    for key in PASSTHROUGH_KEYS {
+        assert!(
+            !used_keys.contains(&key),
+            "passthrough key {} is used by a fixture rule; choose another \
+             passthrough key",
+            key.as_str()
+        );
+        assert!(
+            is_injectable(key),
+            "passthrough key {} cannot be injected on this platform",
+            key.as_str()
         );
     }
+    assert!(
+        !used_keys.contains(&CHORD_PROBE_KEY),
+        "chord probe key {} is used by a fixture rule; choose another probe \
+         key",
+        CHORD_PROBE_KEY.as_str()
+    );
 
     // Build injection steps and expected events, alternating triggers and
     // passthrough keys.
+    let platform = current_platform();
     let mut steps: Vec<InjectionStep> = Vec::new();
     let mut expected: Vec<LogEvent> = Vec::new();
 
-    let mut passthrough_iter = passthrough_keys.iter();
+    let mut passthrough_iter = PASSTHROUGH_KEYS.iter();
     let mut rule_idx = 0;
     let mut passthrough_count = 0;
 
-    while rule_idx < rules.len() || passthrough_count < 5 {
+    while rule_idx < rules.len() || passthrough_count < PASSTHROUGH_KEYS.len()
+    {
         let triggers_to_add = std::cmp::min(2, rules.len() - rule_idx);
         for _ in 0..triggers_to_add {
             let rule = &rules[rule_idx];
-            steps.push(key_event_to_injection_step(rule.trigger));
-            expected.extend(rule_expected_events(rule, &rules, active_app));
+            if let Some((step, chord_events)) = modifier_chord_step(rule) {
+                steps.push(step);
+                expected.extend(chord_events);
+            } else {
+                steps.push(key_event_to_injection_step(rule.trigger));
+                expected.extend(rule_expected_events(rule, &rules, platform));
+            }
             rule_idx += 1;
         }
 
@@ -269,24 +276,60 @@ fn build_test_sequences(
     TestSequences { steps, expected }
 }
 
-/// Whether the platform's input stack rewrites a bare press of this key in a
-/// way the expected sequence cannot predict.
-#[cfg(target_os = "windows")]
-fn platform_excludes_passthrough(key: HidUsage) -> bool {
-    matches!(key, HidUsage::LeftAlt | HidUsage::RightAlt)
+/// If *rule* is a bare-modifier trigger whose single output is itself a bare
+/// modifier, build the chord step that makes the remap observable in
+/// character space: hold the trigger, tap the probe key while the remapped
+/// modifier is held, then release.  A plain tap would produce no bytes (the
+/// output modifier is pressed and released with nothing in between).
+///
+/// The expected events model the daemon's output: the rule fires on the
+/// trigger's down (emitting the held output modifier), the probe passes
+/// through with it held, and the trigger's release emits the modifier's up.
+fn modifier_chord_step(
+    rule: &CollectedRule,
+) -> Option<(InjectionStep, Vec<LogEvent>)> {
+    let trigger = rule.trigger;
+    if !trigger.modifiers.is_empty() || rule.outputs.len() != 1 {
+        return None;
+    }
+    let output = rule.outputs[0];
+    if !output.modifiers.is_empty()
+        || HidUsage::hid_usage_to_modifier_bit(output.base).is_none()
+    {
+        return None;
+    }
+
+    Some((
+        InjectionStep {
+            keys_down: vec![trigger.base, CHORD_PROBE_KEY],
+            keys_up: vec![CHORD_PROBE_KEY, trigger.base],
+        },
+        vec![
+            event_str(output.base.as_str(), true),
+            event_str(CHORD_PROBE_KEY.as_str(), true),
+            event_str(CHORD_PROBE_KEY.as_str(), false),
+            event_str(output.base.as_str(), false),
+        ],
+    ))
 }
 
-#[cfg(not(target_os = "windows"))]
-fn platform_excludes_passthrough(_key: HidUsage) -> bool {
-    false
+/// Build the expected events for a forwarded (passthrough) key press+release.
+fn passthrough_expected(key: HidUsage) -> Vec<LogEvent> {
+    vec![
+        event_str(key.as_str(), true),
+        event_str(key.as_str(), false),
+    ]
 }
 
-/// The key name the monitor logs for a given key, or `None` when the monitor
-/// cannot see the key on this platform.  On every supported platform the
-/// monitor captures the daemon's output directly, so every emitted key is
-/// visible under its exact name.
-fn monitor_key_name(key: HidUsage) -> Option<&'static str> {
-    Some(key.as_str())
+/// Find a firing rule whose trigger is the bare modifier *mod_key* (no
+/// modifiers held), if one exists.
+fn find_bare_modifier_rule<'a>(
+    mod_key: HidUsage,
+    rules: &'a [CollectedRule<'a>],
+) -> Option<&'a CollectedRule<'a>> {
+    rules.iter().find(|rule| {
+        rule.trigger.base == mod_key && rule.trigger.modifiers.is_empty()
+    })
 }
 
 /// Modifier bit position, shared with the daemon's bitmask layout.  The daemon
@@ -295,30 +338,7 @@ fn modifier_bit(key: HidUsage) -> Option<u8> {
     HidUsage::hid_usage_to_modifier_bit(key)
 }
 
-/// Build the expected monitor events for a forwarded (passthrough) key
-/// press+release.
-fn passthrough_expected(key: HidUsage) -> Vec<LogEvent> {
-    match monitor_key_name(key) {
-        Some(name) => vec![event_str(name, true), event_str(name, false)],
-        None => Vec::new(),
-    }
-}
-
-/// Find a firing rule whose trigger is the bare modifier *mod_key* (no
-/// modifiers held), if one exists.
-fn find_bare_modifier_rule<'a>(
-    mod_key: HidUsage,
-    rules: &'a [CollectedRule<'a>],
-    active_app: &str,
-) -> Option<&'a CollectedRule<'a>> {
-    rules.iter().find(|rule| {
-        rule.trigger.base == mod_key
-            && rule.trigger.modifiers.is_empty()
-            && rule.fires_for_app(active_app)
-    })
-}
-
-/// Build the expected monitor events for one daemon-emitted output tap.
+/// Build the expected events for one daemon-emitted output tap.
 fn output_tap_events(
     outputs: &[&keymapper::common::config::KeyEvent],
 ) -> Vec<LogEvent> {
@@ -329,67 +349,60 @@ fn output_tap_events(
         mod_keys.sort_by_key(|k| modifier_bit(*k).unwrap_or(8));
 
         for mod_key in &mod_keys {
-            if let Some(name) = monitor_key_name(*mod_key) {
-                events.push(event_str(name, true));
-            }
+            events.push(event_str(mod_key.as_str(), true));
         }
 
-        if let Some(name) = monitor_key_name(output.base) {
-            events.push(event_str(name, true));
-            events.push(event_str(name, false));
-        }
+        events.push(event_str(output.base.as_str(), true));
+        events.push(event_str(output.base.as_str(), false));
 
         for mod_key in mod_keys.iter().rev() {
-            if let Some(name) = monitor_key_name(*mod_key) {
-                events.push(event_str(name, false));
-            }
+            events.push(event_str(mod_key.as_str(), false));
         }
     }
 
     events
 }
 
-/// Build the expected monitor events for one trigger injection step.
-fn rule_expected_events<'a>(
-    rule: &CollectedRule<'a>,
-    rules: &'a [CollectedRule<'a>],
-    active_app: &str,
+/// Build the expected events for one trigger injection step.
+///
+/// On Linux and Windows the daemon releases the trigger's forwarded modifiers
+/// before emitting the mapped output (a clean tap), so the modifier ups come
+/// first.  On macOS the release mask is inert: the trigger's modifiers are
+/// physical events that pass through the tap, and their release reaches the
+/// application only when the injector releases them — after the output.
+fn rule_expected_events(
+    rule: &CollectedRule,
+    rules: &[CollectedRule],
+    platform: Platform,
 ) -> Vec<LogEvent> {
     let mut events = Vec::new();
     let trigger = rule.trigger;
 
     for mod_key in &trigger.modifiers {
-        if let Some(bare) =
-            find_bare_modifier_rule(*mod_key, rules, active_app)
-        {
+        if let Some(bare) = find_bare_modifier_rule(*mod_key, rules) {
             events.extend(output_tap_events(&bare.outputs));
-        } else if let Some(name) = monitor_key_name(*mod_key) {
-            events.push(event_str(name, true));
+        } else {
+            events.push(event_str(mod_key.as_str(), true));
         }
     }
 
-    if rule.fires_for_app(active_app) {
+    if platform == Platform::Macos {
+        for output in &rule.outputs {
+            events.extend(output_tap_events(std::slice::from_ref(output)));
+        }
         for mod_key in trigger.modifiers.iter().rev() {
-            if find_bare_modifier_rule(*mod_key, rules, active_app).is_none()
-                && let Some(name) = monitor_key_name(*mod_key)
-            {
-                events.push(event_str(name, false));
+            if find_bare_modifier_rule(*mod_key, rules).is_none() {
+                events.push(event_str(mod_key.as_str(), false));
+            }
+        }
+    } else {
+        for mod_key in trigger.modifiers.iter().rev() {
+            if find_bare_modifier_rule(*mod_key, rules).is_none() {
+                events.push(event_str(mod_key.as_str(), false));
             }
         }
         for output in &rule.outputs {
             events.extend(output_tap_events(std::slice::from_ref(output)));
-        }
-    } else {
-        // Rule does not apply (scoped to another app): the whole step passes
-        // through unchanged.
-        events.extend(passthrough_expected(trigger.base));
-
-        for mod_key in trigger.modifiers.iter().rev() {
-            if find_bare_modifier_rule(*mod_key, rules, active_app).is_none()
-                && let Some(name) = monitor_key_name(*mod_key)
-            {
-                events.push(event_str(name, false));
-            }
         }
     }
 
@@ -446,30 +459,6 @@ fn inject_step(injector: &dyn KeyInjector, step: &InjectionStep) {
 }
 
 // ---------------------------------------------------------------------------
-// The Ctrl+Esc round delimiter
-// ---------------------------------------------------------------------------
-
-/// The `Ctrl+Esc` round delimiter as an injection step (LeftControl + Escape).
-fn ctrl_esc_injection_step() -> InjectionStep {
-    InjectionStep {
-        keys_down: vec![HidUsage::LeftControl, HidUsage::Escape],
-        keys_up: vec![HidUsage::Escape, HidUsage::LeftControl],
-    }
-}
-
-/// The `Ctrl+Esc` round delimiter as captured events.  The daemon forwards it
-/// unchanged (no rule maps it), so it appears in the monitor's stream as these
-/// four events and serves as a round boundary.
-fn ctrl_esc_delimiter() -> Vec<LogEvent> {
-    vec![
-        event_str("LeftControl", true),
-        event_str("Escape", true),
-        event_str("Escape", false),
-        event_str("LeftControl", false),
-    ]
-}
-
-// ---------------------------------------------------------------------------
 // Config planting (with backup/restore)
 // ---------------------------------------------------------------------------
 
@@ -518,15 +507,13 @@ impl Drop for ConfigGuard {
     }
 }
 
-/// Build the config content for a phase: the fixture with the app-name
-/// placeholder substituted, or an empty config when *fixture* is `None`.
-fn phase_content(fixture: Option<&Path>, active_app: &str) -> String {
+/// Build the config content for a phase: the fixture as-is, or an empty
+/// config when *fixture* is `None`.
+fn phase_content(fixture: Option<&Path>) -> String {
     match fixture {
-        Some(path) => std::fs::read_to_string(path)
-            .unwrap_or_else(|e| {
-                panic!("failed to read config fixture {path:?}: {e}")
-            })
-            .replace(APP_PLACEHOLDER, active_app),
+        Some(path) => std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!("failed to read config fixture {path:?}: {e}")
+        }),
         None => "groups: []".to_string(),
     }
 }
@@ -624,348 +611,396 @@ impl Drop for DaemonChild {
 }
 
 // ---------------------------------------------------------------------------
-// Test window (deterministic active app)
+// Reader (the "normal app" with keyboard focus)
 // ---------------------------------------------------------------------------
 
-/// RAII guard for the `keymapper_testwindow` child.
-struct TestWindowChild {
+/// RAII guard for the `keymapper_reader` child: an ordinary raw-mode stdin
+/// reader that records whatever bytes the OS delivers to the focused
+/// terminal.  The platform-specific spawn gives it keyboard focus (the Linux
+/// VT foreground, the macOS Terminal window, or the Windows console
+/// foreground); its output file is created only after focus and raw mode are
+/// established, which the harness uses as its ready signal.
+struct Reader {
+    /// The reader process, when it is a direct child (Linux and Windows).
+    /// On macOS the reader runs inside Terminal.app and is killed via its
+    /// unique output path instead.
     child: Option<std::process::Child>,
+    /// The file the reader appends recorded bytes to.
+    output_path: PathBuf,
+    /// Keeps the unique temp directory alive for the reader's lifetime.
+    _tempdir: tempfile::TempDir,
 }
 
-impl TestWindowChild {
+impl Reader {
+    /// Spawn the reader with keyboard focus and wait for its ready signal
+    /// (the output file).
     fn spawn() -> Self {
-        let child = Command::new(bin_path("keymapper_testwindow"))
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("failed to spawn keymapper_testwindow");
-        TestWindowChild { child: Some(child) }
+        let tempdir = tempfile::tempdir().expect("failed to create temp dir");
+        let output_path = tempdir.path().join("recorded.bin");
+
+        #[cfg(target_os = "linux")]
+        {
+            // The daemon's uinput output is routed by the kernel to the
+            // active VT; stop getty (so it cannot retake the foreground) and
+            // make tty1 active before the reader opens it.
+            stop_getty_tty1();
+            switch_to_vt(1);
+        }
+
+        let child = spawn_reader_process(&output_path);
+        wait_for_ready(&output_path, Duration::from_secs(15));
+
+        Reader {
+            child,
+            output_path,
+            _tempdir: tempdir,
+        }
+    }
+
+    /// The number of bytes recorded so far.
+    fn len(&self) -> u64 {
+        std::fs::metadata(&self.output_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+    }
+
+    /// Read the bytes recorded in [*start*, *end*).
+    fn read_range(&self, start: u64, end: u64) -> Vec<u8> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = fs_err::File::open(&self.output_path)
+            .expect("failed to open reader output file");
+        file.seek(SeekFrom::Start(start))
+            .expect("failed to seek in reader output");
+        let mut buf = vec![0u8; (end - start) as usize];
+        file.read_exact(&mut buf)
+            .expect("failed to read reader output");
+        buf
     }
 }
 
-impl Drop for TestWindowChild {
+impl Drop for Reader {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             child.kill().ok();
             let _ = child.wait();
         }
+        #[cfg(target_os = "macos")]
+        {
+            // The reader runs inside Terminal.app (not our child); the
+            // unique output path makes the match unambiguous.  The Terminal
+            // window itself is left open (local-only test).
+            let _ = Command::new("pkill")
+                .arg("-f")
+                .arg(self.output_path.as_os_str())
+                .status();
+        }
+        #[cfg(target_os = "linux")]
+        start_getty_tty1();
     }
 }
 
-/// Install the test-window `.desktop` fixture so app-id resolution maps the
-/// helper's executable name to a known app id (Linux only).  Must run before
-/// any active-app query in this process (and before the daemon starts),
-/// because the `.desktop` cache is built lazily on first use and never
-/// rebuilt.
+/// Spawn the reader process for this platform.  Returns `None` when the
+/// reader is not a direct child (macOS: it runs inside Terminal.app).
 #[cfg(target_os = "linux")]
-fn install_desktop_fixture() {
-    let src =
-        Path::new("tests/fixtures/applications/keymapper.testwindow.desktop");
-    let dest_dir = dirs::home_dir()
-        .expect("no home directory")
-        .join(".local/share/applications");
-    std::fs::create_dir_all(&dest_dir)
-        .expect("failed to create applications dir");
-    let dest = dest_dir.join("keymapper.testwindow.desktop");
-    std::fs::copy(src, &dest).expect("failed to install .desktop fixture");
+fn spawn_reader_process(output_path: &Path) -> Option<std::process::Child> {
+    // The reader setsid()s and opens /dev/tty1 itself in its own main, so
+    // the kernel assigns it the controlling terminal and the VT's foreground
+    // process group (an inherited fd would not do that).
+    let child = Command::new(bin_path("keymapper_reader"))
+        .arg(output_path)
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn keymapper_reader");
+    Some(child)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn install_desktop_fixture() {}
-
-/// The app name the focused test window resolves to on this platform.
-///
-/// Windows resolves it to the helper's executable file name, Linux to the
-/// `.desktop` application id of the installed fixture (see
-/// [`install_desktop_fixture`]), and macOS to the CoreGraphics window owner
-/// name (the helper's process name).
-fn expected_test_window_app() -> &'static str {
-    #[cfg(target_os = "windows")]
-    {
-        "keymapper_testwindow.exe"
-    }
-    #[cfg(target_os = "linux")]
-    {
-        "keymapper.testwindow"
-    }
-    #[cfg(target_os = "macos")]
-    {
-        "keymapper_testwindow"
-    }
-}
-
-/// Wait until the focused test window is the active app and return its
-/// resolved name.
-///
-/// The helper process needs a moment to start, create its window, and take
-/// the foreground, so poll until the active app is the test window itself.
-/// Accepting any other name (e.g. the terminal that launched the test) would
-/// plant a config scoped to the wrong app and fail confusingly downstream.
-fn query_active_app() -> String {
-    let expected = expected_test_window_app();
-    let mut last = String::new();
-    for _ in 0..50 {
-        last = app_identity::get_active_app_name();
-        if last == expected {
-            return last;
-        }
-        thread::sleep(Duration::from_millis(300));
-    }
-    panic!(
-        "the test window did not become the active app (expected {expected}, \
-         last observed {last})"
+/// Spawn the reader in a Terminal.app window (its stdin is then the window's
+/// pty) and bring Terminal to the foreground.  The reader is not a direct
+/// child of the harness, so `None` is returned.
+#[cfg(target_os = "macos")]
+fn spawn_reader_process(output_path: &Path) -> Option<std::process::Child> {
+    let reader_bin = bin_path("keymapper_reader");
+    // Two levels of quoting: the shell command inside `do script`, then the
+    // AppleScript string literal around it.
+    let shell_cmd = format!(
+        "\"{}\" \"{}\"",
+        escape_for_shell(&reader_bin.to_string_lossy()),
+        escape_for_shell(&output_path.to_string_lossy()),
     );
+    let script = format!(
+        "tell application \"Terminal\"\nactivate\ndo script \
+         \"{script}\"\nend tell",
+        script = escape_for_applescript(&shell_cmd),
+    );
+
+    let mut child = Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn osascript");
+    // osascript exits once Terminal has started the script.
+    let _ = child.wait();
+
+    None
 }
 
-// ---------------------------------------------------------------------------
-// Monitor (piped stdout + reader thread)
-// ---------------------------------------------------------------------------
-
-/// The monitor child plus a channel of parsed events fed by a reader thread.
-struct Monitor {
-    child: std::process::Child,
-    rx: mpsc::Receiver<LogEvent>,
+/// Escape a path for embedding in a double-quoted shell word.
+#[cfg(target_os = "macos")]
+fn escape_for_shell(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-impl Monitor {
-    /// Spawn `keymapper_monitor --stdout` with piped stdout and a reader
-    /// thread that parses lines into events.
-    fn spawn() -> Self {
-        let mut child = Command::new(bin_path("keymapper_monitor"))
-            .arg("--stdout")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("failed to spawn keymapper_monitor");
-
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if let Some(event) = parse_line(&line)
-                            && tx.send(event).is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        Monitor { child, rx }
-    }
-
-    fn kill(&mut self) {
-        self.child.kill().ok();
-        let _ = self.child.wait();
-    }
+/// Escape a string for embedding in an AppleScript string literal.
+#[cfg(target_os = "macos")]
+fn escape_for_applescript(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-impl Drop for Monitor {
-    fn drop(&mut self) {
-        self.kill();
-    }
-}
+/// Spawn the reader in its own console window (`CREATE_NEW_CONSOLE`) and
+/// bring that window to the foreground so it has keyboard focus.  The daemon
+/// re-emits keys via `SendInput`, which the system delivers to the foreground
+/// window — i.e. here.
+#[cfg(target_os = "windows")]
+fn spawn_reader_process(output_path: &Path) -> Option<std::process::Child> {
+    use std::os::windows::process::CommandExt;
 
-/// Segments a continuous event stream into `Ctrl+Esc`-delimited rounds.
-/// Holds the state of a partially captured round, so reading can be paused
-/// (e.g. to discard stale rounds) and resumed without losing events.
-struct RoundReader {
-    /// Events of the round currently being captured (excluding delimiters).
-    round: Vec<LogEvent>,
-    /// The last 4 events, for end-of-round delimiter detection.
-    recent: Vec<LogEvent>,
-    /// Whether a round is currently being captured.
-    in_round: bool,
-}
+    use windows::Win32::{
+        Foundation::HWND,
+        System::Threading::{AttachThreadInput, GetCurrentThreadId},
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetForegroundWindow, GetWindowThreadProcessId,
+            SetForegroundWindow,
+        },
+    };
 
-impl RoundReader {
-    fn new() -> Self {
-        Self {
-            round: Vec::new(),
-            recent: Vec::new(),
-            in_round: false,
-        }
-    }
+    const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
-    /// Feed one event; returns `Some(round)` when a complete round ends.
-    fn feed(&mut self, event: LogEvent) -> Option<Vec<LogEvent>> {
-        let delimiter = ctrl_esc_delimiter();
-        self.recent.push(event.clone());
-        if self.recent.len() > 4 {
-            self.recent.remove(0);
-        }
-        let is_delim = self.recent == delimiter;
+    let child = Command::new(bin_path("keymapper_reader"))
+        .arg(output_path)
+        .stderr(Stdio::inherit())
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .expect("failed to spawn keymapper_reader");
 
-        if !self.in_round {
-            if is_delim {
-                self.in_round = true;
-                self.round.clear();
-            }
-            None
-        } else if is_delim {
-            // The last 3 events already in `round` plus this one form the end
-            // delimiter; drop them and return the completed round.
-            for _ in 0..3 {
-                self.round.pop();
-            }
-            self.in_round = false;
-            Some(std::mem::take(&mut self.round))
+    // The foreground lock may block SetForegroundWindow, so attach to the
+    // current foreground window's thread first (the standard workaround).
+    let mut ctx = EnumCtx {
+        pid: child.id(),
+        target: HWND::default(),
+    };
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let fg_thread = if foreground.is_invalid() {
+            0
         } else {
-            self.round.push(event);
-            None
-        }
-    }
-}
-
-/// Read events from the channel until a complete round (delimited by
-/// `Ctrl+Esc`) is captured, returning the round's events (excluding the
-/// delimiters).  Continues from *reader*'s current state, which may hold a
-/// partially captured round.  Returns whatever was collected on timeout.
-fn read_round(
-    rx: &mpsc::Receiver<LogEvent>,
-    reader: &mut RoundReader,
-    timeout: Duration,
-) -> Vec<LogEvent> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if Instant::now() >= deadline {
-            eprintln!(
-                "warning: timed out waiting for a complete round ({} events \
-                 so far)",
-                reader.round.len()
-            );
-            return std::mem::take(&mut reader.round);
-        }
-
-        let Ok(event) = rx.recv_timeout(Duration::from_millis(200)) else {
-            continue;
+            GetWindowThreadProcessId(foreground, None)
         };
-
-        if let Some(round) = reader.feed(event) {
-            return round;
+        let our_thread = GetCurrentThreadId();
+        if fg_thread != 0 && fg_thread != our_thread {
+            let _ = AttachThreadInput(our_thread, fg_thread, true);
         }
+
+        // Safety: the callback only reads window properties and stores the
+        // HWND of the reader's console window in the context.
+        let _ = EnumWindows(
+            Some(find_reader_window),
+            windows::Win32::Foundation::LPARAM(
+                &mut ctx as *mut EnumCtx as isize,
+            ),
+        );
+
+        if !ctx.target.is_invalid() {
+            let _ = SetForegroundWindow(ctx.target);
+        } else {
+            eprintln!("warning: could not find the reader's console window");
+        }
+
+        if fg_thread != 0 && fg_thread != our_thread {
+            let _ = AttachThreadInput(our_thread, fg_thread, false);
+        }
+    }
+
+    Some(child)
+}
+
+/// Context for the `EnumWindows` callback (which cannot capture).
+#[cfg(target_os = "windows")]
+struct EnumCtx {
+    /// The reader's process id.
+    pid: u32,
+    /// The reader's console window, once found.
+    target: windows::Win32::Foundation::HWND,
+}
+
+/// `EnumWindows` callback: finds the console window of the reader's process.
+///  Cannot capture, so the context is passed via *lparam*.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn find_reader_window(
+    hwnd: windows::Win32::Foundation::HWND,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::core::BOOL {
+    use windows::Win32::{
+        Foundation::{FALSE, TRUE},
+        UI::WindowsAndMessaging::GetWindowThreadProcessId,
+    };
+    // Safety: *lparam* is the context pointer passed by the caller, which
+    // keeps it alive for the duration of the enumeration.
+    let ctx = unsafe { &mut *(lparam.0 as *mut EnumCtx) };
+    let mut window_pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
+    if window_pid == ctx.pid {
+        ctx.target = hwnd;
+        FALSE // stop the enumeration.
+    } else {
+        TRUE
     }
 }
 
-/// Discard complete rounds already buffered in the channel.  Called right
-/// after the injector announces a round of the current key-set generation:
-/// the announced round is injected *after* the announcement, so any complete
-/// round already captured was built from an older key set (a round in flight
-/// when a hot-reload swapped the key set).  Drains until the channel is
-/// quiet, so a partially captured announced round is left in *reader* for
-/// [`read_round`] to complete.
-fn discard_stale_rounds(
-    rx: &mpsc::Receiver<LogEvent>,
-    reader: &mut RoundReader,
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if Instant::now() >= deadline {
+/// Stop the getty service on tty1 so it cannot retake the VT's foreground
+/// process group mid-test.  Best-effort: a failure is reported but not fatal
+/// (the getty may already be stopped).
+#[cfg(target_os = "linux")]
+fn stop_getty_tty1() {
+    match Command::new("systemctl")
+        .args(["stop", "getty@tty1"])
+        .output()
+    {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => eprintln!(
+            "warning: systemctl stop getty@tty1 failed ({}): {}",
+            o.status,
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("warning: failed to run systemctl: {e}"),
+    }
+}
+
+/// Restart the getty service on tty1 (best-effort cleanup).
+#[cfg(target_os = "linux")]
+fn start_getty_tty1() {
+    let _ = Command::new("systemctl")
+        .args(["start", "getty@tty1"])
+        .output();
+}
+
+/// Switch the active console to VT *vt* so the daemon's uinput output (which
+/// the kernel routes to the active VT) reaches tty1.  Done via ioctl on
+/// /dev/console rather than the `chvt` binary, because the harness process
+/// has no controlling terminal in CI.
+#[cfg(target_os = "linux")]
+fn switch_to_vt(vt: i32) {
+    // KDVT_SWITCHTO from linux/kd.h; not in the libc crate.
+    const KDVT_SWITCHTO: libc::c_ulong = 0x4B39;
+    // Safety: open(2)/ioctl(2)/close(2) on /dev/console; the harness runs as
+    // root in CI.
+    unsafe {
+        let fd = libc::open(c"/dev/console".as_ptr(), libc::O_RDWR);
+        if fd < 0 {
             eprintln!(
-                "warning: stale-round drain did not quiesce; proceeding"
+                "warning: failed to open /dev/console: {}",
+                std::io::Error::last_os_error()
             );
             return;
         }
-        match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(event) => {
-                if let Some(round) = reader.feed(event) {
-                    eprintln!(
-                        "discarding stale round ({} events) captured before \
-                         the current generation was announced",
-                        round.len()
-                    );
-                }
-            }
-            // The channel is quiet: no stale round is pending, and the
-            // announced round is either not yet injected or fully captured.
-            Err(_) => return,
-        }
-    }
-}
-
-/// Wait until the injector announces a round built from key-set generation
-/// *generation*, discarding announcements of older generations (rounds that
-/// were in flight when a hot-reload swapped the key set).  Panics on timeout.
-fn wait_for_round_generation(
-    rx: &mpsc::Receiver<u64>,
-    generation: u64,
-    timeout: Duration,
-) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for the injector to start a round of \
-                 key-set generation {generation}"
+        if libc::ioctl(fd, KDVT_SWITCHTO, vt) < 0 {
+            eprintln!(
+                "warning: KDVT_SWITCHTO to VT{vt} failed: {}",
+                std::io::Error::last_os_error()
             );
         }
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(g) if g == generation => return,
-            Ok(g) => eprintln!("discarding round of stale generation {g}"),
-            Err(_) => {}
+        libc::close(fd);
+    }
+}
+
+/// Wait for the reader's ready signal: its output file, which it creates only
+/// after keyboard focus and raw mode are established.
+fn wait_for_ready(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while !path.exists() {
+        if Instant::now() >= deadline {
+            panic!(
+                "the reader did not create its output file {path:?} within \
+                 {} s (keyboard focus or raw mode failed)",
+                timeout.as_secs()
+            );
         }
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
 // ---------------------------------------------------------------------------
-// Injector thread
+// Byte comparison
 // ---------------------------------------------------------------------------
 
-/// Shared state for the injector thread: the current key set (swappable for
-/// hot-reload) and a stop flag.
-struct InjectorState {
-    /// The key set to inject, tagged with a generation that increments on
-    /// every hot-reload swap.  The injector reads both atomically and
-    /// announces the generation when it starts a round, so the harness can
-    /// wait for a round built from a specific key set.
-    keyset: Mutex<(u64, Vec<InjectionStep>)>,
-    stop: AtomicBool,
+/// Format bytes as a hex string for failure messages.
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// Spawn the injector thread.  It loops: sleep 5 s, announce the round's
-/// key-set generation on *round_tx*, inject the `Ctrl+Esc` delimiter, then
-/// inject the current key set.  The key set is read from the shared state
-/// each round so a hot-reload can swap it.
-fn spawn_injector(
-    injector: Box<dyn KeyInjector + Send>,
-    state: Arc<InjectorState>,
-    round_tx: mpsc::Sender<u64>,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let delimiter = ctrl_esc_injection_step();
-        loop {
-            // Sleep in small increments so the stop flag is checked promptly.
-            for _ in 0..50 {
-                if state.stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            if state.stop.load(Ordering::Relaxed) {
-                return;
-            }
+/// Assert that *actual* bytes match *expected* exactly, with a readable diff.
+fn assert_bytes_match(actual: &[u8], expected: &[u8], message: &str) {
+    if actual == expected {
+        return;
+    }
+    panic!(
+        "{message}\nactual   = [{hex_actual}] ({text_actual})\nexpected = \
+         [{hex_expected}] ({text_expected})",
+        hex_actual = hex(actual),
+        text_actual = String::from_utf8_lossy(actual),
+        hex_expected = hex(expected),
+        text_expected = String::from_utf8_lossy(expected),
+    );
+}
 
-            // Read the key set and its generation atomically, then announce
-            // the round so the harness can wait for a specific generation.
-            let (generation, steps) = state.keyset.lock().unwrap().clone();
-            if round_tx.send(generation).is_err() {
-                return; // the harness is gone.
-            }
-
-            inject_step(&*injector, &delimiter);
-
-            for step in &steps {
-                if state.stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                inject_step(&*injector, step);
-            }
+/// Wait until the reader has recorded at least *expected_len* new bytes
+/// beyond *offset*, verify that no unexpected extra bytes follow (a
+/// quiescence check), and return the phase's byte window.
+fn read_phase_bytes(
+    reader: &Reader,
+    offset: u64,
+    expected_len: usize,
+    timeout: Duration,
+) -> Vec<u8> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if (reader.len() - offset) as usize >= expected_len {
+            break;
         }
-    })
+        if Instant::now() >= deadline {
+            let got = reader.read_range(offset, reader.len());
+            panic!(
+                "timed out waiting for {expected_len} bytes; got {} so far: \
+                 [{}] ({})",
+                got.len(),
+                hex(&got),
+                String::from_utf8_lossy(&got)
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    // Quiescence: give the daemon a moment to emit any (unexpected) extra
+    // bytes, then fail if more than expected arrived — an extra byte here
+    // would otherwise leak into the next phase's window.
+    thread::sleep(Duration::from_millis(500));
+    let len = reader.len();
+    if len > offset + expected_len as u64 {
+        let extra = reader.read_range(offset + expected_len as u64, len);
+        panic!(
+            "received {} unexpected extra byte(s) after the expected \
+             sequence: [{}] ({})",
+            extra.len(),
+            hex(&extra),
+            String::from_utf8_lossy(&extra)
+        );
+    }
+
+    reader.read_range(offset, offset + expected_len as u64)
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,7 +1122,7 @@ fn wait_for_injector_device(_injector: &dyn KeyInjector) {}
 
 /// Run the e2e test for the given config phases.  Each phase is a fixture path
 /// (or `None` for an empty config).  Phases after the first hot-reload the
-/// config and swap the injector's key set before capturing their round.
+/// config before injecting their sequence.
 fn run_e2e(phases: &[Option<&Path>], label: &str) {
     if !require_ci(label) {
         return;
@@ -1096,22 +1131,11 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     let _lock = E2eLock::acquire();
     kill_orphaned_daemons();
 
-    // 1. Install the app-id fixture (Linux) before any active-app query: the
-    //    .desktop cache is built lazily on first use in this process as well,
-    //    so the fixture must be in place before step 2 runs.
-    install_desktop_fixture();
-
-    // 2. Focus the test window and wait until it is the active app, then
-    //    capture its resolved name.
-    let _window = TestWindowChild::spawn();
-    let active_app = query_active_app();
-    eprintln!("active app: {active_app}");
-
-    // 3. Plant the initial config.
-    let initial_content = phase_content(phases[0], &active_app);
+    // 1. Plant the initial config (global rules only).
+    let initial_content = phase_content(phases[0]);
     let config = ConfigGuard::plant(&initial_content);
 
-    // 4. Create and set up the injector (its virtual device must exist before
+    // 2. Create and set up the injector (its virtual device must exist before
     //    the daemon starts so the daemon grabs it at startup).
     let mut injector = create_injector()
         .expect("failed to create injector")
@@ -1119,7 +1143,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     injector.setup().expect("failed to set up injector");
     wait_for_injector_device(&*injector);
 
-    // 5. Start the daemon (waits for its readiness line).
+    // 3. Start the daemon (waits for its readiness line).
     let config_dir = keymapper::common::config_path::default_config_path()
         .expect("no default config path")
         .parent()
@@ -1128,39 +1152,21 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     let mut daemon = DaemonChild::spawn(&config_dir);
 
     // Give the daemon a moment to finish `start_mapping` (install its hook /
-    // create its output device) before the monitor starts, so on Windows the
-    // daemon's hook is installed first.
+    // create its output device) before the reader takes focus.
     thread::sleep(Duration::from_millis(500));
 
-    // 6. Start the monitor (piped stdout + reader thread).
-    let mut monitor = Monitor::spawn();
+    // 4. Start the reader (the "normal app" with keyboard focus) and wait for
+    //    its ready signal.
+    let reader = Reader::spawn();
 
-    // 7. Build the initial key set and spawn the injector thread.
-    let initial_sequences =
-        build_test_sequences(&initial_content, &active_app);
-    eprintln!(
-        "phase 1: injection steps: {}, expected events: {}",
-        initial_sequences.steps.len(),
-        initial_sequences.expected.len()
-    );
-    let (round_tx, round_rx) = mpsc::channel();
-    let state = Arc::new(InjectorState {
-        keyset: Mutex::new((0, initial_sequences.steps.clone())),
-        stop: AtomicBool::new(false),
-    });
-    let injector_handle = spawn_injector(injector, state.clone(), round_tx);
-    let mut reader = RoundReader::new();
-
-    // 8. For each phase: wait for a round built from the phase's key set,
-    //    discard any stale rounds captured before that announcement, read
-    //    exactly one round, and compare.  The injected sequence is constant
-    //    per phase, so the first complete round is the one to compare —
-    //    reading further rounds would only mask a real failure behind a
-    //    timeout.  Later phases hot-reload the config and swap the injector's
-    //    key set (bumping its generation) first.
+    // 5. For each phase: inject the sequence once and compare the recorded
+    //    bytes against the character-space translation of the expected events.
+    //    Later phases hot-reload the config first.
     for (i, phase) in phases.iter().enumerate() {
-        let content = phase_content(*phase, &active_app);
-        let sequences = build_test_sequences(&content, &active_app);
+        let content = phase_content(*phase);
+        let sequences = build_test_sequences(&content);
+        let expected_bytes =
+            events_to_bytes(&sequences.expected, current_platform());
 
         if i > 0 {
             eprintln!(
@@ -1171,50 +1177,34 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
             config.overwrite(&content);
             // Wait for the daemon's reload debounce plus compilation time.
             thread::sleep(Duration::from_secs(2));
-
-            // Swap the injector's key set under a new generation and wait
-            // for it to start a round with that generation, so the round
-            // read below is built from this phase's key set (a round in
-            // flight during the reload is discarded).
-            let generation = {
-                let mut keyset = state.keyset.lock().unwrap();
-                keyset.0 += 1;
-                keyset.1 = sequences.steps.clone();
-                keyset.0
-            };
-            wait_for_round_generation(
-                &round_rx,
-                generation,
-                Duration::from_secs(30),
-            );
-        } else {
-            wait_for_round_generation(&round_rx, 0, Duration::from_secs(30));
         }
 
-        // The announced round is injected after the announcement, so any
-        // complete round already captured was built from an older key set;
-        // discard it before reading the round to compare.
-        discard_stale_rounds(&monitor.rx, &mut reader);
-
+        let offset = reader.len();
         eprintln!(
-            "phase {}: reading one round ({} expected events)...",
+            "phase {}: injecting {} steps, expecting {} bytes...",
             i + 1,
-            sequences.expected.len()
+            sequences.steps.len(),
+            expected_bytes.len()
         );
-        let actual =
-            read_round(&monitor.rx, &mut reader, Duration::from_secs(15));
-        assert_events_match(
+        for step in &sequences.steps {
+            inject_step(&*injector, step);
+        }
+
+        let actual = read_phase_bytes(
+            &reader,
+            offset,
+            expected_bytes.len(),
+            Duration::from_secs(15),
+        );
+        assert_bytes_match(
             &actual,
-            &sequences.expected,
-            "round does not match expected sequence",
+            &expected_bytes,
+            "recorded bytes do not match the expected sequence",
         );
     }
 
-    // 9. Teardown: stop the injector, monitor, and daemon; restore the config
-    //    (via ConfigGuard's Drop) and kill the test window (via its Drop).
-    state.stop.store(true, Ordering::Relaxed);
-    let _ = injector_handle.join();
-    monitor.kill();
+    // 6. Teardown: stop the daemon; the reader (and its getty restart) and the
+    //    config are restored via their Drop impls.
     daemon.stop();
 
     eprintln!("{label} PASSED");

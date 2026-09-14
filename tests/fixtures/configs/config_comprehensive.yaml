@@ -1,13 +1,10 @@
 # Comprehensive mapping config for e2e testing.
 #
-# Global rules exercise single-key remaps, chord outputs, and modifier
-# triggers.  App-specific rules verify that scoped groups parse and load
-# correctly without interfering with the global mappings.
-#
-# `__TEST_APP__` is a placeholder the e2e harness replaces with the live
-# active-app name (the focused test window's resolved identity) before
-# planting the config, so the app-scoped rule fires deterministically on
-# every platform.
+# Global rules only: the e2e harness (first iteration) cannot control which
+# app is active, so app-scoped groups are not supported.  The rules exercise
+# single-key remaps, chord outputs (Escape -> Cmd+A), modifier triggers
+# (Ctrl+Semicolon -> C), and a modifier->modifier remap (CapsLock ->
+# LeftControl, observed through the harness's chord probe key).
 
 - name: "global mappings"
   mappings:
@@ -15,13 +12,3 @@
     A: B
     Escape: Cmd+A
     Ctrl+Semicolon: C
-
-- name: "to_be_ignored"
-  apps: [to_be_ignored]
-  mappings:
-    Ctrl+Q: Escape
-
-- name: "test app"
-  apps: [__TEST_APP__]
-  mappings:
-    Tab: Return
