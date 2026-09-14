@@ -7,11 +7,9 @@
 // $Source$
 // $Revision$
 
-//! Test and monitoring helpers for the e2e test harness: the key event
-//! injector, the `keymapper_monitor` capture backend, and the
-//! `keymapper_testwindow` deterministic-active-app helper.
+//! Test helpers for the e2e test harness: the key event injector and the
+//! `keymapper_reader` stdin recorder (the "normal app" that receives the
+//! daemon's output through the OS's regular input path).
 
 pub mod key_injector;
-pub mod monitor;
 pub mod reader;
-pub mod test_window;

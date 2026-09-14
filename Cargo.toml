@@ -25,16 +25,8 @@ name = "keymapper_reader"
 path = "src/keymapper_reader.rs"
 
 [[bin]]
-name = "keymapper_monitor"
-path = "src/keymapper_monitor.rs"
-
-[[bin]]
 name = "virtkbdd"
 path = "src/virtkbdd.rs"
-
-[[bin]]
-name = "keymapper_testwindow"
-path = "src/keymapper_testwindow.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
