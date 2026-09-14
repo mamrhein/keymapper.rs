@@ -13,4 +13,5 @@
 
 pub mod key_injector;
 pub mod monitor;
+pub mod reader;
 pub mod test_window;

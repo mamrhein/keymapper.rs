@@ -21,6 +21,10 @@ name = "keymapperd"
 path = "src/keymapperd.rs"
 
 [[bin]]
+name = "keymapper_reader"
+path = "src/keymapper_reader.rs"
+
+[[bin]]
 name = "keymapper_monitor"
 path = "src/keymapper_monitor.rs"
 
@@ -93,6 +97,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
