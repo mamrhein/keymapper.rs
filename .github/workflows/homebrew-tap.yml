@@ -73,11 +73,21 @@ jobs:
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
 
+          mkdir -p Formula Casks
+
+          # Bootstrap on first run: the tap may not contain the formula yet,
+          # so seed it from the keymapper repository at the release tag
+          # before updating it in place.
+          if [[ ! -f "Formula/keymapper.rb" ]]; then
+              gh api "repos/${{ github.repository }}/contents/brew/keymapper.rb?ref=v${VERSION}" \
+                --jq '.content' | base64 -d > "Formula/keymapper.rb"
+          fi
+
           # Update version and url in the formula
           sed -i '' \
             -e "s/version \".*\"/version \"$VERSION\"/" \
             -e "s|url \".*/v[^\"]*\"|url \"https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz\"|" \
-            "./Formula/keymapper.rb"
+            "Formula/keymapper.rb"
 
           # Fetch the pinned Karabiner cask from the keymapper repository at
           # the release tag (it is maintained there, not in the tap).
