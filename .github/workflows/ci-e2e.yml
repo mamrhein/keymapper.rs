@@ -91,27 +91,27 @@ jobs:
   # -----------------------------------------------------------------------
   # macOS — e2e sandbox tests (root bypasses TCC Accessibility)
   # -----------------------------------------------------------------------
-  # macos-e2e:
-  #   runs-on: macos-latest
+  macos-e2e:
+    runs-on: macos-latest
 
-  #   steps:
-  #     - uses: actions/checkout@v5
+    steps:
+      - uses: actions/checkout@v5
 
-  #     - name: Install Rust stable
-  #       uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-  #     - name: Install cargo-nextest
-  #       uses: taiki-e/install-action@nextest
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
-  #     # The Karabiner Driver Kit extension requires a one-time user approval
-  #     # that a headless runner cannot give. So, the e2e tests cannot run in
-  #     # this workflow.
+      # The Karabiner Driver Kit extension requires a one-time user approval
+      # that a headless runner cannot give. So, the e2e tests cannot run in
+      # this workflow.
 
-  #     - name: Run CLI integration tests
-  #       # The CLI integration tests need no input device and no root access.
-  #       run: |
-  #         cargo build --bin keymapper
-  #         cargo nextest run --test keymapper_tests
+      - name: Run CLI integration tests
+        # The CLI integration tests need no input device and no root access.
+        run: |
+          cargo build --bin keymapper
+          cargo nextest run --test keymapper_tests
 
   # -----------------------------------------------------------------------
   # Windows — e2e sandbox tests (no elevation required)
