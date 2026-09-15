@@ -63,13 +63,21 @@ After installing, grant keymapperd the required privacy permissions in System Se
 
 ### Linux
 
+**Binary installer:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mamrhein/keymapper.rs/main/scripts/install.sh | bash
+```
+
+This downloads the precompiled binaries for your architecture, installs `keymapper` and `keymapperd` to `~/.local/bin`, and registers the keymapperd systemd user service. Pin a version with `KEYMAPPER_VERSION=vX.Y.Z` and the install location with `KEYMAPPER_INSTALL_DIR`.
+
 **Pre-built archive:**
 
 Download the pre-built tar.xz for your architecture from the [releases page](https://github.com/mamrhein/keymapper.rs/releases), extract it, and copy the binaries to a directory on your `PATH`:
 
 ```bash
 tar -xJf keymapper-vX.Y.Z-x86_64-unknown-linux-gnu.tar.xz
-cd keymapper/vX.Y.Z
+cd dist/keymapper/vX.Y.Z
 install -m 755 keymapper keymapperd ~/.local/bin/
 ./install-linux.sh ~/.local/bin/keymapperd
 ```
@@ -82,6 +90,13 @@ scripts/install-linux.sh
 ```
 
 The script installs the systemd user service, enables it at login, and starts keymapperd. The daemon needs read access to `/dev/input/event*` (usually via the `input` group) and write access to `/dev/uinput`; if it reports "no keyboard device found", see [Troubleshooting](#troubleshooting).
+
+To uninstall, stop and disable the service (the pre-built archive also ships `uninstall-linux.sh`, which does this part) and remove the binaries:
+
+```bash
+systemctl --user disable --now keymapperd
+rm ~/.config/systemd/user/keymapperd.service ~/.local/bin/keymapper ~/.local/bin/keymapperd
+```
 
 ### Windows
 
