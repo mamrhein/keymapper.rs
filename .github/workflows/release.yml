@@ -2,7 +2,8 @@
 # name:     release
 # triggers: version tags (v*)
 #
-# Builds release archives for macOS (x86_64 + aarch64), Linux, and Windows.
+# Builds release archives for macOS (x86_64 + aarch64), Linux, and Windows
+# (plus the Inno Setup installer for winget distribution).
 # Runs tests via cargo-nextest, then uploads compressed archives to the
 # corresponding GitHub Release.
 # ---------------------------------------------------------------------------
@@ -216,6 +217,12 @@ jobs:
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/keymapper.iss" "/DMyVersion=$version"
+
       - name: Upload artifact
         shell: pwsh
         env:
@@ -230,3 +237,10 @@ jobs:
           )
           7z a "$archive" $files
           gh release upload "${{ github.ref_name }}" "$archive" --clobber
+
+      - name: Upload installer artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" "dist/keymapper-${{ github.ref_name }}-x86_64-pc-windows-msvc-setup.exe" --clobber

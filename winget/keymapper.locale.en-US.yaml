@@ -1,0 +1,21 @@
+# ---------------------------------------------------------------------------
+# winget locale manifest template for keymapper (see adrhinum.keymapper.yaml
+# for how this file is used).
+# ---------------------------------------------------------------------------
+
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.locale.1.13.0.schema.json
+PackageIdentifier: adrhinum.keymapper
+PackageLocale: en-US
+DisplayName: keymapper
+DisplayVersion: "@VERSION@"
+Publisher: Michael Amrhein
+ShortDescription: Cross-platform key-remapping daemon and cli utility.
+Description: |
+  keymapper is a cross-platform key-remapping daemon and cli utility for
+  macOS, Linux, and Windows.  It captures keyboard events with a low-level
+  hook, applies user-defined remapping rules (optionally scoped to specific
+  applications or keyboards), and emits the mapped keys.
+License: BSD-3-Clause
+LicenseUrl: https://github.com/mamrhein/keymapper.rs/blob/main/LICENSE.TXT
+Url: https://github.com/mamrhein/keymapper.rs
+Copyright: Copyright (c) 2021 ff. Michael Amrhein

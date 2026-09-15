@@ -1,0 +1,139 @@
+# ---------------------------------------------------------------------------
+# name:     winget-pkgs
+# triggers: version tags (v*) — via the release workflow completing
+#
+# After the release workflow finishes, this job opens a pull request against
+# microsoft/winget-pkgs (through the mamrhein/winget-pkgs fork) adding the
+# winget manifest for the new version: installer URL, SHA256, and version.
+# The templates in winget/ are the source of truth, mirroring homebrew-tap.
+#
+# One-time prerequisites:
+#   - Fork microsoft/winget-pkgs as mamrhein/winget-pkgs.
+#   - Create a personal access token with write access to the fork and add
+#     it as the WINGET_PKGS_TOKEN repository secret.
+# ---------------------------------------------------------------------------
+
+name: winget-pkgs
+
+on:
+  workflow_run:
+    workflows: ["release"]
+    types:
+      - completed
+
+env:
+  WINGET_PKGS_FORK_OWNER: mamrhein
+  WINGET_PKGS_FORK_REPO: winget-pkgs
+  WINGET_TARGET_REPO: microsoft/winget-pkgs
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Add the winget manifest when the release workflow succeeds
+  # -----------------------------------------------------------------------
+  update-manifest:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # `winget validate` is only available on Windows.
+    runs-on: windows-latest
+
+    steps:
+      # Fail early with an actionable message if the secret is missing; a
+      # missing secret would otherwise surface as "Input required and not
+      # supplied: token" from actions/checkout.
+      - name: Verify fork token is configured
+        env:
+          TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrEmpty($env:TOKEN)) {
+            Write-Error "The WINGET_PKGS_TOKEN secret is not set."
+            Write-Error "Create a personal access token with write access to ${{ env.WINGET_PKGS_FORK_OWNER }}/${{ env.WINGET_PKGS_FORK_REPO }} and add it as a repository secret."
+            exit 1
+          }
+
+      - name: Checkout fork
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.WINGET_PKGS_FORK_OWNER }}/${{ env.WINGET_PKGS_FORK_REPO }}
+          token: ${{ secrets.WINGET_PKGS_TOKEN }}
+          fetch-depth: 1
+
+      - name: Determine version
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # Extract the tag name from the triggering workflow run
+          TAG=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
+            --jq '.head_branch')
+          if [[ "$TAG" != v* ]]; then
+            echo "Not a version tag ($TAG), skipping." >&2
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download installer and compute sha256
+        id: hash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        shell: pwsh
+        run: |
+          $installer = "keymapper-v$env:VERSION-x86_64-pc-windows-msvc-setup.exe"
+          $url = "https://github.com/${{ github.repository }}/releases/download/v$env:VERSION/$installer"
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          $sha = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLower()
+          "sha256=$sha" >> "$env:GITHUB_OUTPUT"
+
+      - name: Update manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          SHA256: ${{ steps.hash.outputs.sha256 }}
+        shell: pwsh
+        run: |
+          $manifestDir = "manifests/a/adrhinum/keymapper/$env:VERSION"
+          New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+
+          # Fetch the templates from the keymapper repository at the release
+          # tag (the repo is the source of truth, mirroring homebrew-tap),
+          # then substitute the version and sha256 placeholders.
+          foreach ($name in @("adrhinum.keymapper.yaml", "keymapper.locale.en-US.yaml")) {
+            $path = Join-Path $manifestDir $name
+            $content = gh api "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION" --jq '.content'
+            [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content)) |
+              Set-Content -Path $path -Encoding utf8 -NoNewline
+            (Get-Content $path -Raw) `
+              -replace '@VERSION@', $env:VERSION `
+              -replace '@SHA256@', $env:SHA256 |
+              Set-Content -Path $path -Encoding utf8 -NoNewline
+          }
+
+      - name: Validate manifest
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        shell: pwsh
+        run: |
+          winget validate "manifests/a/adrhinum/keymapper/$env:VERSION"
+
+      - name: Open pull request
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          BRANCH="keymapper-${VERSION}"
+          git checkout -b "$BRANCH"
+          git add "manifests/a/adrhinum/keymapper/${VERSION}"
+          git diff --cached --quiet || git commit -m "chore: add keymapper ${VERSION}"
+          git push origin "$BRANCH" --force-with-lease
+          gh pr create \
+            --repo ${{ env.WINGET_TARGET_REPO }} \
+            --title "chore: add keymapper ${VERSION}" \
+            --body "Automated pull request to add the winget manifest for keymapper ${VERSION}." \
+            --base main \
+            --head "${{ env.WINGET_PKGS_FORK_OWNER }}:${BRANCH}"
