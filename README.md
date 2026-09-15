@@ -100,11 +100,26 @@ rm ~/.config/systemd/user/keymapperd.service ~/.local/bin/keymapper ~/.local/bin
 
 ### Windows
 
-```bash
-cargo install --path .
+**winget (precompiled installer):**
+
+```powershell
+winget install adrhinum.keymapper
 ```
 
-Run `keymapperd` directly; there is no service-manager integration on Windows. Input capture uses a low-level keyboard hook, and event emission uses `SendInput` (see [windows-architecture.md](docs/windows-architecture.md)).
+**Pre-built installer:**
+
+Download the pre-built setup executable from the [releases page](https://github.com/mamrhein/keymapper.rs/releases) and run it. The installer is unsigned, so SmartScreen may show a warning for direct downloads.
+
+Both install `keymapper` and `keymapperd` to `%LOCALAPPDATA%\Programs\keymapper`, add the directory to your user `PATH`, register a per-user scheduled task that starts keymapperd at logon, and start the daemon immediately (it exits until a configuration file exists — see [Quick start](#quick-start)). No elevation is required, and no driver is installed: input capture uses a low-level keyboard hook, and event emission uses `SendInput` (see [windows-architecture.md](docs/windows-architecture.md)). To uninstall, use `winget uninstall adrhinum.keymapper` or the Add/Remove Programs entry; your configuration in `%APPDATA%\keymapperd` is preserved.
+
+**From source:**
+
+```powershell
+cargo install --path .
+keymapper daemon start
+```
+
+`keymapper daemon start` spawns `keymapperd.exe` from the cli's own directory without a console window. There is no service-manager integration on Windows, so start the daemon again after a reboot.
 
 ## Quick start
 

@@ -5,7 +5,28 @@ keymapperd on Windows uses two in-box mechanisms, with no driver component:
 1. **Low-level keyboard hook** (`WH_KEYBOARD_LL`) — a session-global hook that intercepts every key event in the user session.
 2. **`SendInput`** — emits remapped key events as synthetic input.
 
-This is the final architecture for Windows: there is no virtual HID driver, and none is planned. The daemon runs as a plain user-mode process — nothing to install, sign, or update, and no elevation is required. The trade-offs of `SendInput` emission are documented in [Limitations](#limitations).
+This is the final architecture for Windows: there is no virtual HID driver, and none is planned. The daemon runs as a plain user-mode process — no driver to install, sign, or update, and no elevation is required. The trade-offs of `SendInput` emission are documented in [Limitations](#limitations).
+
+## Installation
+
+The Inno Setup installer is per-user and requires no elevation. It places `keymapper.exe` and `keymapperd.exe` in `%LOCALAPPDATA%\Programs\keymapper`, adds the directory to the user `PATH`, and registers a per-user scheduled task (`adrhinum\keymapperd`) that starts the daemon at logon. The task runs `keymapperd.exe` directly rather than a Windows service: the low-level hook must run in the interactive user session, and services run in session 0. `keymapper daemon status/stop/restart` match the process by image name, so they work regardless of how the daemon was started.
+
+**winget:**
+
+```powershell
+winget install adrhinum.keymapper
+```
+
+**Pre-built installer:** download the setup executable from the [releases page](https://github.com/mamrhein/keymapper.rs/releases) and run it. The installer is unsigned, so SmartScreen may warn on direct downloads.
+
+**From source:**
+
+```powershell
+cargo install --path .
+keymapper daemon start
+```
+
+To uninstall, use `winget uninstall adrhinum.keymapper` or the Add/Remove Programs entry; the configuration in `%APPDATA%\keymapperd` is preserved.
 
 ## How it works
 
