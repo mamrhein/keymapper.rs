@@ -1,6 +1,8 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.2.1  Remove Karabiner cask dependency from formula.
+
    0.2.0  New features:
            - Cross-platform **active app detection**: macOS via objc2, Linux via
              Wayland toplevel-info / X11 (x11rb) / sysinfo, Windows via
@@ -24,5 +26,3 @@ Version   Changes
              looking only in /var/root.
 
    0.1.0  First public version
-x
-x

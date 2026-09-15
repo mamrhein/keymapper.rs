@@ -324,5 +324,3 @@ sudo usermod -aG input $USER
 | Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                                                 |
 | macOS    | `CGEventTap` for input capture (keymapperd), Karabiner DriverKit virtual HID driver for event emission (virtkbdd) |
 | Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (see [windows-architecture.md](docs/windows-architecture.md))                                  |
-x
-x
