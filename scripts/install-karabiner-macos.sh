@@ -23,7 +23,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Pinned Karabiner DriverKit VirtualHIDDevice release.  Keep in sync with
-# scripts/package-macos.sh and brew/karabiner-driverkit-virtualhiddevice.rb.
+# scripts/package-macos.sh.
 KARABINER_VERSION="8.2.0"
 KARABINER_PKG_NAME="Karabiner-DriverKit-VirtualHIDDevice-${KARABINER_VERSION}.pkg"
 KARABINER_PKG_SHA256="7faf4c33046c2274726da9e29da795fb2d2ad81796557db0fcc1686c611eeafc"

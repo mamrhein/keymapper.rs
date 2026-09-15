@@ -73,26 +73,20 @@ jobs:
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
 
-          mkdir -p Formula Casks
+          mkdir -p Formula
 
-          # Bootstrap on first run: the tap may not contain the formula yet,
-          # so seed it from the keymapper repository at the release tag
-          # before updating it in place.
-          if [[ ! -f "Formula/keymapper.rb" ]]; then
-              gh api "repos/${{ github.repository }}/contents/brew/keymapper.rb?ref=v${VERSION}" \
-                --jq '.content' | base64 -d > "Formula/keymapper.rb"
-          fi
+          # Sync the formula from the keymapper repository at the release tag.
+          # The repo is the source of truth for the formula body, so re-seed it
+          # on every release (not just the first) to keep structural changes in
+          # the tap, then update the version and url below.
+          gh api "repos/${{ github.repository }}/contents/brew/keymapper.rb?ref=v${VERSION}" \
+            --jq '.content' | base64 -d > "Formula/keymapper.rb"
 
           # Update version and url in the formula
           sed -i '' \
             -e "s/version \".*\"/version \"$VERSION\"/" \
             -e "s|url \".*/v[^\"]*\"|url \"https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz\"|" \
             "Formula/keymapper.rb"
-
-          # Fetch the pinned Karabiner cask from the keymapper repository at
-          # the release tag (it is maintained there, not in the tap).
-          gh api "repos/${{ github.repository }}/contents/brew/karabiner-driverkit-virtualhiddevice.rb?ref=v${VERSION}" \
-            --jq '.content' | base64 -d > "Casks/karabiner-driverkit-virtualhiddevice.rb"
 
       - name: Open pull request
         env:
@@ -101,7 +95,7 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           BRANCH="update-to-${VERSION}"
           git checkout -b "$BRANCH"
-          git add Formula/keymapper.rb Casks/karabiner-driverkit-virtualhiddevice.rb
+          git add Formula/keymapper.rb
           git diff --cached --quiet || git commit -m "chore: update to version ${VERSION}"
           git push origin "$BRANCH" --force-with-lease
           gh pr create \

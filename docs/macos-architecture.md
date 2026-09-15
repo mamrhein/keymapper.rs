@@ -82,7 +82,7 @@ The decision logic lives in keymapperd (user domain) because the tap callback is
 brew install keymapper
 ```
 
-This builds the Rust binaries from source and installs the Karabiner DriverKit VirtualHIDDevice driver (via a cask dependency). The driver setup requires sudo.
+This builds the Rust binaries from source and installs the Karabiner DriverKit VirtualHIDDevice driver (via its install script). The driver setup requires sudo.
 
 The driver must be enabled in System Settings > General > Login Items & Extensions > Driver Extensions on first run. No reboot is required.
 
