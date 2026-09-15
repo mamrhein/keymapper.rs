@@ -16,10 +16,18 @@ Building from source requires Rust 1.95+ (edition 2024).
 
 keymapper runs two processes on macOS: **`keymapperd`** captures keyboard events in your user session (via a `CGEventTap`) and decides which keys are mapped, and **`virtkbdd`** runs as root and emits the mapped keys through the Karabiner DriverKit VirtualHIDDevice driver.
 
-**Homebrew:**
+**Homebrew (precompiled binaries):**
 
 ```bash
-brew install keymapper
+brew install --cask mamrhein/keymapper/keymapper-bin
+```
+
+This installs the precompiled release binaries for your architecture and the Karabiner DriverKit VirtualHIDDevice driver (via its install script). The driver setup requires sudo.
+
+**Homebrew (from source):**
+
+```bash
+brew install mamrhein/keymapper/keymapper
 ```
 
 This builds the Rust binaries from source and installs the Karabiner DriverKit VirtualHIDDevice driver (via its install script). The driver setup requires sudo.

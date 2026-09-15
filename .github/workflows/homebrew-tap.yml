@@ -3,7 +3,8 @@
 # triggers: version tags (v*)
 #
 # After the release workflow finishes, this job opens a pull request against
-# the Homebrew tap to update the formula with the new version and archive URLs.
+# the Homebrew tap to update the formula (source build) and the cask
+# (precompiled binaries) with the new version, archive URLs, and checksums.
 # No notarization step is required — ad-hoc signing is sufficient for local
 # driver installation.
 # ---------------------------------------------------------------------------
@@ -67,13 +68,13 @@ jobs:
           VERSION="${TAG#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Update formula
+      - name: Update formula and cask
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.meta.outputs.version }}"
 
-          mkdir -p Formula
+          mkdir -p Formula Casks
 
           # Sync the formula from the keymapper repository at the release tag.
           # The repo is the source of truth for the formula body, so re-seed it
@@ -84,9 +85,29 @@ jobs:
 
           # Update version and url in the formula
           sed -i '' \
-            -e "s/version \".*\"/version \"$VERSION\"/" \
+            -e "s/version \".*\"/version \"${VERSION}\"/" \
             -e "s|url \".*/v[^\"]*\"|url \"https://github.com/${{ github.repository }}/archive/refs/tags/v${VERSION}.tar.gz\"|" \
             "Formula/keymapper.rb"
+
+          # Sync the cask from the keymapper repository at the release tag.
+          gh api "repos/${{ github.repository }}/contents/brew/keymapper-bin.rb?ref=v${VERSION}" \
+            --jq '.content' | base64 -d > "Casks/keymapper-bin.rb"
+
+          # Download the macOS release archives and compute their checksums.
+          gh release download "v${VERSION}" --repo "${{ github.repository }}" \
+            -p "keymapper-v${VERSION}-aarch64-apple-darwin.tar.xz" -O keymapper-arm.tar.xz
+          gh release download "v${VERSION}" --repo "${{ github.repository }}" \
+            -p "keymapper-v${VERSION}-x86_64-apple-darwin.tar.xz" -O keymapper-intel.tar.xz
+          ARM_SHA=$(shasum -a 256 keymapper-arm.tar.xz | awk '{print $1}')
+          INTEL_SHA=$(shasum -a 256 keymapper-intel.tar.xz | awk '{print $1}')
+
+          # Update version and per-architecture checksums in the cask (the url
+          # interpolates the version, so it needs no update).
+          sed -i '' \
+            -e "s/version \".*\"/version \"${VERSION}\"/" \
+            -e "s|sha256 arm:   \"[0-9a-f]\{64\}\"|sha256 arm:   \"${ARM_SHA}\"|" \
+            -e "s|intel: \"[0-9a-f]\{64\}\"|intel: \"${INTEL_SHA}\"|" \
+            "Casks/keymapper-bin.rb"
 
       - name: Open pull request
         env:
@@ -95,11 +116,11 @@ jobs:
           VERSION="${{ steps.meta.outputs.version }}"
           BRANCH="update-to-${VERSION}"
           git checkout -b "$BRANCH"
-          git add Formula/keymapper.rb
+          git add Formula/keymapper.rb Casks/keymapper-bin.rb
           git diff --cached --quiet || git commit -m "chore: update to version ${VERSION}"
           git push origin "$BRANCH" --force-with-lease
           gh pr create \
             --title "chore: update to version ${VERSION}" \
-            --body "Automated pull request to update the Homebrew formula for keymapper ${VERSION}." \
+            --body "Automated pull request to update the Homebrew formula and cask for keymapper ${VERSION}." \
             --base main \
             --head "$BRANCH"

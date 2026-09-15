@@ -78,11 +78,19 @@ The decision logic lives in keymapperd (user domain) because the tap callback is
 
 ### Via Homebrew
 
+Precompiled binaries (no Rust toolchain required):
+
 ```bash
-brew install keymapper
+brew install --cask mamrhein/keymapper/keymapper-bin
 ```
 
-This builds the Rust binaries from source and installs the Karabiner DriverKit VirtualHIDDevice driver (via its install script). The driver setup requires sudo.
+Or build from source:
+
+```bash
+brew install mamrhein/keymapper/keymapper
+```
+
+Both install the Karabiner DriverKit VirtualHIDDevice driver (via its install script). The driver setup requires sudo.
 
 The driver must be enabled in System Settings > General > Login Items & Extensions > Driver Extensions on first run. No reboot is required.
 
