@@ -428,7 +428,7 @@ extern "system" fn low_level_keyboard_proc(
         };
     }
 
-    let is_key_up = !matches!(w_param.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+    let is_key_down = matches!(w_param.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
 
     // Derive the HID identity of the key — the lookup key space of the
     // compiled rules.  `None` for virtual-key codes without a `HidUsage`
@@ -465,7 +465,7 @@ extern "system" fn low_level_keyboard_proc(
     let decision = engine.lock().decide(
         (kbd_struct.scanCode as u16, kbd_struct.flags.0 & 1 != 0),
         usage,
-        is_key_up,
+        is_key_down,
         device_path.as_deref(),
         true,
     );
