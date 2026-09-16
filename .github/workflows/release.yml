@@ -217,11 +217,28 @@ jobs:
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc
 
+      - name: Install Inno Setup 7 (64-bit)
+        shell: pwsh
+        run: |
+          winget install --id JRSoftware.InnoSetup.7 -e --silent --accept-package-agreements --accept-source-agreements
+
       - name: Build installer
         shell: pwsh
         run: |
           $version = "${{ github.ref_name }}".TrimStart("v")
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer/keymapper.iss" "/DMyVersion=$version"
+          # The Inno Setup installer runs in current-user mode when silent,
+          # so resolve ISCC.exe from the uninstall registry key instead of
+          # assuming a machine-wide install location.
+          $installLocation = @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
+          ) | ForEach-Object { Get-ChildItem $_ -ErrorAction SilentlyContinue } |
+            ForEach-Object { Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue } |
+            Where-Object { $_.DisplayName -like 'Inno Setup 7*' } |
+            Select-Object -ExpandProperty InstallLocation -First 1
+          if (-not $installLocation) { throw 'Inno Setup 7 was not found in the uninstall registry.' }
+          & (Join-Path $installLocation 'ISCC.exe') "installer/keymapper.iss" "/DMyVersion=$version"
 
       - name: Upload artifact
         shell: pwsh
