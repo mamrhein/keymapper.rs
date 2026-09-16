@@ -238,7 +238,7 @@ jobs:
             Where-Object { $_.DisplayName -like 'Inno Setup 7*' } |
             Select-Object -ExpandProperty InstallLocation -First 1
           if (-not $installLocation) { throw 'Inno Setup 7 was not found in the uninstall registry.' }
-          & (Join-Path $installLocation 'ISCC.exe') "installer/keymapper.iss" "/DMyVersion=$version"
+          & (Join-Path $installLocation 'ISCC.exe') "installer/keymapper.iss" "/DVersion=$version"
 
       - name: Upload artifact
         shell: pwsh

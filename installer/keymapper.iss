@@ -12,12 +12,10 @@
 ; session, and services run in session 0.
 ;
 ; Build with ISCC from the repository root:
-;   "%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe" installer/keymapper.iss
-; Override the version (default: the current release) with /DMyVersion:
-;   "%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe" installer/keymapper.iss /DMyVersion=0.3.0
+;   "%LOCALAPPDATA%\Programs\Inno Setup 7\ISCC.exe" installer/keymapper.iss \
+;   /DVersion=<version>
 ; ---------------------------------------------------------------------------
 
-#define MyVersion "0.2.1"
 #define SourceDir "..\target\x86_64-pc-windows-msvc\release"
 
 ; Stable application id so that a newer installer upgrades the existing
@@ -30,7 +28,7 @@
 [Setup]
 AppId={#AppId}
 AppName=keymapper
-AppVersion={#MyVersion}
+AppVersion={#Version}
 AppPublisher=Michael Amrhein
 AppPublisherURL=https://github.com/mamrhein/keymapper.rs
 AppSupportURL=https://github.com/mamrhein/keymapper.rs/issues
@@ -48,7 +46,7 @@ SetupArchitecture=x64
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist
-OutputBaseFilename=keymapper-v{#MyVersion}-x86_64-pc-windows-msvc-setup
+OutputBaseFilename=keymapper-v{#Version}-x86_64-pc-windows-msvc-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
