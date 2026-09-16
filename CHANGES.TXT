@@ -1,6 +1,10 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.2.2  Add Homebrew cask for precompiled binaries.
+          Add Linux binary installer script.
+          Add Windows installer and winget distribution.
+
    0.2.1  Remove Karabiner cask dependency from formula.
 
    0.2.0  New features:
