@@ -1,25 +1,15 @@
 # ---------------------------------------------------------------------------
-# winget installer manifest template for keymapper.
+# winget version manifest template for keymapper.
 #
 # The winget-pkgs workflow copies this file into a fork of
 # microsoft/winget-pkgs at manifests/a/adrhinum/keymapper/<version>/ and
-# substitutes the @VERSION@ and @SHA256@ placeholders.  This file is the
-# source of truth; do not edit the generated copy in the fork.
+# substitutes the @VERSION@ placeholder.  This file is the source of truth;
+# do not edit the generated copy in the fork.
 # ---------------------------------------------------------------------------
 
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.13.0.schema.json
-Identifier: adrhinum.keymapper
-Version: "@VERSION@"
-Architecture: x64
-ManifestType: installer
-ManifestVersion: 1.13.0
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
+PackageIdentifier: adrhinum.keymapper
+PackageVersion: "@VERSION@"
 DefaultLocale: en-US
-Platforms:
-  - Windows.Desktop
-Installer:
-  - Locale: en-US
-    InstallerType: inno
-    InstallerUrl: "https://github.com/mamrhein/keymapper.rs/releases/download/v@VERSION@/keymapper-v@VERSION@-x86_64-pc-windows-msvc-setup.exe"
-    InstallerSha256: "@SHA256@"
-    Scope: user
-    Silent: /VERYSILENT /NORESTART
+ManifestType: version
+ManifestVersion: 1.12.0

@@ -102,14 +102,14 @@ jobs:
           # Fetch the templates from the keymapper repository at the release
           # tag (the repo is the source of truth, mirroring homebrew-tap),
           # then substitute the version and sha256 placeholders.
-          foreach ($name in @("adrhinum.keymapper.yaml", "keymapper.locale.en-US.yaml")) {
+          foreach ($name in @("adrhinum.keymapper.yaml", "adrhinum.keymapper.installer.yaml", "adrhinum.keymapper.locale.en-US.yaml")) {
             $path = Join-Path $manifestDir $name
             $content = gh api "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION" --jq '.content'
             [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content)) |
               Set-Content -Path $path -Encoding utf8 -NoNewline
             (Get-Content $path -Raw) `
               -replace '@VERSION@', $env:VERSION `
-              -replace '@SHA256@', $env:SHA256 |
+              -replace '[0-9a-f]{64}', $env:SHA256 |
               Set-Content -Path $path -Encoding utf8 -NoNewline
           }
 
