@@ -1,6 +1,9 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.2.3  Migrate winget manifests to multi-file format.
+          Migrate Windows installer to Inno Setup 7.
+
    0.2.2  Add Homebrew cask for precompiled binaries.
           Add Linux binary installer script.
           Add Windows installer and winget distribution.
