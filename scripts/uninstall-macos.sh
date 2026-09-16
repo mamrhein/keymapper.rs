@@ -49,14 +49,22 @@ CONSOLE_USER="$(stat -f '%Su' /dev/console)"
 CONSOLE_UID="$(id -u "$CONSOLE_USER")"
 CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory | awk '{print $2}')"
 
+# Run a launchctl command in the console user's gui domain.  This script runs
+# as root (brew invokes it with sudo), and a root process cannot reach another
+# user's gui/<UID> domain directly — the gui-domain verbs fail with an input/
+# output error.  `launchctl asuser` establishes the proper bootstrap port for
+# that user's domain, so they succeed.
+gui_launchctl() {
+    launchctl asuser "$CONSOLE_UID" launchctl "$@"
+}
+
 if [ -n "$CONSOLE_HOME" ] && [ -d "$CONSOLE_HOME" ]; then
     KEYMAPPERD_PLIST="${CONSOLE_HOME}/Library/LaunchAgents/${KEYMAPPERD_LABEL}.plist"
 
-    # The `gui/<UID>/<label>` target form is required: on recent macOS (Tahoe
-    # and later) the two-argument `launchctl <verb> gui/<UID> <label>` form
-    # fails with an input/output error and leaves the service loaded.
-    if launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
-        launchctl bootout "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}"
+    # The gui-domain verbs go through `gui_launchctl` (see above) so they run
+    # in the console user's domain rather than root's.
+    if gui_launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
+        gui_launchctl bootout "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}"
         echo "Stopped ${KEYMAPPERD_LABEL}."
     else
         echo "${KEYMAPPERD_LABEL} is not loaded."

@@ -95,6 +95,15 @@ if [ -z "$CONSOLE_HOME" ] || [ ! -d "$CONSOLE_HOME" ]; then
     exit 1
 fi
 
+# Run a launchctl command in the console user's gui domain.  This script runs
+# as root (brew invokes it with sudo), and a root process cannot reach another
+# user's gui/<UID> domain directly — `launchctl bootstrap gui/<UID>` fails with
+# an input/output error.  `launchctl asuser` establishes the proper bootstrap
+# port for that user's domain, so the gui-domain verbs below succeed.
+gui_launchctl() {
+    launchctl asuser "$CONSOLE_UID" launchctl "$@"
+}
+
 KEYMAPPERD_BIN="${CONSOLE_HOME}/.local/bin/keymapperd"
 LAUNCH_AGENTS_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 KEYMAPPERD_LOG_DIR="${CONSOLE_HOME}/Library/Logs/keymapper"
@@ -168,11 +177,10 @@ mkdir -p "$KEYMAPPERD_LOG_DIR"
 chown "$CONSOLE_USER" "$KEYMAPPERD_LOG_DIR"
 
 # If the service is already loaded, unload it first so we can replace the plist.
-# The `gui/<UID>/<label>` target form is required: on recent macOS (Tahoe and
-# later) the two-argument `launchctl <verb> gui/<UID> <label>` form fails with
-# an input/output error and leaves the service loaded.
-if launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
-    launchctl bootout "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" 2>/dev/null || true
+# All gui-domain verbs go through `gui_launchctl` (see above) so they run in the
+# console user's domain rather than root's.
+if gui_launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
+    gui_launchctl bootout "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" 2>/dev/null || true
 fi
 
 sed \
@@ -184,9 +192,9 @@ chmod 644 "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 
 echo "Installed ${KEYMAPPERD_LABEL}.plist to ${LAUNCH_AGENTS_DIR}/"
 
-launchctl bootstrap "gui/${CONSOLE_UID}" "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
+gui_launchctl bootstrap "gui/${CONSOLE_UID}" "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 
-if launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
+if gui_launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1; then
     echo "keymapperd is running via launchd."
 else
     echo "Warning: keymapperd was installed but does not appear to be running." >&2
