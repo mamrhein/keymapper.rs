@@ -108,6 +108,14 @@ KEYMAPPERD_BIN="${CONSOLE_HOME}/.local/bin/keymapperd"
 LAUNCH_AGENTS_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 KEYMAPPERD_LOG_DIR="${CONSOLE_HOME}/Library/Logs/keymapper"
 
+# Remove the com.apple.quarantine xattr from a file, if present.  brew leaves
+# this on the files extracted from the release archive, and `cp`/`install`
+# carry it onto the installed copies.  launchd refuses to trust a quarantined
+# service definition (error 155), so every file we install must be clean of it.
+dequarantine() {
+    xattr -d com.apple.quarantine "$1" 2>/dev/null || true
+}
+
 # Copy a binary to its canonical location (skipping the copy when source and
 # destination are the same file), then fix ownership.
 install_binary() {
@@ -116,6 +124,7 @@ install_binary() {
     if [ ! "$src" -ef "$dst" ]; then
         install -m 755 "$src" "$dst"
     fi
+    dequarantine "$dst"
     chown "$owner" "$dst"
 }
 
@@ -138,6 +147,7 @@ sed \
     -e "s|@BINARY_PATH@|$VIRTKBDD_BIN|g" \
     -e "s|@LOG_DIR@|$VIRTKBDD_LOG_DIR|g" \
     "$VIRTKBDD_TEMPLATE" > "$LAUNCH_DAEMONS_DIR/${VIRTKBDD_LABEL}.plist"
+dequarantine "$LAUNCH_DAEMONS_DIR/${VIRTKBDD_LABEL}.plist"
 chown root:wheel "$LAUNCH_DAEMONS_DIR/${VIRTKBDD_LABEL}.plist"
 chmod 644 "$LAUNCH_DAEMONS_DIR/${VIRTKBDD_LABEL}.plist"
 
@@ -187,6 +197,7 @@ sed \
     -e "s|@BINARY_PATH@|$KEYMAPPERD_BIN|g" \
     -e "s|@LOG_DIR@|$KEYMAPPERD_LOG_DIR|g" \
     "$KEYMAPPERD_TEMPLATE" > "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
+dequarantine "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 chown "$CONSOLE_USER" "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 chmod 644 "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 

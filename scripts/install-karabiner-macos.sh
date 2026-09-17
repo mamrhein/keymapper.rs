@@ -121,6 +121,11 @@ if launchctl print system/"$LABEL" >/dev/null 2>&1; then
 fi
 
 cp "$PLIST_TEMPLATE" "$LAUNCH_DAEMONS_DIR/${LABEL}.plist"
+# Strip the com.apple.quarantine xattr that brew leaves on the extracted release
+# files: `cp` carries it onto the installed plist, and launchd refuses to trust a
+# quarantined service definition (error 155: "Refusing to execute/trust
+# quarantined program/file").
+xattr -d com.apple.quarantine "$LAUNCH_DAEMONS_DIR/${LABEL}.plist" 2>/dev/null || true
 chown root:wheel "$LAUNCH_DAEMONS_DIR/${LABEL}.plist"
 chmod 644 "$LAUNCH_DAEMONS_DIR/${LABEL}.plist"
 
