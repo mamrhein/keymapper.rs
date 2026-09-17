@@ -101,32 +101,34 @@ jobs:
           $manifestDir = "manifests/a/adrhinum/keymapper/$env:VERSION"
           New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
 
-          # Verify the release tag is resolvable before fetching the templates.
-          # Retry a few times because the ref may not be visible to the API
-          # immediately after being pushed, or may be briefly absent if it was
-          # deleted and re-pushed while the release workflow was still running.
-          $refUrl = "repos/${{ github.repository }}/git/refs/tags/v$env:VERSION"
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            gh api $refUrl | Out-Null
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -eq 5) {
-              throw "Tag v$env:VERSION was not found in ${{ github.repository }} after 5 attempts. The tag may have been deleted or not pushed yet."
+          # GitHub's git data APIs are eventually consistent right after a
+          # tag push: the ref may not be visible yet, a re-pushed tag may be
+          # briefly absent, and the contents API can 404 for a ref that
+          # already resolves. Retry to ride out the inconsistency window.
+          function Invoke-GhApiWithRetry {
+            param([Parameter(Mandatory = $true)][string]$Path)
+            for ($attempt = 1; $attempt -le 10; $attempt++) {
+              # `--jq '.'` keeps the response on a single line so it can be
+              # decoded as one JSON document; on failure, gh prints the error
+              # to stderr, which is captured for the diagnostic message.
+              $output = gh api $Path --jq '.' 2>&1
+              if ($LASTEXITCODE -eq 0) { return $output }
+              if ($attempt -eq 10) {
+                throw "gh api $Path failed after 10 attempts (exit code $LASTEXITCODE): $output"
+              }
+              Start-Sleep -Seconds 30
             }
-            Start-Sleep -Seconds 30
           }
+
+          # Verify the release tag is resolvable before fetching the templates.
+          Invoke-GhApiWithRetry "repos/${{ github.repository }}/git/refs/tags/v$env:VERSION" | Out-Null
 
           # Fetch the templates from the keymapper repository at the release
           # tag (the repo is the source of truth, mirroring homebrew-tap),
           # then substitute the version and sha256 placeholders.
           foreach ($name in @("adrhinum.keymapper.yaml", "adrhinum.keymapper.installer.yaml", "adrhinum.keymapper.locale.en-US.yaml")) {
             $path = Join-Path $manifestDir $name
-            # On failure, `gh api --jq` prints the error JSON to stdout, so
-            # check the exit code before decoding to avoid a misleading
-            # base64 exception.
-            $content = gh api "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION" --jq '.content'
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to fetch winget/$name at v$env:VERSION (gh exit code $LASTEXITCODE)."
-            }
+            $content = (Invoke-GhApiWithRetry "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION" | ConvertFrom-Json).content
             [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content)) |
               Set-Content -Path $path -Encoding utf8 -NoNewline
             (Get-Content $path -Raw) `
