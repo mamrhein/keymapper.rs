@@ -40,6 +40,7 @@ use std::{
     },
 };
 
+use log::info;
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation,
@@ -166,7 +167,7 @@ fn run_event_loop(shutdown: &Arc<AtomicBool>) {
         CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
     }
 
-    println!("Shutdown signal received. Cleaning up...");
+    info!("Shutdown signal received. Cleaning up...");
 }
 
 /// Compute the down/up state of a `FlagsChanged` event from its usage and

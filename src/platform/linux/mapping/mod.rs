@@ -38,6 +38,7 @@ use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
 use hotplug::start_hotplug_monitor;
 use libc::epoll_event;
+use log::{error, info};
 use parking_lot::{Mutex, RwLock};
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
@@ -86,7 +87,7 @@ pub fn start_mapping(
         .collect();
 
     if opened_to_grab.is_empty() {
-        println!("No keyboards to grab. Waiting for events...");
+        info!("No keyboards to grab. Waiting for events...");
     }
 
     // Grab and register all opened keyboards.
@@ -95,7 +96,7 @@ pub fn start_mapping(
         device.grab()?;
         device.set_nonblocking(true)?;
 
-        println!("Grabbed keyboard: {} ({})", kb.device, kb.name);
+        info!("Grabbed keyboard: {} ({})", kb.device, kb.name);
         managed_devices.push(ManagedDevice {
             device,
             path: kb.device,
@@ -117,7 +118,7 @@ pub fn start_mapping(
         .build()?;
 
     thread::sleep(Duration::from_millis(200));
-    println!("Linux virtual keyboard ready.");
+    info!("Linux virtual keyboard ready.");
 
     // Sync each grabbed keyboard's currently-held keys to the virtual device
     // and per-device modifier tracking.  This runs before the event loop so
@@ -137,7 +138,7 @@ pub fn start_mapping(
     // Set up epoll for multiplexing across all managed devices.  `EpollFd`
     // owns the epoll fd and closes it on drop.
     let epoll_fd = EpollFd::new().map_err(|e| {
-        eprintln!("Linux: failed to create epoll instance: {e}");
+        error!("Linux: failed to create epoll instance: {e}");
         e
     })?;
 
@@ -192,12 +193,12 @@ pub fn start_mapping(
                 continue;
             }
             Err(e) => {
-                eprintln!("Linux: epoll wait error: {e}");
+                error!("Linux: epoll wait error: {e}");
                 thread::sleep(Duration::from_millis(100));
             }
         }
     }
 
-    println!("Shutdown signal received. Cleaning up...");
+    info!("Shutdown signal received. Cleaning up...");
     Ok(())
 }

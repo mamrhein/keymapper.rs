@@ -47,6 +47,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use log::{info, warn};
+
 // ---------------------------------------------------------------------------
 // Protocol constants
 // ---------------------------------------------------------------------------
@@ -472,11 +474,11 @@ fn client_loop(
 
         match UnixStream::connect(SOCKET_PATH) {
             Ok(stream) => {
-                eprintln!("Karabiner daemon connected");
+                info!("Karabiner daemon connected");
                 if let Err(e) =
                     run_connection(stream, &rx, &ready, &shutdown, identity)
                 {
-                    eprintln!(
+                    warn!(
                         "Karabiner daemon connection lost ({e}); \
                          reconnecting in {} ms",
                         RECONNECT_INTERVAL.as_millis()
@@ -485,7 +487,7 @@ fn client_loop(
                 ready.store(false, Ordering::Release);
             }
             Err(e) => {
-                eprintln!(
+                warn!(
                     "Karabiner daemon not reachable ({e}); retrying in {} ms",
                     RECONNECT_INTERVAL.as_millis()
                 );
@@ -606,18 +608,18 @@ fn apply_state_pairs(ready: &Arc<AtomicBool>, payload: &[u8]) {
     for pair in payload.as_chunks::<2>().0 {
         match (pair[0], pair[1]) {
             (RESP_DRIVER_ACTIVATED, 1) => {
-                eprintln!("Karabiner driver activated");
+                info!("Karabiner driver activated");
             }
             (RESP_DRIVER_CONNECTED, 1) => {
-                eprintln!("Karabiner driver connected");
+                info!("Karabiner driver connected");
             }
             (RESP_DRIVER_VERSION_MISMATCHED, 1) => {
-                eprintln!("Karabiner driver version mismatched");
+                warn!("Karabiner driver version mismatched");
             }
             (RESP_VIRTUAL_HID_KEYBOARD_READY, value) => {
                 ready.store(value == 1, Ordering::Release);
                 if value == 1 {
-                    eprintln!("Karabiner virtual keyboard ready");
+                    info!("Karabiner virtual keyboard ready");
                 }
             }
             _ => {}

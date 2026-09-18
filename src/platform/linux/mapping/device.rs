@@ -23,6 +23,7 @@ use std::{
 };
 
 use evdev::{Device, EventType, InputEvent, MiscCode, uinput::VirtualDevice};
+use log::error;
 
 use crate::{
     common::{hid_usage::HidUsage, modifier::ModifierRole},
@@ -171,10 +172,7 @@ pub(super) fn process_device_events(
             return;
         }
         Err(e) => {
-            eprintln!(
-                "Linux: error reading events from {}: {}",
-                managed.path, e
-            );
+            error!("Linux: error reading events from {}: {}", managed.path, e);
             return;
         }
     };
@@ -244,12 +242,12 @@ pub(super) fn process_device_events(
                         if let Err(e) =
                             hold_modifier_output(virtual_device, native_key)
                         {
-                            eprintln!("emit error: {}", e);
+                            error!("emit error: {e}");
                         }
                     } else if let Err(e) =
                         emit_key_event(virtual_device, native_key)
                     {
-                        eprintln!("emit error: {}", e);
+                        error!("emit error: {e}");
                     }
                 }
             }
@@ -353,7 +351,7 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
             InputEvent::new(EV_SYN, SYN_REPORT, 0),
         ];
         if let Err(e) = device.emit(&events) {
-            eprintln!("emit error: {e}");
+            error!("emit error: {e}");
         }
         return;
     }
@@ -363,7 +361,7 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
         InputEvent::new(EV_SYN, SYN_REPORT, 0),
     ];
     if let Err(e) = device.emit(&events) {
-        eprintln!("emit error: {e}");
+        error!("emit error: {e}");
     }
 }
 

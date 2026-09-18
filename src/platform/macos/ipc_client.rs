@@ -31,6 +31,8 @@ use std::{
     time::Duration,
 };
 
+use log::{info, warn};
+
 use super::ipc_frame;
 use crate::daemon::mapping_cache::NativeKey;
 
@@ -125,9 +127,9 @@ fn writer_loop(
                 // The socket is live and can accept output; mark the emitter
                 // reachable before the first batch is written.
                 reachable.store(true, Ordering::Release);
-                eprintln!("virtkbdd connected");
+                info!("virtkbdd connected");
                 if let Err(e) = write_loop(stream, &rx, &shutdown) {
-                    eprintln!(
+                    warn!(
                         "virtkbdd connection lost ({e}); reconnecting in {} \
                          ms",
                         RECONNECT_INTERVAL.as_millis()
@@ -135,7 +137,7 @@ fn writer_loop(
                 }
             }
             Err(e) => {
-                eprintln!(
+                warn!(
                     "virtkbdd not reachable ({e}); retrying in {} ms",
                     RECONNECT_INTERVAL.as_millis()
                 );

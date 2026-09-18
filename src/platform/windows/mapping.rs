@@ -45,6 +45,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
+use log::{error, info};
 use parking_lot::RwLock;
 // The drain wake post is only compiled into non-test builds (see
 // `queue_emission`); unit tests never queue an emission.
@@ -273,7 +274,7 @@ pub(super) fn emit_key_event(native_key: &NativeKey) {
         .or_else(|| hid_to_vk(native_key.usage));
 
     let Some(base_vk) = base_vk else {
-        eprintln!(
+        error!(
             "Windows: no VK code for output HID usage {:?}",
             native_key.usage
         );
@@ -589,7 +590,7 @@ pub fn start_mapping(
     }
     set_hook_handle(handle);
 
-    println!("Windows low-level hook listening (two-thread mode).");
+    info!("Windows low-level hook listening (two-thread mode).");
 
     // Run the message loop until WM_QUIT.  A `WH_KEYBOARD_LL` callback is
     // only invoked while the installing thread pumps messages through the

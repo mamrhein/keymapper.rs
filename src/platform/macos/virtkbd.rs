@@ -24,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use log::{info, warn};
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
     flag::register,
@@ -79,7 +80,7 @@ pub fn start_virtkbd() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !client.is_ready() {
-        eprintln!(
+        warn!(
             "Karabiner virtual keyboard not ready after {}s; continuing and \
              retrying in the background",
             READY_TIMEOUT.as_secs()
@@ -89,6 +90,6 @@ pub fn start_virtkbd() -> Result<(), Box<dyn std::error::Error>> {
     // Serve keymapperd until a shutdown signal is received.
     ipc_server::run_server(&client, shutdown)?;
 
-    println!("Shutdown signal received. Cleaning up...");
+    info!("Shutdown signal received. Cleaning up...");
     Ok(())
 }

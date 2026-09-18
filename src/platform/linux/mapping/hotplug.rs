@@ -22,6 +22,7 @@ use std::{
 };
 
 use libc::c_int;
+use log::{info, warn};
 use parking_lot::{Mutex, RwLock};
 use udev::{Enumerator, MonitorBuilder};
 
@@ -60,7 +61,7 @@ pub(super) fn start_hotplug_monitor(
             let socket = match MonitorBuilder::new() {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("warning: failed to create udev monitor: {e}");
+                    warn!("failed to create udev monitor: {e}");
                     return;
                 }
             };
@@ -68,7 +69,7 @@ pub(super) fn start_hotplug_monitor(
             let socket = match socket.match_subsystem("input") {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("warning: failed to match input subsystem: {e}");
+                    warn!("failed to match input subsystem: {e}");
                     return;
                 }
             };
@@ -76,12 +77,12 @@ pub(super) fn start_hotplug_monitor(
             let socket = match socket.listen() {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("warning: failed to start udev monitor: {e}");
+                    warn!("failed to start udev monitor: {e}");
                     return;
                 }
             };
 
-            println!("Hot-plug monitor started.");
+            info!("Hot-plug monitor started.");
 
             // Resync: the startup udev snapshot in `start_mapping` and this
             // monitor's `listen()` call are not atomic.  A keyboard added in
@@ -118,8 +119,8 @@ pub(super) fn start_hotplug_monitor(
                     {
                         continue;
                     }
-                    eprintln!(
-                        "warning: udev monitor poll failed: {}",
+                    warn!(
+                        "udev monitor poll failed: {}",
                         std::io::Error::last_os_error()
                     );
                     break;
@@ -128,9 +129,9 @@ pub(super) fn start_hotplug_monitor(
                     & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
                     != 0
                 {
-                    eprintln!(
-                        "warning: udev monitor socket closed, hot-plug \
-                         monitoring stopped"
+                    warn!(
+                        "udev monitor socket closed, hot-plug monitoring \
+                         stopped"
                     );
                     break;
                 }
@@ -190,19 +191,19 @@ fn resync_devices(
     global_filter: &Option<Vec<KeyboardSpecifier>>,
 ) {
     let Ok(mut enumerator) = Enumerator::new() else {
-        eprintln!("warning: resync: failed to create udev enumerator");
+        warn!("resync: failed to create udev enumerator");
         return;
     };
 
     if enumerator.match_subsystem("input").is_err()
         || enumerator.match_property("ID_INPUT_KEYBOARD", "1").is_err()
     {
-        eprintln!("warning: resync: failed to configure udev enumerator");
+        warn!("resync: failed to configure udev enumerator");
         return;
     }
 
     let Ok(devices) = enumerator.scan_devices() else {
-        eprintln!("warning: resync: failed to scan udev devices");
+        warn!("resync: failed to scan udev devices");
         return;
     };
 
@@ -246,7 +247,7 @@ fn handle_device_add(
         global_filter.as_deref(),
     );
     if filtered.is_empty() {
-        println!(
+        info!(
             "Hot-plug: ignoring {} (does not match global filter)",
             kb.name
         );
@@ -263,12 +264,12 @@ fn handle_device_add(
 
     // Grab and configure the device.
     if let Err(e) = device.grab() {
-        eprintln!("warning: failed to grab {}: {e}", kb.device);
+        warn!("failed to grab {}: {e}", kb.device);
         return;
     }
 
     if let Err(e) = device.set_nonblocking(true) {
-        eprintln!("warning: failed to set non-blocking on {}: {e}", kb.device);
+        warn!("failed to set non-blocking on {}: {e}", kb.device);
         return;
     }
 
@@ -291,7 +292,7 @@ fn handle_device_add(
 
     // Register with epoll.
     if let Err(e) = epoll_add(epoll_fd, fd, fd as u64) {
-        eprintln!("warning: failed to add {} to epoll: {e}", kb.device);
+        warn!("failed to add {} to epoll: {e}", kb.device);
         // Rollback: remove from managed devices since epoll registration
         // failed.
         let mut devices = managed_devices.lock();
@@ -301,7 +302,7 @@ fn handle_device_add(
         return;
     }
 
-    println!("Hot-plug: grabbed {} ({})", kb.device, kb.name);
+    info!("Hot-plug: grabbed {} ({})", kb.device, kb.name);
 }
 
 /// Handle a udev "remove" event for a keyboard device.
@@ -317,7 +318,7 @@ fn handle_device_remove(
         Some(d) => d.to_string_lossy().into_owned(),
         None => {
             // Cannot identify the device without a devnode.
-            eprintln!("warning: remove event without devnode, skipping");
+            warn!("remove event without devnode, skipping");
             return;
         }
     };
@@ -342,10 +343,10 @@ fn handle_device_remove(
     // this gracefully.  If the kernel already cleaned it up, this may
     // fail — log and ignore.
     if let Err(e) = epoll_del(epoll_fd as c_int, fd) {
-        eprintln!("warning: failed to remove {dev_path} from epoll: {e}");
+        warn!("failed to remove {dev_path} from epoll: {e}");
     }
 
-    println!("Hot-plug: removed {dev_path}");
+    info!("Hot-plug: removed {dev_path}");
 }
 
 // ---------------------------------------------------------------------------
