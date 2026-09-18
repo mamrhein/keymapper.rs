@@ -7,12 +7,11 @@
 // $Source$
 // $Revision$
 
-//! Service-manager process management for keymapperd (production mode).
+//! Service-manager process management for keymapperd.
 //!
 //! On macOS and Linux this delegates to the native service manager (launchd /
-//! `systemctl --user`).  On Windows it directly spawns the daemon binary.
-//! This is the backend selected when no `--config-dir` is provided; the
-//! PID-file (development) backend lives in [`super::pid_file`].
+//! `systemctl --user`).  On Windows it directly spawns the daemon binary.  The
+//! service manager is the sole owner of the daemon's lifecycle.
 //!
 //! On macOS the service manager additionally owns virtkbdd, the root
 //! LaunchDaemon that emits mapped keys; the `virtkbdd_*` functions manage it

@@ -319,10 +319,7 @@ Key introspection tools.
 
 Daemon process management.
 
-All subcommands accept an optional `--config-dir DIR` flag that selects the process-management backend, chosen once per invocation so a `start` and a later `stop` always target the same mechanism:
-
-- **Omitted** (production mode) — manages keymapperd through the platform service manager: `launchctl` on macOS, `systemctl --user` on Linux, or a direct spawn on Windows.
-- **`--config-dir DIR`** (development mode) — spawns keymapperd as a detached background process with `DIR` as its working directory, tracked through `DIR/keymapperd.pid`.
+All subcommands manage keymapperd through the platform service manager: `launchctl` on macOS, `systemctl --user` on Linux, or a direct spawn on Windows.
 
 | Subcommand | Description                                   |
 | ---------- | --------------------------------------------- |

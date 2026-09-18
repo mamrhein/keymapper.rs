@@ -70,49 +70,16 @@ enum Commands {
 #[derive(Subcommand)]
 enum DaemonCommands {
     /// Check whether keymapperd is running.
-    Status {
-        /// Directory containing the PID file (`keymapperd.pid`).
-        ///
-        /// When specified, checks the PID-file (development) backend.  When
-        /// omitted, checks the platform service manager.
-        #[arg(long)]
-        config_dir: Option<PathBuf>,
-    },
+    Status,
 
     /// Start keymapperd if it is not already running.
-    Start {
-        /// Directory containing `config.yaml`.
-        ///
-        /// When specified, spawns keymapperd as a background process with
-        /// this directory as its working directory.  The PID is
-        /// written to `<path>/keymapperd.pid` for later stop/restart.
-        ///
-        /// When omitted, uses the platform service manager (launchd /
-        /// systemd) to manage the daemon.  This is the production
-        /// mode.
-        #[arg(long)]
-        config_dir: Option<PathBuf>,
-    },
+    Start,
 
     /// Stop keymapperd if it is running.
-    Stop {
-        /// Directory containing the PID file (`keymapperd.pid`).
-        ///
-        /// When specified, stops the process that was started with
-        /// `--config-dir`.  When omitted, uses the platform service manager.
-        #[arg(long)]
-        config_dir: Option<PathBuf>,
-    },
+    Stop,
 
     /// Restart keymapperd (stop then start).
-    Restart {
-        /// Directory containing `config.yaml` and the PID file.
-        ///
-        /// When specified, uses PID-based process management.  When omitted,
-        /// uses the platform service manager.
-        #[arg(long)]
-        config_dir: Option<PathBuf>,
-    },
+    Restart,
 }
 
 #[derive(Subcommand)]
@@ -232,18 +199,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Keyboards => cmd_keyboards(),
         Commands::Daemon { command } => match command {
-            DaemonCommands::Status { config_dir } => {
-                cmd_daemon_status(config_dir)?
-            }
-            DaemonCommands::Start { config_dir } => {
-                cmd_daemon_start(config_dir)?
-            }
-            DaemonCommands::Stop { config_dir } => {
-                cmd_daemon_stop(config_dir)?
-            }
-            DaemonCommands::Restart { config_dir } => {
-                cmd_daemon_restart(config_dir)?
-            }
+            DaemonCommands::Status => cmd_daemon_status()?,
+            DaemonCommands::Start => cmd_daemon_start()?,
+            DaemonCommands::Stop => cmd_daemon_stop()?,
+            DaemonCommands::Restart => cmd_daemon_restart()?,
         },
     }
 
@@ -574,12 +533,8 @@ fn cmd_config_add(
     Ok(())
 }
 
-fn cmd_daemon_status(
-    config_dir: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let backend = daemon_cmd::Backend::from_config_dir(config_dir);
-
-    if daemon_cmd::is_running(&backend) {
+fn cmd_daemon_status() -> Result<(), Box<dyn std::error::Error>> {
+    if daemon_cmd::is_running() {
         println!("keymapperd is running");
     } else {
         println!("keymapperd is not running");
@@ -587,26 +542,20 @@ fn cmd_daemon_status(
 
     // On macOS the service manager also owns virtkbdd; report it as well.
     #[cfg(target_os = "macos")]
-    if matches!(&backend, daemon_cmd::Backend::ServiceManager) {
-        if daemon_cmd::virtkbdd_is_running() {
-            println!("virtkbdd is running");
-        } else {
-            println!("virtkbdd is not running");
-        }
+    if daemon_cmd::virtkbdd_is_running() {
+        println!("virtkbdd is running");
+    } else {
+        println!("virtkbdd is not running");
     }
 
     Ok(())
 }
 
-fn cmd_daemon_start(
-    config_dir: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let backend = daemon_cmd::Backend::from_config_dir(config_dir);
-
-    if daemon_cmd::is_running(&backend) {
+fn cmd_daemon_start() -> Result<(), Box<dyn std::error::Error>> {
+    if daemon_cmd::is_running() {
         println!("keymapperd is already running");
     } else {
-        daemon_cmd::start(&backend)
+        daemon_cmd::start()
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         println!("keymapperd started");
     }
@@ -614,9 +563,7 @@ fn cmd_daemon_start(
     // On macOS the service manager also owns virtkbdd; bring it up even when
     // keymapperd was already running.
     #[cfg(target_os = "macos")]
-    if matches!(&backend, daemon_cmd::Backend::ServiceManager)
-        && !daemon_cmd::virtkbdd_is_running()
-    {
+    if !daemon_cmd::virtkbdd_is_running() {
         daemon_cmd::virtkbdd_start()
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         println!("virtkbdd started");
@@ -625,15 +572,11 @@ fn cmd_daemon_start(
     Ok(())
 }
 
-fn cmd_daemon_stop(
-    config_dir: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let backend = daemon_cmd::Backend::from_config_dir(config_dir);
-
-    if !daemon_cmd::is_running(&backend) {
+fn cmd_daemon_stop() -> Result<(), Box<dyn std::error::Error>> {
+    if !daemon_cmd::is_running() {
         println!("keymapperd is not running");
     } else {
-        daemon_cmd::stop(&backend)
+        daemon_cmd::stop()
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         println!("keymapperd stopped");
     }
@@ -641,9 +584,7 @@ fn cmd_daemon_stop(
     // On macOS the service manager also owns virtkbdd; stop it even when
     // keymapperd was not running.
     #[cfg(target_os = "macos")]
-    if matches!(&backend, daemon_cmd::Backend::ServiceManager)
-        && daemon_cmd::virtkbdd_is_running()
-    {
+    if daemon_cmd::virtkbdd_is_running() {
         daemon_cmd::virtkbdd_stop()
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         println!("virtkbdd stopped");
@@ -652,22 +593,16 @@ fn cmd_daemon_stop(
     Ok(())
 }
 
-fn cmd_daemon_restart(
-    config_dir: Option<PathBuf>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let backend = daemon_cmd::Backend::from_config_dir(config_dir);
-
-    daemon_cmd::restart(&backend)
+fn cmd_daemon_restart() -> Result<(), Box<dyn std::error::Error>> {
+    daemon_cmd::restart()
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     println!("keymapperd restarted");
 
     // On macOS the service manager also owns virtkbdd.
     #[cfg(target_os = "macos")]
-    if matches!(&backend, daemon_cmd::Backend::ServiceManager) {
-        daemon_cmd::virtkbdd_restart()
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        println!("virtkbdd restarted");
-    }
+    daemon_cmd::virtkbdd_restart()
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    println!("virtkbdd restarted");
 
     Ok(())
 }
