@@ -196,13 +196,11 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
     verify_daemon_started(name)
 }
 
-/// The path to the keymapperd error log written by launchd.
-fn keymapperd_log_path() -> String {
-    format!(
-        "{}/Library/Logs/keymapper/keymapperd-err.log",
-        std::env::var("HOME").unwrap_or_default()
-    )
-}
+/// The unified-logging command for inspecting keymapperd's output.  The
+/// daemon logs through the `log` facade, so startup failures are no longer
+/// in the launchd log files.
+const KEYMAPPERD_LOG_COMMAND: &str =
+    "log show --predicate 'process == \"keymapperd\"' --last 5m";
 
 /// Confirm the daemon process actually came up after a `launchctl bootstrap`.
 ///
@@ -210,11 +208,9 @@ fn keymapperd_log_path() -> String {
 /// the process then fails to start.  With `KeepAlive` set in the plist, a
 /// daemon that crashes on startup is restarted in a loop (with throttling), so
 /// we poll briefly for the process to appear, then wait a short stability
-/// window and confirm it is still alive.  On failure we point at the log file
-/// so the user can see why the daemon exited.
+/// window and confirm it is still alive.  On failure we point at the unified
+/// log so the user can see why the daemon exited.
 fn verify_daemon_started(name: &str) -> Result<(), String> {
-    let log = keymapperd_log_path();
-
     // Poll for the process to appear; launchd spawns it asynchronously, so it
     // may take a moment after bootstrap returns.
     let deadline =
@@ -229,7 +225,10 @@ fn verify_daemon_started(name: &str) -> Result<(), String> {
     }
 
     if !appeared {
-        return Err(format!("{name} did not start. Check the log at {log}"));
+        return Err(format!(
+            "{name} did not start. Check the system log: \
+             {KEYMAPPERD_LOG_COMMAND}"
+        ));
     }
 
     // Wait a short stability window and confirm it is still alive.  This
@@ -239,7 +238,8 @@ fn verify_daemon_started(name: &str) -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(500));
     if !is_daemon_running(name) {
         return Err(format!(
-            "{name} started but exited immediately. Check the log at {log}"
+            "{name} started but exited immediately. Check the system log: \
+             {KEYMAPPERD_LOG_COMMAND}"
         ));
     }
 

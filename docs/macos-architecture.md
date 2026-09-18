@@ -176,12 +176,15 @@ log show --predicate 'subsystem == "com.apple.systemextensions"' --last 1h
 
 ## Daemon logs
 
-keymapperd (user domain) writes logs to `~/Library/Logs/keymapper/`:
+keymapperd (user domain) logs through the `log` facade: it writes RFC 3164 syslog records to `/dev/log`, which on macOS routes into unified logging. View them with:
 
-- `keymapperd.log` — standard output (info-level messages)
-- `keymapperd-err.log` — standard error (warnings and errors)
+```bash
+log stream --predicate 'process == "keymapperd"'
+```
 
-virtkbdd (system domain) writes logs to `/var/log/virtkbdd/`:
+The launchd-configured files in `~/Library/Logs/keymapper/` (`keymapperd.log`, `keymapperd-err.log`) remain only as a last-resort catch for output the logger could not deliver (the stderr fallback and panics); they are normally empty.
+
+virtkbdd (system domain) has no `log` facade yet and writes logs to `/var/log/virtkbdd/`:
 
 - `virtkbdd.log` — standard output (info-level messages)
 - `virtkbdd-err.log` — standard error (warnings and errors)
@@ -189,7 +192,7 @@ virtkbdd (system domain) writes logs to `/var/log/virtkbdd/`:
 View live logs:
 
 ```bash
-tail -f ~/Library/Logs/keymapper/keymapperd.log
+log stream --predicate 'process == "keymapperd"'
 sudo tail -f /var/log/virtkbdd/virtkbdd.log
 ```
 
@@ -197,7 +200,7 @@ sudo tail -f /var/log/virtkbdd/virtkbdd.log
 
 ### Remapping not working, tap error in the log
 
-**Symptom:** keys are not remapped and `~/Library/Logs/keymapper/keymapperd-err.log` reports a CGEventTap creation failure.
+**Symptom:** keys are not remapped and the system log (`log show --predicate 'process == "keymapperd"' --last 1h`) reports a CGEventTap creation failure.
 
 **Cause:** the Input Monitoring or Accessibility permission for `keymapperd` is missing or stale.
 
@@ -248,7 +251,7 @@ Mappings resume as soon as keymapperd reconnects — there is no need to restart
 **Fix:**
 1. Check that the binary path in the plist is correct: `cat ~/Library/LaunchAgents/de.adrhinum.keymapperd.plist` and `sudo cat /Library/LaunchDaemons/de.adrhinum.virtkbdd.plist`.
 2. Verify the binaries are executable: `ls -la ~/.local/bin/keymapperd /usr/local/bin/virtkbdd`.
-3. Check the error logs: `cat ~/Library/Logs/keymapper/keymapperd-err.log` and `sudo cat /var/log/virtkbdd/virtkbdd-err.log`.
+3. Check the logs: `log show --predicate 'process == "keymapperd"' --last 1h` and `sudo cat /var/log/virtkbdd/virtkbdd-err.log`.
 4. Reinstall: `sudo scripts/install-macos.sh`.
 
 ## Known limitations

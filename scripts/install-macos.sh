@@ -209,7 +209,7 @@ if gui_launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1;
     echo "keymapperd is running via launchd."
 else
     echo "Warning: keymapperd was installed but does not appear to be running." >&2
-    echo "Check logs at ${KEYMAPPERD_LOG_DIR}/keymapperd-err.log" >&2
+    echo "Check the system log: log show --predicate 'process == \"keymapperd\"' --last 5m" >&2
 fi
 
 # ---------------------------------------------------------------------------

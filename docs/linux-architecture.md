@@ -81,6 +81,16 @@ These are accepted trade-offs of the architecture:
 - **Keys without a resolvable HID identity cannot be mapped** (see [Key identity](#key-identity)).
 - **Application scoping depends on compositor support.** If the active application cannot be determined, only global rules apply.
 
+## Logs
+
+keymapperd logs through the `log` facade as RFC 3164 syslog records (facility `LOG_USER`) on `/dev/log`. When the daemon runs under the systemd user service, journald picks them up:
+
+```bash
+journalctl --user -u keymapperd -f
+```
+
+On systems without `/dev/log` (journald-only installs), the daemon falls back to stderr, which the systemd unit likewise records in the journal — `journalctl` works either way.
+
 ## E2e capture
 
 The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd`, and focuses an ordinary raw-mode stdin reader (`keymapper_reader`) on the virtual console. The harness stops `getty@tty1` (the service, so it does not respawn) and switches to VT1; the reader then becomes a session leader and opens `/dev/tty1` itself, so the kernel assigns it as the controlling terminal and makes its process group the VT's foreground group. The daemon's uinput output is routed by the kernel to the active VT, so it reaches the reader's stdin; the daemon still grabs the injector's uinput device, so raw injected keys never leak to the VT. The reader appends every received byte to a file (created only after focus and raw mode are established — the harness's ready signal), and the harness compares each phase's recorded bytes against a character-space translation of the expected output events.

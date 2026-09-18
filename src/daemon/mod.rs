@@ -12,6 +12,7 @@
 
 pub mod config_io;
 pub mod engine;
+pub mod logging;
 pub mod mapping_cache;
 pub mod state;
 #[cfg(test)]

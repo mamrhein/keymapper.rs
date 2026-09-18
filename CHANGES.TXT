@@ -1,6 +1,10 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.2.7  Route keymapperd's logging through the log facade: syslog on
+          Linux/macOS, Windows Event Log on Windows, with a stderr
+          fallback when neither sink is available.
+
    0.2.3  Migrate winget manifests to multi-file format.
           Migrate Windows installer to Inno Setup 7.
 

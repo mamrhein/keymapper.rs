@@ -70,8 +70,10 @@ fn resolve_daemon_binary() -> Option<std::ffi::CString> {
 /// daemon's stderr (if available before it detaches).
 ///
 /// The daemon's stdout and stderr are redirected to
-/// `<config_dir>/keymapperd.log` so that startup failures (e.g. a missing
-/// DriverKit driver) are captured for debugging instead of being discarded.
+/// `<config_dir>/keymapperd.log`.  The daemon's regular output goes to
+/// unified logging (see `log stream --predicate 'process == "keymapperd"'`),
+/// so this file is only a last-resort catch for the logger's stderr
+/// fallback and panics — it is normally empty.
 pub fn spawn_daemon(
     config_dir: &Path,
 ) -> Result<(u32, Option<String>), String> {
@@ -99,9 +101,11 @@ pub fn spawn_daemon(
                     }
                 }
 
-                // Redirect stdout/stderr to a log file in the config directory
-                // so startup failures are captured for debugging.  Opened with
-                // an absolute path before the chdir below.
+                // Redirect stdout/stderr to a log file in the config
+                // directory. Regular daemon output goes to
+                // unified logging, so this file only catches
+                // the logger's stderr fallback and panics.  Opened
+                // with an absolute path before the chdir below.
                 let log_path = config_dir.join("keymapperd.log");
                 let log_cstr = std::ffi::CString::new(
                     log_path.to_string_lossy().into_owned(),

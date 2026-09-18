@@ -19,16 +19,19 @@ use keymapper::{
         },
     },
     daemon::{
-        mapping_cache::RuntimeLookupCache, state::RuntimeState,
+        logging, mapping_cache::RuntimeLookupCache, state::RuntimeState,
         watcher::start_config_watcher,
     },
     platform::{list_keyboards, start_mapping},
 };
+use log::{error, info};
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    logging::init();
+
     let config_path = find_config_path_strict().map_err(|e| {
-        eprintln!("Error: {}", e);
+        error!("Error: {e}");
         std::process::exit(1);
     })?;
 
@@ -75,13 +78,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if !keyboards_to_grab.is_empty() {
-        println!(
+        info!(
             "Grabbing {} keyboard(s) ({} total discovered):",
             keyboards_to_grab.len(),
             all_keyboards.len()
         );
         for kb in &keyboards_to_grab {
-            println!("  - {} ({})", kb.name, kb.device);
+            info!("  - {} ({})", kb.name, kb.device);
         }
     }
 
@@ -105,15 +108,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let watcher_state = Arc::clone(&state);
     let _watcher = start_config_watcher(&config_path, watcher_state)?;
 
-    println!("Cross-platform runtime engines fully synchronized.");
-    // Flush so consumers reading stdout (a service manager, or a test
-    // harness waiting for this readiness line) observe it before
-    // `start_mapping` blocks.  Rust block-buffers stdout on pipes, so the
-    // line would otherwise never arrive until the process exits.
-    {
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-    }
+    info!("Cross-platform runtime engines fully synchronized.");
 
     // The platform layer only needs the read-only interface; the concrete Arc
     // is coerced to `dyn Lookup` at the call site.

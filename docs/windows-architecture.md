@@ -90,6 +90,12 @@ These are accepted trade-offs of the final architecture:
 - **Standalone media actions cannot be suppressed** (see [Standalone consumer control](#standalone-consumer-control)).
 - **The document-level `keyboards` filter is a no-op.** Capture is a session-global hook; applying the global filter per device is out of scope. Per-group `keyboards` filters work via raw input device identification.
 
+## Logs
+
+keymapperd logs through the `log` facade to the Windows Event Log (Application log, source `keymapperd`). View the events in Event Viewer under **Windows Logs** → **Application**, filtered by source `keymapperd`.
+
+Registering the event source's message-file entry requires a one-time elevated run — the per-user installer cannot do it. Until `keymapper daemon start` has been run once from an elevated prompt, the daemon falls back to stderr: visible in dev mode, but lost in the windowless scheduled-task mode.
+
 ## E2e capture
 
 The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd`, and focuses an ordinary raw-mode stdin reader (`keymapper_reader`) in its own console window (`CREATE_NEW_CONSOLE`, brought to the foreground with `SetForegroundWindow`). The daemon re-emits keys via `SendInput`, which the system delivers to the foreground window — i.e. the reader; because the daemon's hook swallows remapped inputs first, the reader receives exactly the daemon's outputs plus forwarded passthroughs, never the raw injected inputs. The reader appends every received byte to a file (created only after raw mode is established — the harness's ready signal), and the harness compares each phase's recorded bytes against a character-space translation of the expected output events.

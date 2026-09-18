@@ -8,13 +8,13 @@
 // $Revision$
 
 use std::{
-    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
+use log::{error, info};
 use notify::{
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
@@ -102,12 +102,9 @@ fn spawn_reload_thread(
                     };
 
                     if should_log {
-                        eprintln!(
-                            "Failed to hot-reload configuration: {}",
-                            msg
-                        );
+                        error!("Failed to hot-reload configuration: {msg}");
                         if consecutive_errors > ERROR_THROTTLE_LIMIT {
-                            eprintln!(
+                            error!(
                                 "(Throttling further error output until a \
                                  successful reload.)"
                             );
@@ -151,19 +148,15 @@ fn reload_from_str(
     };
 
     // Swap the cache inside the write lock, then release the lock before
-    // printing the success message.  This ordering guarantees that by the
-    // time an observer sees the message in stdout, the new cache is already
-    // visible to all readers of the RwLock.
+    // logging the success message.  This ordering guarantees that by the
+    // time the message is logged, the new cache is already visible to all
+    // readers of the RwLock.
     {
         let mut write_guard = state.write();
         write_guard.set_lookup_cache(new_cache);
     }
 
-    // Flush stdout to ensure the message reaches any pipe consumers before
-    // returning.  When stdout is block-buffered (e.g., when captured by a
-    // subprocess), println! alone may leave the message in an internal buffer.
-    println!("Configuration hot-swapped successfully!");
-    let _ = std::io::stdout().flush();
+    info!("Configuration hot-swapped successfully!");
 
     ReloadResult::Ok
 }
@@ -189,7 +182,7 @@ pub fn start_config_watcher<P: AsRef<Path>>(
                     let _ = reload_tx.send(());
                 }
             }
-            Err(e) => eprintln!("File system watcher error: {:?}", e),
+            Err(e) => error!("File system watcher error: {e:?}"),
         },
         Config::default(),
     )?;
