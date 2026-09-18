@@ -9,7 +9,7 @@ readme = "README.md"
 homepage = "https://github.com/mamrhein/keymapper.rs"
 repository = "https://github.com/mamrhein/keymapper.rs"
 license-file = "LICENSE.TXT"
-keywords = ["Cross-platform", "keymapper", "macOS", "Linux", "Windows"]
+keywords = ["Cross-platform", "Linux", "Windows", "keymapper", "macOS"]
 categories = ["command-line-utilities"]
 
 [[bin]]
@@ -30,30 +30,31 @@ path = "src/virtkbdd.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-dirs = "6"                                         # platform config directory resolution
+dirs = "6"  # platform config directory resolution
 fs-err = "3"
 indexmap = { version = "2", features = ["serde"] }
-log = "0.4"                                        # logging facade for the daemon
-notify = "8"                                       # cross-platform file watching
+log = "0.4"  # logging facade for the daemon
+notify = "8"  # cross-platform file watching
 parking_lot = "0.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 thiserror = "2"
 
-# Unix signal handling and libc bindings
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-signal-hook = "0.4"
-syslog = "7"                                       # RFC 3164 daemon logging
+[dev-dependencies]
+tempfile = "3"  # unique, auto-removed temp files for tests
 
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]
-cosmic-protocols = { version = "0.2", default-features = false, features = [
+cosmic-protocols = {
+  version = "0.2",
+  default-features = false,
+  features = [
     "client",
-] } # COSMIC active-window query
+  ]
+}  # COSMIC active-window query
 evdev = "0.13"
 nix = { version = "0.31.3", features = ["event"] }
-sysinfo = "0.39" # process enumeration for `keymapper appnames`
+sysinfo = "0.39"  # process enumeration for `keymapper appnames`
 udev = "0.9"
 wayland-client = "0.31"
 x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
@@ -62,44 +63,61 @@ zbus = { version = "5", features = ["blocking"] }
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = [
+objc2-app-kit = {
+  version = "0.3",
+  features = [
     "NSApplication",
     "NSWindow",
     "NSWorkspace",
-] }
-objc2-core-foundation = { version = "0.3", features = [
-    "CFRunLoop",
-    "CFString",
-    "CFNumber",
+  ]
+}
+objc2-core-foundation = {
+  version = "0.3",
+  features = [
     "CFDictionary",
     "CFMachPort",
-] }
-objc2-core-graphics = { version = "0.3", features = [
-    "CGWindow",
+    "CFNumber",
+    "CFRunLoop",
+    "CFString",
+  ]
+}
+objc2-core-graphics = {
+  version = "0.3",
+  features = [
     "CGEvent",
     "CGEventTypes",
-] }
+    "CGWindow",
+  ]
+}
 objc2-foundation = "0.3"
 
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
-crossbeam-channel = "0.5" # lock-free IPC between input threads
-eventlog = "0.4"         # Windows Event Log daemon logging
-windows = { version = "0.62", features = [
+crossbeam-channel = "0.5"  # lock-free IPC between input threads
+eventlog = "0.4"  # Windows Event Log daemon logging
+windows = {
+  version = "0.62",
+  features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
-    "Win32_System_Console",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_Storage_FileSystem",
-    "Win32_Security",
-    "Win32_Devices_DeviceAndDriverInstallation",
-    "Win32_Devices_HumanInterfaceDevice",
-] }
+  ]
+}
 
-[dev-dependencies]
-tempfile = "3" # unique, auto-removed temp files for tests
+# Unix signal handling and libc bindings
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+signal-hook = "0.4"
+syslog = "7"  # RFC 3164 daemon logging

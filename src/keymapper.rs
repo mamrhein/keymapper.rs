@@ -20,6 +20,7 @@ use keymapper::{
         },
         keyboard::KeyboardSpecifier,
     },
+    daemon::{control, logging::LevelFilter},
 };
 
 /// CLI utility for managing the keymapperd configuration.
@@ -80,6 +81,23 @@ enum DaemonCommands {
 
     /// Restart keymapperd (stop then start).
     Restart,
+
+    /// Change the log level of a running keymapperd without a restart.
+    ///
+    /// Talks to the daemon over its control socket; the log output itself is
+    /// unchanged (journal / Event Viewer / the stderr fallback).
+    Log {
+        /// The new log level.
+        #[arg(long, value_parser = parse_log_level_arg)]
+        level: LevelFilter,
+    },
+}
+
+/// Parse a `--level` value into a [`LevelFilter`], with a readable clap error.
+fn parse_log_level_arg(value: &str) -> Result<LevelFilter, String> {
+    value.parse().map_err(|_| {
+        "expected one of: error, warn, info, debug, or trace".to_string()
+    })
 }
 
 #[derive(Subcommand)]
@@ -203,6 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             DaemonCommands::Start => cmd_daemon_start()?,
             DaemonCommands::Stop => cmd_daemon_stop()?,
             DaemonCommands::Restart => cmd_daemon_restart()?,
+            DaemonCommands::Log { level } => cmd_daemon_log(level)?,
         },
     }
 
@@ -604,6 +623,33 @@ fn cmd_daemon_restart() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     println!("virtkbdd restarted");
 
+    Ok(())
+}
+
+/// Ask the running daemon to change its log level, over its control socket.
+///
+/// The daemon replies `OK <level>` on success. A connection failure means no
+/// daemon is reachable (not running, or older than this CLI); a daemon reply
+/// starting with `ERROR` means the request was rejected.
+fn cmd_daemon_log(
+    level: LevelFilter,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let reply = match control::set_log_level(level) {
+        Ok(reply) => reply,
+        Err(control::ControlError::Connect(reason)) => {
+            return Err(format!(
+                "{reason}. Is keymapperd running, and at least as new as \
+                 this CLI?"
+            )
+            .into());
+        }
+        Err(e) => return Err(e.to_string().into()),
+    };
+
+    if let Some(reason) = reply.strip_prefix("ERROR ") {
+        return Err(reason.into());
+    }
+    println!("{reply}");
     Ok(())
 }
 

@@ -8,9 +8,11 @@
 // $Revision$
 
 //! Daemon runtime: the unified mapping engine, mapping cache, state
-//! management, and config hot-reload.
+//! management, config hot-reload, and the control socket for runtime
+//! configuration of a running daemon.
 
 pub mod config_io;
+pub mod control;
 pub mod engine;
 pub mod logging;
 pub mod mapping_cache;

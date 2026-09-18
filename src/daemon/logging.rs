@@ -46,7 +46,10 @@ use std::{
     sync::atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
-use log::{LevelFilter, Log, Metadata, Record, error};
+/// Re-export the `log` level type so callers (the CLI, the control
+/// socket) can name it without adding a direct `log` dependency.
+pub use log::LevelFilter;
+use log::{Log, Metadata, Record, error};
 
 /// The process tag (syslog) / event source (Windows Event Log) name.
 const LOG_TAG: &str = "keymapperd";
@@ -119,6 +122,17 @@ pub fn init() {
 
     install_sink();
     set_hook(Box::new(panic_hook));
+}
+
+/// Change the runtime log level without a restart.
+///
+/// Stores *level* in the gate's [`CURRENT_LEVEL`]. The level-gating logger
+/// reads that atomic on every record, so the change takes effect immediately
+/// for every thread. The `log` facade stays pinned to [`LevelFilter::Trace`],
+/// so no `set_max_level` call is needed. The control socket's accept thread
+/// calls this; the environment variable only seeds the initial level.
+pub fn set_level(level: LevelFilter) {
+    CURRENT_LEVEL.store(level_to_u8(level), Ordering::SeqCst);
 }
 
 /// Parse the [`LOG_LEVEL_ENV`] value into a [`LevelFilter`].
@@ -363,6 +377,24 @@ mod tests {
 
         // Restore the default so the other test observes it.
         CURRENT_LEVEL.store(level_to_u8(DEFAULT_LEVEL), Ordering::SeqCst);
+    }
+
+    /// [`set_level`] updates the gate in place, so a live change takes effect
+    /// for the already-installed logger without a restart.
+    #[test]
+    fn set_level_changes_the_installed_gate() {
+        let _guard = LEVEL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        init();
+
+        set_level(LevelFilter::Debug);
+        let logger = log::logger();
+        assert!(logger.enabled(&metadata(Level::Debug)));
+        assert!(!logger.enabled(&metadata(Level::Trace)));
+
+        set_level(LevelFilter::Info);
+        assert!(!logger.enabled(&metadata(Level::Debug)));
+        assert!(logger.enabled(&metadata(Level::Info)));
     }
 
     /// The level seed parses the env var (case-insensitive, matching the

@@ -18,8 +18,8 @@ use keymapper::{
         },
     },
     daemon::{
-        logging, mapping_cache::RuntimeLookupCache, state::RuntimeState,
-        watcher::start_config_watcher,
+        control, logging, mapping_cache::RuntimeLookupCache,
+        state::RuntimeState, watcher::start_config_watcher,
     },
     platform::{list_keyboards, start_mapping},
 };
@@ -28,6 +28,12 @@ use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     logging::init();
+
+    // Open the control endpoint so the CLI can change the running daemon's
+    // log level (and, later, other runtime settings) without a restart. This
+    // runs as a background thread beside the mapping loop below; a bind
+    // failure is logged and non-fatal.
+    control::start();
 
     let config_path = find_config_path_strict().map_err(|e| {
         error!("Error: {e}");
