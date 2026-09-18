@@ -23,12 +23,12 @@ use std::{
 };
 
 use evdev::{Device, EventType, InputEvent, MiscCode, uinput::VirtualDevice};
-use log::error;
+use log::{debug, error};
 
 use crate::{
     common::{hid_usage::HidUsage, modifier::ModifierRole},
     daemon::{
-        engine::{Decision, MappingEngine, output_held_mask},
+        engine::{Decision, MappingEngine, fmt_native_keys, output_held_mask},
         mapping_cache::NativeKey,
     },
     platform::linux::hid_translate::{
@@ -212,6 +212,8 @@ pub(super) fn process_device_events(
             continue;
         };
 
+        debug!("recv {} code={code} -> {usage}", managed.path);
+
         // The engine decides the event's fate from its own bookkeeping
         // (pressed/swallowed keys, forwarded/consumed modifier masks, held
         // output modifiers); this layer only executes the decision.  A repeat
@@ -234,6 +236,11 @@ pub(super) fn process_device_events(
             // presses; the matching release is emitted when the physical
             // key-up arrives.
             Decision::Emit { release, outputs } => {
+                debug!(
+                    "emit {} -> {}",
+                    managed.path,
+                    fmt_native_keys(&outputs)
+                );
                 if release != 0 {
                     release_consumed_modifiers(virtual_device, release);
                 }

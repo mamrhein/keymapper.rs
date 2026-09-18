@@ -45,7 +45,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use log::{error, info};
+use log::{debug, error, info};
 use parking_lot::RwLock;
 // The drain wake post is only compiled into non-test builds (see
 // `queue_emission`); unit tests never queue an emission.
@@ -85,7 +85,7 @@ use crate::{
         modifier::ModifierRole,
     },
     daemon::{
-        engine::{Decision, MappingEngine, output_held_mask},
+        engine::{Decision, MappingEngine, fmt_native_keys, output_held_mask},
         mapping_cache::NativeKey,
         state::Lookup,
     },
@@ -441,6 +441,8 @@ extern "system" fn low_level_keyboard_proc(
         };
     };
 
+    debug!("recv vk={} is_down={is_key_down} -> {usage}", vk_code.0);
+
     // Identify the source keyboard non-blockingly.  Raw input and the hook
     // do not deliver in a guaranteed order, so retry for a few milliseconds
     // — long enough for the raw event of this same press to arrive in the
@@ -488,6 +490,7 @@ extern "system" fn low_level_keyboard_proc(
         // for subsequent key presses; the matching release is emitted when
         // the physical key-up arrives.
         Decision::Emit { release, outputs } => {
+            debug!("emit -> {}", fmt_native_keys(&outputs));
             if release != 0 {
                 release_modifiers(release);
             }

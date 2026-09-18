@@ -40,7 +40,7 @@ use std::{
     },
 };
 
-use log::info;
+use log::{debug, info};
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation,
@@ -56,7 +56,7 @@ use super::{ipc_client::IpcClient, keycode::keycode_to_hid_usage};
 use crate::{
     common::{hid_usage::HidUsage, keyboard::KeyboardSpecifier},
     daemon::{
-        engine::{Decision, MappingEngine},
+        engine::{Decision, MappingEngine, fmt_native_keys},
         mapping_cache::NativeKey,
         state::Lookup,
     },
@@ -261,6 +261,8 @@ unsafe extern "C-unwind" fn tap_callback(
         return event.as_ptr();
     };
 
+    debug!("recv keycode={keycode} type={} -> {usage}", event_type.0);
+
     let reachable = ctx.reachable.load(Ordering::Acquire);
     let decision = {
         let mut e = ctx.engine.lock();
@@ -275,6 +277,7 @@ unsafe extern "C-unwind" fn tap_callback(
             release: _,
             outputs,
         } => {
+            debug!("emit -> {}", fmt_native_keys(&outputs));
             // The release mask is inert on macOS: the virtual keyboard's
             // modifier state is isolated from physical typing, so there is
             // nothing to release on the output device.  Fire-and-forget; drop

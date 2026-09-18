@@ -50,10 +50,11 @@ use std::{
     sync::Arc,
 };
 
+use log::debug;
 use parking_lot::RwLock;
 
 use crate::{
-    common::hid_usage::HidUsage,
+    common::{hid_usage::HidUsage, modifier::ModifierRole},
     daemon::{mapping_cache::NativeKey, state::Lookup},
 };
 
@@ -320,6 +321,11 @@ impl<K: Ord + Copy> MappingEngine<K> {
             // Mapped: remember the key was mapped so its release is swallowed,
             // and emit the mapped outputs via the emitter.
             Some(outputs) => {
+                debug!(
+                    "map {usage} (mods {}) -> [{}]",
+                    fmt_modifiers(lookup_modifiers),
+                    fmt_native_keys(&outputs)
+                );
                 self.tracker.swallowed_keys.insert(key);
 
                 // The trigger's modifiers were forwarded when pressed (or are
@@ -411,6 +417,51 @@ impl<K: Ord + Copy> MappingEngine<K> {
 pub(crate) fn output_held_mask(native_key: &NativeKey) -> Option<u8> {
     let bit = HidUsage::hid_usage_to_modifier_bit(native_key.usage)?;
     Some((1u8 << bit) | native_key.modifiers)
+}
+
+// ---------------------------------------------------------------------------
+// Debug formatting
+// ---------------------------------------------------------------------------
+
+/// The config canonical names of the modifier bits set in *mask*, in bit
+/// order. Empty when no modifier is held.
+fn modifier_names(mask: u8) -> Vec<&'static str> {
+    (0..8u8)
+        .filter(|&bit| (mask >> bit) & 1 == 1)
+        .filter_map(|bit| {
+            let role = ModifierRole::try_from_bit(bit)?;
+            HidUsage::keyboard(role.hid_id()).map(HidUsage::as_str)
+        })
+        .collect()
+}
+
+/// Render a modifier bitmask for debug logging: the held modifier names
+/// joined with `+` (a bare `-` when none is held).
+pub(crate) fn fmt_modifiers(mask: u8) -> String {
+    let names = modifier_names(mask);
+    if names.is_empty() {
+        String::from("-")
+    } else {
+        names.join("+")
+    }
+}
+
+/// Render a [`NativeKey`] for debug logging: the held modifier names joined
+/// with `+` to the base key's canonical name (e.g. `LeftControl+LeftShift+A`,
+/// or just `A` when no modifier is held).
+pub(crate) fn fmt_native_key(key: &NativeKey) -> String {
+    let mut parts = modifier_names(key.modifiers);
+    parts.push(key.usage.as_str());
+    parts.join("+")
+}
+
+/// Render a slice of [`NativeKey`]s as a comma-separated list for debug
+/// logging, reusing [`fmt_native_key`] so every site reads uniformly.
+pub(crate) fn fmt_native_keys(keys: &[NativeKey]) -> String {
+    keys.iter()
+        .map(fmt_native_key)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ---------------------------------------------------------------------------
@@ -1104,5 +1155,48 @@ mod tests {
 
         // On B, Ctrl is not held, so A is unmapped and passes through.
         assert_eq!(down(&mut b, HidUsage::A), Decision::Pass);
+    }
+
+    // -----------------------------------------------------------------------
+    // Debug-format tests
+    // -----------------------------------------------------------------------
+
+    /// The shared formatters render a modifier mask and a [`NativeKey`] in
+    /// the uniform `mods+Base` shape the e2e harness reads from the debug
+    /// log.
+    #[test]
+    fn formatters_render_modifiers_and_keys() {
+        assert_eq!(fmt_modifiers(0), "-");
+        assert_eq!(fmt_modifiers(0b0000_0001), "LeftControl");
+        assert_eq!(fmt_modifiers(0b0000_0011), "LeftControl+LeftShift");
+
+        assert_eq!(
+            fmt_native_key(&NativeKey {
+                modifiers: 0,
+                usage: HidUsage::A
+            }),
+            "A"
+        );
+        assert_eq!(
+            fmt_native_key(&NativeKey {
+                modifiers: 0b0000_0011,
+                usage: HidUsage::A
+            }),
+            "LeftControl+LeftShift+A"
+        );
+
+        assert_eq!(
+            fmt_native_keys(&[
+                NativeKey {
+                    modifiers: 0,
+                    usage: HidUsage::A
+                },
+                NativeKey {
+                    modifiers: 0b0000_0001,
+                    usage: HidUsage::A
+                }
+            ]),
+            "A, LeftControl+A"
+        );
     }
 }
