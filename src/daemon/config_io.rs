@@ -19,6 +19,7 @@
 
 use std::{io::Read, path::Path};
 
+use log::info;
 use thiserror::Error;
 
 /// Maximum config file size in bytes (1 MB).  A key-mapping configuration
@@ -145,6 +146,7 @@ pub(crate) fn read_config_content(
     // Read content from the already-open handle — no race with metadata.
     let mut content = String::new();
     file.read_to_string(&mut content)?;
+    info!("Read config from {}", path.display());
     Ok(content)
 }
 

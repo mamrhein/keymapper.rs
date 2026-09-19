@@ -23,7 +23,7 @@ use keymapper::{
     },
     platform::{list_keyboards, start_mapping},
 };
-use log::{error, info};
+use log::{error, info, trace};
 use parking_lot::RwLock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -73,13 +73,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if !keyboards_to_grab.is_empty() {
-        info!(
-            "Grabbing {} keyboard(s) ({} total discovered):",
+        trace!(
+            "grabbing {} keyboard(s) ({} total discovered):",
             keyboards_to_grab.len(),
             all_keyboards.len()
         );
         for kb in &keyboards_to_grab {
-            info!("  - {} ({})", kb.name, kb.device);
+            trace!("  - {} ({})", kb.name, kb.device);
         }
     }
 

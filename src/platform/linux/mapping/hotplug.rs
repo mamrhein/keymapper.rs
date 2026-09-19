@@ -61,7 +61,7 @@ pub(super) fn start_hotplug_monitor(
             let socket = match MonitorBuilder::new() {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!("failed to create udev monitor: {e}");
+                    warn!("Failed to create udev monitor: {e}");
                     return;
                 }
             };
@@ -69,7 +69,7 @@ pub(super) fn start_hotplug_monitor(
             let socket = match socket.match_subsystem("input") {
                 Ok(b) => b,
                 Err(e) => {
-                    warn!("failed to match input subsystem: {e}");
+                    warn!("Failed to match input subsystem: {e}");
                     return;
                 }
             };
@@ -77,7 +77,7 @@ pub(super) fn start_hotplug_monitor(
             let socket = match socket.listen() {
                 Ok(s) => s,
                 Err(e) => {
-                    warn!("failed to start udev monitor: {e}");
+                    warn!("Failed to start udev monitor: {e}");
                     return;
                 }
             };
@@ -120,7 +120,7 @@ pub(super) fn start_hotplug_monitor(
                         continue;
                     }
                     warn!(
-                        "udev monitor poll failed: {}",
+                        "Udev monitor poll failed: {}",
                         std::io::Error::last_os_error()
                     );
                     break;
@@ -130,7 +130,7 @@ pub(super) fn start_hotplug_monitor(
                     != 0
                 {
                     warn!(
-                        "udev monitor socket closed, hot-plug monitoring \
+                        "Udev monitor socket closed, hot-plug monitoring \
                          stopped"
                     );
                     break;
@@ -191,19 +191,19 @@ fn resync_devices(
     global_filter: &Option<Vec<KeyboardSpecifier>>,
 ) {
     let Ok(mut enumerator) = Enumerator::new() else {
-        warn!("resync: failed to create udev enumerator");
+        warn!("Resync: failed to create udev enumerator");
         return;
     };
 
     if enumerator.match_subsystem("input").is_err()
         || enumerator.match_property("ID_INPUT_KEYBOARD", "1").is_err()
     {
-        warn!("resync: failed to configure udev enumerator");
+        warn!("Resync: failed to configure udev enumerator");
         return;
     }
 
     let Ok(devices) = enumerator.scan_devices() else {
-        warn!("resync: failed to scan udev devices");
+        warn!("Resync: failed to scan udev devices");
         return;
     };
 
@@ -264,12 +264,12 @@ fn handle_device_add(
 
     // Grab and configure the device.
     if let Err(e) = device.grab() {
-        warn!("failed to grab {}: {e}", kb.device);
+        warn!("Failed to grab {}: {e}", kb.device);
         return;
     }
 
     if let Err(e) = device.set_nonblocking(true) {
-        warn!("failed to set non-blocking on {}: {e}", kb.device);
+        warn!("Failed to set non-blocking on {}: {e}", kb.device);
         return;
     }
 
@@ -292,7 +292,7 @@ fn handle_device_add(
 
     // Register with epoll.
     if let Err(e) = epoll_add(epoll_fd, fd, fd as u64) {
-        warn!("failed to add {} to epoll: {e}", kb.device);
+        warn!("Failed to add {} to epoll: {e}", kb.device);
         // Rollback: remove from managed devices since epoll registration
         // failed.
         let mut devices = managed_devices.lock();
@@ -318,7 +318,7 @@ fn handle_device_remove(
         Some(d) => d.to_string_lossy().into_owned(),
         None => {
             // Cannot identify the device without a devnode.
-            warn!("remove event without devnode, skipping");
+            warn!("Remove event without devnode, skipping");
             return;
         }
     };
@@ -343,7 +343,7 @@ fn handle_device_remove(
     // this gracefully.  If the kernel already cleaned it up, this may
     // fail — log and ignore.
     if let Err(e) = epoll_del(epoll_fd as c_int, fd) {
-        warn!("failed to remove {dev_path} from epoll: {e}");
+        warn!("Failed to remove {dev_path} from epoll: {e}");
     }
 
     info!("Hot-plug: removed {dev_path}");

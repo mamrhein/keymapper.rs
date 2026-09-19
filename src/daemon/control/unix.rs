@@ -74,19 +74,19 @@ pub fn start() {
             // The control socket is a convenience; a bind failure must not
             // stop the daemon. The level then stays at the env-var seed.
             warn!(
-                "control socket unavailable ({e}); runtime log-level control \
+                "Control socket unavailable ({e}); runtime log-level control \
                  is disabled"
             );
             return;
         }
     };
-    info!("control socket listening on {}", path.display());
+    info!("Control socket listening on {}", path.display());
 
     if let Err(e) = std::thread::Builder::new()
         .name("control-socket".into())
         .spawn(move || serve(listener))
     {
-        warn!("failed to spawn the control-socket thread: {e}");
+        warn!("Failed to spawn the control-socket thread: {e}");
     }
 }
 

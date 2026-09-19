@@ -127,18 +127,19 @@ fn writer_loop(
                 // The socket is live and can accept output; mark the emitter
                 // reachable before the first batch is written.
                 reachable.store(true, Ordering::Release);
-                info!("virtkbdd connected");
+                info!("Connection to virtkbdd established");
                 if let Err(e) = write_loop(stream, &rx, &shutdown) {
                     warn!(
-                        "virtkbdd connection lost ({e}); reconnecting in {} \
-                         ms",
+                        "Connection to virtkbdd lost ({e}); reconnecting in \
+                         {} ms",
                         RECONNECT_INTERVAL.as_millis()
                     );
                 }
             }
             Err(e) => {
                 warn!(
-                    "virtkbdd not reachable ({e}); retrying in {} ms",
+                    "Connection to virtkbdd not reachable ({e}); retrying in \
+                     {} ms",
                     RECONNECT_INTERVAL.as_millis()
                 );
             }

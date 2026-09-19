@@ -322,8 +322,8 @@ impl<K: Ord + Copy> MappingEngine<K> {
             // and emit the mapped outputs via the emitter.
             Some(outputs) => {
                 debug!(
-                    "map {usage} (mods {}) -> [{}]",
-                    fmt_modifiers(lookup_modifiers),
+                    "map {} -> [{}]",
+                    fmt_modifiers_and_key(lookup_modifiers, usage),
                     fmt_native_keys(&outputs)
                 );
                 self.tracker.swallowed_keys.insert(key);
@@ -435,24 +435,21 @@ fn modifier_names(mask: u8) -> Vec<&'static str> {
         .collect()
 }
 
-/// Render a modifier bitmask for debug logging: the held modifier names
-/// joined with `+` (a bare `-` when none is held).
-pub(crate) fn fmt_modifiers(mask: u8) -> String {
-    let names = modifier_names(mask);
-    if names.is_empty() {
-        String::from("-")
-    } else {
-        names.join("+")
-    }
+/// Render a modifier mask and a HID usage for debug logging: the held modifier
+/// names and the key's canonical name joined with `+`
+/// (e.g. `LeftControl+LeftShift+A`, or just `A` when no modifier is held).
+pub(crate) fn fmt_modifiers_and_key(mask: u8, key: HidUsage) -> String {
+    let mut parts = modifier_names(mask);
+    parts.push(key.as_str());
+    parts.join("+")
 }
 
 /// Render a [`NativeKey`] for debug logging: the held modifier names joined
 /// with `+` to the base key's canonical name (e.g. `LeftControl+LeftShift+A`,
 /// or just `A` when no modifier is held).
+#[inline(always)]
 pub(crate) fn fmt_native_key(key: &NativeKey) -> String {
-    let mut parts = modifier_names(key.modifiers);
-    parts.push(key.usage.as_str());
-    parts.join("+")
+    fmt_modifiers_and_key(key.modifiers, key.usage)
 }
 
 /// Render a slice of [`NativeKey`]s as a comma-separated list for debug
@@ -1166,10 +1163,6 @@ mod tests {
     /// log.
     #[test]
     fn formatters_render_modifiers_and_keys() {
-        assert_eq!(fmt_modifiers(0), "-");
-        assert_eq!(fmt_modifiers(0b0000_0001), "LeftControl");
-        assert_eq!(fmt_modifiers(0b0000_0011), "LeftControl+LeftShift");
-
         assert_eq!(
             fmt_native_key(&NativeKey {
                 modifiers: 0,

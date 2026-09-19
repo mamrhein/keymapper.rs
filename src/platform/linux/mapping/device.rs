@@ -23,12 +23,12 @@ use std::{
 };
 
 use evdev::{Device, EventType, InputEvent, MiscCode, uinput::VirtualDevice};
-use log::{debug, error};
+use log::{debug, error, trace};
 
 use crate::{
     common::{hid_usage::HidUsage, modifier::ModifierRole},
     daemon::{
-        engine::{Decision, MappingEngine, fmt_native_keys, output_held_mask},
+        engine::{Decision, MappingEngine, fmt_native_key, output_held_mask},
         mapping_cache::NativeKey,
     },
     platform::linux::hid_translate::{
@@ -212,7 +212,24 @@ pub(super) fn process_device_events(
             continue;
         };
 
-        debug!("recv {} code={code} -> {usage}", managed.path);
+        // The value distinguishes the two `EV_KEY` events a single tap emits
+        // (a key-down and a key-up), which share the same code and usage.
+        // Without it the down and up are indistinguishable in the log and
+        // look like the key was received twice.
+        let action = match value {
+            0 => "up",
+            1 => "down",
+            _ => "repeat",
+        };
+        // Both events share the same line, but the down (and repeats, which
+        // are downs for the engine) is the informative one and stays at
+        // `debug`; the key-up is less useful and is logged at `trace` so it
+        // stays out of the default debug output while remaining available.
+        if value == 0 {
+            trace!("recv {} {code} {action} -> {usage}", managed.path);
+        } else {
+            debug!("recv {} {code} {action} -> {usage}", managed.path);
+        }
 
         // The engine decides the event's fate from its own bookkeeping
         // (pressed/swallowed keys, forwarded/consumed modifier masks, held
@@ -228,7 +245,14 @@ pub(super) fn process_device_events(
         ) {
             // Unmapped (or the repeat of an unmapped key): forward the raw
             // event to the virtual device.
-            Decision::Pass => forward_key_event(virtual_device, code, value),
+            Decision::Pass => {
+                if value == 0 {
+                    trace!("pass {} {code} {action} -> {usage}", managed.path);
+                } else {
+                    debug!("pass {} {code} {action} -> {usage}", managed.path);
+                }
+                forward_key_event(virtual_device, code, value)
+            }
             // Mapped: release the trigger's modifiers first (clean tap),
             // then emit the outputs.  An output whose base is itself a
             // modifier key is held down on the virtual keyboard (not tapped)
@@ -236,25 +260,21 @@ pub(super) fn process_device_events(
             // presses; the matching release is emitted when the physical
             // key-up arrives.
             Decision::Emit { release, outputs } => {
-                debug!(
-                    "emit {} -> {}",
-                    managed.path,
-                    fmt_native_keys(&outputs)
-                );
                 if release != 0 {
                     release_consumed_modifiers(virtual_device, release);
                 }
                 for native_key in &outputs {
+                    debug!("emit {}", fmt_native_key(native_key));
                     if output_held_mask(native_key).is_some() {
                         if let Err(e) =
                             hold_modifier_output(virtual_device, native_key)
                         {
-                            error!("emit error: {e}");
+                            error!("Emit error: {e}");
                         }
                     } else if let Err(e) =
                         emit_key_event(virtual_device, native_key)
                     {
-                        error!("emit error: {e}");
+                        error!("Emit error: {e}");
                     }
                 }
             }
@@ -262,6 +282,7 @@ pub(super) fn process_device_events(
             // key, release the output bits that have been held since the
             // key-down.
             Decision::Swallow { release } => {
+                trace!("swal {} {code} {action} -> {usage}", managed.path);
                 if release != 0 {
                     release_consumed_modifiers(virtual_device, release);
                 }
@@ -269,7 +290,9 @@ pub(super) fn process_device_events(
             // A consumed modifier release: the virtual device already released
             // the modifier when the trigger fired, so swallow the physical
             // release.
-            Decision::ConsumedRelease => {}
+            Decision::ConsumedRelease => {
+                trace!("swal {} {code} {action} -> {usage}", managed.path);
+            }
         }
     }
 }
@@ -358,7 +381,7 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
             InputEvent::new(EV_SYN, SYN_REPORT, 0),
         ];
         if let Err(e) = device.emit(&events) {
-            error!("emit error: {e}");
+            error!("Emit error: {e}");
         }
         return;
     }
@@ -368,7 +391,7 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
         InputEvent::new(EV_SYN, SYN_REPORT, 0),
     ];
     if let Err(e) = device.emit(&events) {
-        error!("emit error: {e}");
+        error!("Emit error: {e}");
     }
 }
 

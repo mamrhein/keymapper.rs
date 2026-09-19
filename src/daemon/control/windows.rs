@@ -261,14 +261,14 @@ fn to_wide(name: &str) -> Vec<u16> {
 pub fn start() {
     let Some(sid) = current_user_sid() else {
         warn!(
-            "could not resolve the current user's SID; runtime log-level \
+            "Could not resolve the current user's SID; runtime log-level \
              control is disabled"
         );
         return;
     };
     let Some(desc) = owner_only_descriptor(sid) else {
         warn!(
-            "could not build an owner-only pipe security descriptor; runtime \
+            "Could not build an owner-only pipe security descriptor; runtime \
              log-level control is disabled"
         );
         unsafe {
@@ -307,19 +307,19 @@ pub fn start() {
     if pipe.is_invalid() {
         let code = unsafe { GetLastError() };
         warn!(
-            "could not create the control pipe {PIPE_NAME} (error {:#010x}); \
+            "Could not create the control pipe {PIPE_NAME} (error {:#010x}); \
              runtime log-level control is disabled",
             code.0
         );
         return;
     }
-    info!("control socket listening on {PIPE_NAME}");
+    info!("Control socket listening on {PIPE_NAME}");
 
     if let Err(e) = std::thread::Builder::new()
         .name("control-socket".into())
         .spawn(move || serve(pipe))
     {
-        warn!("failed to spawn the control-socket thread: {e}");
+        warn!("Failed to spawn the control-socket thread: {e}");
     }
 }
 

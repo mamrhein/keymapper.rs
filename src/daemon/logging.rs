@@ -294,7 +294,7 @@ fn panic_hook(info: &PanicHookInfo) {
     // A separate record: a long backtrace may exceed what a single syslog
     // datagram carries, and the message itself should survive that.
     error!(
-        "panic backtrace:\n{}",
+        "Panic backtrace:\n{}",
         std::backtrace::Backtrace::force_capture()
     );
 }

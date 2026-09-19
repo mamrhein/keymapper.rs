@@ -95,7 +95,7 @@ pub fn run_server(
     let mut socket_owner: Option<libc::uid_t> = None;
     apply_socket_ownership(&socket_path, &mut socket_owner);
 
-    info!("virtkbdd listening on {}", socket_path.display());
+    info!("Service virtkbdd listening on {}", socket_path.display());
 
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -118,18 +118,18 @@ pub fn run_server(
         // Verify the peer is the console user; reject (and drop) otherwise.
         match (peer_uid(&stream), console_uid()) {
             (Some(peer), Some(console)) if peer == console => {
-                info!("keymapperd connected (uid {peer})");
+                info!("Service keymapperd connected (uid {peer})");
                 handle_connection(stream, conn);
             }
             (Some(peer), Some(console)) => {
                 warn!(
-                    "rejecting connection from uid {peer} (console uid is \
+                    "Rejecting connection from uid {peer} (console uid is \
                      {console})"
                 );
             }
             _ => {
                 // No console user (headless): reject to be safe.
-                warn!("rejecting connection: no console user");
+                warn!("Rejecting connection: no console user");
             }
         }
     }
@@ -214,7 +214,7 @@ fn chown_socket(path: &Path, uid: libc::uid_t) {
     };
     if unsafe { libc::chown(c_path.as_ptr(), uid, 0) } != 0 {
         warn!(
-            "failed to chown {} to uid {uid}: {}",
+            "Failed to chown {} to uid {uid}: {}",
             path.display(),
             std::io::Error::last_os_error()
         );
@@ -230,7 +230,7 @@ fn set_mode(path: &Path, mode: libc::mode_t) {
     };
     if unsafe { libc::chmod(c_path.as_ptr(), mode) } != 0 {
         warn!(
-            "failed to chmod {}: {}",
+            "Failed to chmod {}: {}",
             path.display(),
             std::io::Error::last_os_error()
         );
