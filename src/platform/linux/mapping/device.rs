@@ -404,7 +404,10 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
 /// into the virtual device and, for a still-held key, a burst of
 /// auto-repeat taps.  The daemon's stream therefore starts clean at the
 /// grab, and keys actually held at takeover are re-established by
-/// [`sync_initial_state`] instead.
+/// [`sync_initial_state`] instead.  Note that this only covers events that
+/// were already buffered: the repeats and release the kernel still generates
+/// after the grab for a key that is physically held at takeover are handled
+/// by the engine's stale-key tracking, not here.
 ///
 /// The read inside `fetch_events` already removed the batch from the ring,
 /// so the returned iterator may be dropped unprocessed; the only thing of
@@ -444,11 +447,23 @@ pub(super) fn drain_pending_events(device: &mut Device, path: &str) {
 /// keys to the virtual output device and this device's engine.
 ///
 /// The event stream starts at the grab, with everything buffered before it
-/// discarded by [`drain_pending_events`], so a key (commonly a modifier) that
-/// is already held is invisible to the event stream.  Without this sync the
-/// virtual keyboard and the engine's modifier state start out of step with
-/// the physical keyboard and stay that way, which is why a modifier held at
-/// grab time silently breaks later key combinations.
+/// discarded by [`drain_pending_events`], so a key that is still held —
+/// commonly a modifier, but also the Return key that started the daemon if
+/// the press is still in flight — is invisible to the event stream.  Without
+/// this sync the virtual keyboard and the engine's modifier state start out
+/// of step with the physical keyboard and stay that way, which is why a
+/// modifier held at grab time silently breaks later key combinations.
+///
+/// Held **modifiers** are re-emitted as key-downs on the virtual device and
+/// noted as forwarded in the engine: the re-emission is idempotent (the
+/// client already has the physical key-down) and keeps the output key state
+/// in step, and the engine's modifier state starts correct so the first real
+/// event is never looked up against a stale (neutral) mask.  Held
+/// **non-modifiers** are only noted in the engine (as stale): their key-down
+/// was already consumed by the client before the grab, so re-emitting it —
+/// plus the auto-repeat tail and the release that follow — would inject a
+/// second press.  The engine swallows their repeats and forwards their
+/// release, which balances the pre-grab key-down.
 pub(super) fn sync_initial_state(
     managed: &mut ManagedDevice,
     virtual_device: &mut VirtualDevice,
@@ -457,14 +472,22 @@ pub(super) fn sync_initial_state(
         return;
     };
     for code in held {
+        let usage = keycode_to_hid_usage(code);
+        let is_modifier = usage
+            .and_then(HidUsage::hid_usage_to_modifier_bit)
+            .is_some();
         // Note the held key in the engine so its later release (and any
         // repeats) are not treated as a fresh press; for a modifier this
         // also restores the bit in the lookup state and marks it forwarded
         // so its release is forwarded (not swallowed) to the virtual device.
-        if let Some(usage) = keycode_to_hid_usage(code) {
+        if let Some(usage) = usage {
             managed.engine.note_held_key(code, usage);
         }
-        forward_key_event(virtual_device, code, 1);
+        // Only a modifier's key-down is re-emitted on the virtual device (see
+        // the function docs for why a non-modifier's must not be).
+        if is_modifier {
+            forward_key_event(virtual_device, code, 1);
+        }
     }
 }
 

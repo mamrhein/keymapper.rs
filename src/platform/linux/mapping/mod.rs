@@ -101,7 +101,9 @@ pub fn start_mapping(
         // Grabbing does not flush the kernel's event ring: drop everything
         // already buffered (e.g. the Enter press that started the daemon)
         // so the stream starts clean at the grab.  Keys still held at this
-        // point are re-established by sync_initial_state below.
+        // point are re-established by sync_initial_state below, which also
+        // marks non-modifiers as stale so the kernel's post-grab repeats and
+        // release for them do not reach the virtual device.
         drain_pending_events(&mut device, &kb.device);
 
         info!("Grabbed keyboard: {} ({})", kb.device, kb.name);

@@ -110,6 +110,13 @@ struct KeyTracker<K: Ord> {
     /// already been released on the output device. Their physical release is
     /// swallowed so it is not forwarded a second time.
     consumed_modifiers: u8,
+    /// Non-modifier keys that were already held when the event stream
+    /// started (device grab on Linux). Their key-down was consumed natively
+    /// before the stream began, so their auto-repeats are swallowed, but the
+    /// physical release is still forwarded: it balances the key-down the
+    /// client already received, and a bare release is harmless where a
+    /// re-emitted press would inject a second one.
+    stale_keys: BTreeSet<K>,
 }
 
 impl<K: Ord> Default for KeyTracker<K> {
@@ -120,6 +127,7 @@ impl<K: Ord> Default for KeyTracker<K> {
             held_output_modifiers: BTreeMap::new(),
             forwarded_modifiers: 0,
             consumed_modifiers: 0,
+            stale_keys: BTreeSet::new(),
         }
     }
 }
@@ -234,15 +242,23 @@ impl<K: Ord + Copy> MappingEngine<K> {
     /// from the grab onward).
     ///
     /// The key is marked pressed so its later release and any repeats are not
-    /// treated as a fresh press, and — for a modifier — its bit is set in the
-    /// lookup state and marked forwarded so the release is forwarded (not
-    /// swallowed) to the output device. This maintains the invariant that a
-    /// set modifier bit always has its key in the pressed set.
+    /// treated as a fresh press. A held **modifier** sets its bit in the
+    /// lookup state and is marked forwarded so its release is forwarded (not
+    /// swallowed) to the output device — the platform re-emits its key-down
+    /// during the initial-state sync, which is idempotent. This maintains the
+    /// invariant that a set modifier bit always has its key in the pressed
+    /// set. A held **non-modifier** is instead marked stale: its key-down was
+    /// already consumed natively before the stream started (e.g. the Return
+    /// that launched the daemon), so re-emitting it would inject a second
+    /// press; its repeats are swallowed and its release is forwarded, which
+    /// balances the pre-grab key-down.
     pub fn note_held_key(&mut self, key: K, usage: HidUsage) {
         self.tracker.pressed_keys.insert(key);
         if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
             self.modifier_state |= 1 << bit;
             self.tracker.record_forwarded_down(bit);
+        } else {
+            self.tracker.stale_keys.insert(key);
         }
     }
 
@@ -282,11 +298,15 @@ impl<K: Ord + Copy> MappingEngine<K> {
         device_id: Option<&str>,
         reachable: bool,
     ) -> Decision {
-        // An auto-repeat (the key is already tracked) is swallowed only if the
-        // original key-down was mapped; otherwise it passes through so the OS
-        // produces its native repeat.
+        // An auto-repeat (the key is already tracked) is swallowed if the
+        // original key-down was mapped, or if the key was already held when
+        // the stream started (its key-down was consumed natively, so
+        // re-emitting the repeat would inject a second press); otherwise it
+        // passes through so the OS produces its native repeat.
         if !self.tracker.pressed_keys.insert(key) {
-            return if self.tracker.swallowed_keys.contains(&key) {
+            return if self.tracker.swallowed_keys.contains(&key)
+                || self.tracker.stale_keys.contains(&key)
+            {
                 Decision::Swallow { release: 0 }
             } else {
                 Decision::Pass
@@ -385,6 +405,9 @@ impl<K: Ord + Copy> MappingEngine<K> {
         if !self.tracker.pressed_keys.remove(&key) {
             return Decision::Pass;
         }
+        // The key is no longer held: drop its stale mark (if any) so a later
+        // fresh press of the same key is decided from the lookup again.
+        self.tracker.stale_keys.remove(&key);
 
         // Clear this key's own modifier bit so subsequent lookups carry the
         // correct modifier state.
@@ -978,14 +1001,32 @@ mod tests {
     }
 
     #[test]
-    fn synced_held_key_repeat_is_not_a_fresh_press() {
-        // A key held at grab time is noted as pressed, so a repeat of it is
-        // not re-decided as a fresh key-down (which would fire a mapping that
-        // did not exist when the key went down).
+    fn synced_held_key_repeat_swallowed_release_forwarded() {
+        // A non-modifier held at grab time was consumed natively before the
+        // stream started, so its repeat is swallowed (re-emitting it would
+        // inject a second press — for the Return key that started the daemon,
+        // each repeat would be an extra newline) and its release is forwarded
+        // to balance the pre-grab key-down.
         let mut e = engine("- mappings:\n    A: B");
         e.note_held_key(HidUsage::A.id(), HidUsage::A);
-        assert_eq!(down(&mut e, HidUsage::A), Decision::Pass);
+        assert_eq!(down(&mut e, HidUsage::A), Decision::Swallow { release: 0 });
         assert_eq!(up(&mut e, HidUsage::A), Decision::Pass);
+    }
+
+    #[test]
+    fn synced_held_key_fresh_press_after_release_is_decided() {
+        // Once the stale release is forwarded, the stale mark is gone and a
+        // fresh press of the same key is decided from the lookup as usual.
+        let mut e = engine("- mappings:\n    A: B");
+        e.note_held_key(HidUsage::A.id(), HidUsage::A);
+        assert_eq!(up(&mut e, HidUsage::A), Decision::Pass);
+        assert_eq!(
+            down(&mut e, HidUsage::A),
+            Decision::Emit {
+                release: 0,
+                outputs: vec![nk(HidUsage::B)]
+            }
+        );
     }
 
     #[test]
