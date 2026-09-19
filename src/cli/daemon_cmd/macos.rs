@@ -22,6 +22,9 @@
 
 use std::process::Command;
 
+/// The keymapperd process name (used for `pgrep` checks).
+const DAEMON_NAME: &str = "keymapperd";
+
 /// The launchd label used to identify the keymapperd service.
 const SERVICE_LABEL: &str = "de.adrhinum.keymapperd";
 
@@ -81,7 +84,7 @@ fn target(domain: &str, label: &str) -> String {
 /// `launchctl print <domain>/<label>` exits 0 when the service is known to
 /// launchd and non-zero (with a "Could not find service" message) when it is
 /// not.  This reflects the *loaded* state that `bootout` unloads, which is
-/// distinct from whether the process is alive (see [`is_daemon_running`]).
+/// distinct from whether the process is alive (see [`is_running`]).
 fn is_loaded(sudo: bool, domain: &str, label: &str) -> bool {
     launchctl(sudo)
         .args(["print", &target(domain, label)])
@@ -140,9 +143,9 @@ fn bootout(sudo: bool, domain: &str, label: &str) -> Result<(), String> {
 /// when `KeepAlive` is false).  Relying on it alone would report a dead daemon
 /// as running.  `pgrep` also covers the case where the daemon was started
 /// manually rather than through launchd.
-pub fn is_daemon_running(name: &str) -> bool {
+pub fn is_running() -> bool {
     Command::new("pgrep")
-        .args(["-x", name])
+        .args(["-x", DAEMON_NAME])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -158,7 +161,7 @@ pub fn is_daemon_running(name: &str) -> bool {
 /// itself guarantee the process started — with `KeepAlive` set in the plist,
 /// a daemon that crashes on startup is restarted in a loop — so we verify the
 /// process is genuinely alive before reporting success.
-pub fn spawn_daemon(name: &str) -> Result<(), String> {
+pub fn start() -> Result<(), String> {
     let plist = plist_path();
 
     // Verify the plist exists before attempting to boot it.
@@ -193,7 +196,7 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
         ));
     }
 
-    verify_daemon_started(name)
+    verify_daemon_started()
 }
 
 /// The unified-logging command for inspecting keymapperd's output.  The
@@ -210,14 +213,14 @@ const KEYMAPPERD_LOG_COMMAND: &str =
 /// we poll briefly for the process to appear, then wait a short stability
 /// window and confirm it is still alive.  On failure we point at the unified
 /// log so the user can see why the daemon exited.
-fn verify_daemon_started(name: &str) -> Result<(), String> {
+fn verify_daemon_started() -> Result<(), String> {
     // Poll for the process to appear; launchd spawns it asynchronously, so it
     // may take a moment after bootstrap returns.
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(3);
     let mut appeared = false;
     while std::time::Instant::now() < deadline {
-        if is_daemon_running(name) {
+        if is_running() {
             appeared = true;
             break;
         }
@@ -226,7 +229,7 @@ fn verify_daemon_started(name: &str) -> Result<(), String> {
 
     if !appeared {
         return Err(format!(
-            "{name} did not start. Check the system log: \
+            "{DAEMON_NAME} did not start. Check the system log: \
              {KEYMAPPERD_LOG_COMMAND}"
         ));
     }
@@ -236,10 +239,10 @@ fn verify_daemon_started(name: &str) -> Result<(), String> {
     // when the Input Monitoring / Accessibility permissions are missing or the
     // configuration is invalid).
     std::thread::sleep(std::time::Duration::from_millis(500));
-    if !is_daemon_running(name) {
+    if !is_running() {
         return Err(format!(
-            "{name} started but exited immediately. Check the system log: \
-             {KEYMAPPERD_LOG_COMMAND}"
+            "{DAEMON_NAME} started but exited immediately. Check the system \
+             log: {KEYMAPPERD_LOG_COMMAND}"
         ));
     }
 
@@ -247,7 +250,7 @@ fn verify_daemon_started(name: &str) -> Result<(), String> {
 }
 
 /// Stop the keymapperd service via launchd.
-pub fn stop_daemon() -> Result<(), String> {
+pub fn stop() -> Result<(), String> {
     bootout(false, &gui_domain(), SERVICE_LABEL)
 }
 
@@ -256,8 +259,8 @@ pub fn stop_daemon() -> Result<(), String> {
 /// Boots the service out and back in, then confirms the daemon process
 /// actually came up (see [`verify_daemon_started`]) — `launchctl bootstrap`
 /// alone does not guarantee the process started.
-pub fn restart_daemon(name: &str) -> Result<(), String> {
-    stop_daemon()?;
+pub fn restart() -> Result<(), String> {
+    stop()?;
     // Brief pause to let launchd fully clean up the old process.
     std::thread::sleep(std::time::Duration::from_millis(200));
     let plist = plist_path();
@@ -267,18 +270,18 @@ pub fn restart_daemon(name: &str) -> Result<(), String> {
         .output()
         .map_err(|e| format!("failed to invoke launchctl: {e}"))?;
 
-    verify_daemon_started(name)
+    verify_daemon_started()
 }
 
 /// Check whether the virtkbdd process is actually running (system domain).
 ///
-/// As with [`is_daemon_running`], the authoritative check is `pgrep -x
-/// virtkbdd`, which reports whether a live process with that exact name
-/// exists.  `sudo launchctl print system <label>` only tells us the service is
-/// *known* to launchd, which is true even for a loaded service whose process
-/// has crashed or exited.  `pgrep` sees the root-owned virtkbdd process even
-/// when run as an unprivileged user, so no `sudo` is needed for this check.
-pub fn is_virtkbdd_running() -> bool {
+/// As with [`is_running`], the authoritative check is `pgrep -x virtkbdd`,
+/// which reports whether a live process with that exact name exists.  `sudo
+/// launchctl print system <label>` only tells us the service is *known* to
+/// launchd, which is true even for a loaded service whose process has crashed
+/// or exited.  `pgrep` sees the root-owned virtkbdd process even when run as
+/// an unprivileged user, so no `sudo` is needed for this check.
+pub fn virtkbdd_is_running() -> bool {
     Command::new("pgrep")
         .args(["-x", "virtkbdd"])
         .stdout(std::process::Stdio::null())
@@ -289,7 +292,7 @@ pub fn is_virtkbdd_running() -> bool {
 }
 
 /// Start the virtkbdd service via launchd (system domain, through sudo).
-pub fn spawn_virtkbdd() -> Result<(), String> {
+pub fn virtkbdd_start() -> Result<(), String> {
     let plist = virtkbdd_plist_path();
 
     // Verify the plist exists before attempting to boot it.
@@ -327,13 +330,13 @@ pub fn spawn_virtkbdd() -> Result<(), String> {
 }
 
 /// Stop the virtkbdd service via launchd (system domain, through sudo).
-pub fn stop_virtkbdd() -> Result<(), String> {
+pub fn virtkbdd_stop() -> Result<(), String> {
     bootout(true, "system", VIRTKBDD_LABEL)
 }
 
 /// Restart the virtkbdd service via launchd (system domain, through sudo).
-pub fn restart_virtkbdd() -> Result<(), String> {
-    stop_virtkbdd()?;
+pub fn virtkbdd_restart() -> Result<(), String> {
+    virtkbdd_stop()?;
     // Brief pause to let launchd fully clean up the old process.
     std::thread::sleep(std::time::Duration::from_millis(200));
     let plist = virtkbdd_plist_path();

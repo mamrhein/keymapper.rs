@@ -28,14 +28,14 @@ fn systemctl(args: &[&str]) -> Result<std::process::Output, String> {
 }
 
 /// Check whether the keymapperd systemd user service is active.
-pub fn is_daemon_running(_name: &str) -> bool {
+pub fn is_running() -> bool {
     systemctl(&["is-active", "main", SERVICE_NAME])
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
 /// Start the keymapperd service via systemd.
-pub fn spawn_daemon(_name: &str) -> Result<(), String> {
+pub fn start() -> Result<(), String> {
     // Check that the unit file is installed.
     let unit_path =
         std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -64,7 +64,7 @@ pub fn spawn_daemon(_name: &str) -> Result<(), String> {
 }
 
 /// Stop the keymapperd service via systemd.
-pub fn stop_daemon() -> Result<(), String> {
+pub fn stop() -> Result<(), String> {
     let output = systemctl(&["stop", SERVICE_NAME])?;
 
     if !output.status.success() {
@@ -79,7 +79,7 @@ pub fn stop_daemon() -> Result<(), String> {
 }
 
 /// Restart the keymapperd service via systemd.
-pub fn restart_daemon() -> Result<(), String> {
+pub fn restart() -> Result<(), String> {
     let output = systemctl(&["restart", SERVICE_NAME])?;
 
     if !output.status.success() {

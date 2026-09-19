@@ -18,6 +18,9 @@ use windows::Win32::{
     },
 };
 
+/// The keymapperd process name (used for `pgrep` checks and spawning).
+const DAEMON_NAME: &str = "keymapperd";
+
 /// Creation flag to suppress console window creation.
 #[allow(non_upper_case_globals)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -119,17 +122,25 @@ fn find_pids(name: &str) -> Vec<u32> {
     pids
 }
 
-/// Check whether a process with the given name is running.
-pub fn is_daemon_running(name: &str) -> bool {
-    !find_pids(name).is_empty()
+/// Check whether a keymapperd process is running.
+pub fn is_running() -> bool {
+    !find_pids(DAEMON_NAME).is_empty()
+}
+
+/// Attempt to start keymapperd via a direct spawn.
+///
+/// After a successful spawn, the daemon is verified to be alive (see
+/// [`verify_start`]).
+pub fn start() -> Result<(), String> {
+    verify_start(spawn_daemon())
 }
 
 /// Stop the keymapperd process.  Windows has no SIGTERM, so we enumerate the
 /// matching processes and terminate each one with `TerminateProcess`, which is
 /// a hard stop (there is no graceful shutdown hook).  A missing process is
 /// treated as success so that stop is idempotent.
-pub fn stop_daemon(name: &str) -> Result<(), String> {
-    let pids = find_pids(name);
+pub fn stop() -> Result<(), String> {
+    let pids = find_pids(DAEMON_NAME);
     if pids.is_empty() {
         return Ok(());
     }
@@ -146,6 +157,31 @@ pub fn stop_daemon(name: &str) -> Result<(), String> {
         if result.is_err() {
             return Err(format!("failed to terminate process {pid}"));
         }
+    }
+
+    Ok(())
+}
+
+/// Restart the keymapperd process.
+///
+/// Windows has no single restart primitive, so a restart is a stop, a brief
+/// pause for cleanup, and a start.
+pub fn restart() -> Result<(), String> {
+    stop()?;
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    start()
+}
+
+/// After a successful spawn, wait briefly and confirm the daemon is still
+/// alive.
+fn verify_start(spawn_result: Result<(), String>) -> Result<(), String> {
+    spawn_result?;
+
+    // Give the daemon time to initialize or fail.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    if !is_running() {
+        return Err("daemon started but exited immediately".to_string());
     }
 
     Ok(())
@@ -179,9 +215,9 @@ fn wide_eq(a: &[u16], b: &[u16]) -> bool {
 ///
 /// Uses `CreateProcessW` directly instead of going through `cmd.exe`, avoiding
 /// any command injection surface from shell interpretation.
-pub fn spawn_daemon(name: &str) -> Result<(), String> {
+fn spawn_daemon() -> Result<(), String> {
     // Pin the wide command string so the reference outlives the unsafe block.
-    let cmd_wide = to_wide(name);
+    let cmd_wide = to_wide(DAEMON_NAME);
     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
@@ -219,6 +255,6 @@ pub fn spawn_daemon(name: &str) -> Result<(), String> {
         }
         Ok(())
     } else {
-        Err(format!("failed to start {name}"))
+        Err(format!("failed to start {DAEMON_NAME}"))
     }
 }
