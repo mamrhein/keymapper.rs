@@ -619,10 +619,11 @@ fn cmd_daemon_restart() -> Result<(), Box<dyn std::error::Error>> {
 
     // On macOS the service manager also owns virtkbdd.
     #[cfg(target_os = "macos")]
-    daemon_cmd::virtkbdd_restart()
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    println!("virtkbdd restarted");
-
+    {
+        daemon_cmd::virtkbdd_restart()
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        println!("virtkbdd restarted");
+    }
     Ok(())
 }
 
