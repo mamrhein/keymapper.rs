@@ -33,7 +33,10 @@ use std::{
     time::Duration,
 };
 
-use device::{ManagedDevice, process_device_events, sync_initial_state};
+use device::{
+    ManagedDevice, drain_pending_events, process_device_events,
+    sync_initial_state,
+};
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
 use hotplug::start_hotplug_monitor;
@@ -95,6 +98,11 @@ pub fn start_mapping(
     for (kb, mut device) in opened_to_grab {
         device.grab()?;
         device.set_nonblocking(true)?;
+        // Grabbing does not flush the kernel's event ring: drop everything
+        // already buffered (e.g. the Enter press that started the daemon)
+        // so the stream starts clean at the grab.  Keys still held at this
+        // point are re-established by sync_initial_state below.
+        drain_pending_events(&mut device, &kb.device);
 
         info!("Grabbed keyboard: {} ({})", kb.device, kb.name);
         managed_devices.push(ManagedDevice {

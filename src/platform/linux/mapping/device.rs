@@ -23,7 +23,7 @@ use std::{
 };
 
 use evdev::{Device, EventType, InputEvent, MiscCode, uinput::VirtualDevice};
-use log::{debug, error, trace};
+use log::{debug, error, trace, warn};
 
 use crate::{
     common::{hid_usage::HidUsage, modifier::ModifierRole},
@@ -395,15 +395,60 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
     }
 }
 
+/// Discard every event already pending in the device's kernel ring buffer.
+///
+/// Grabbing a device does not flush its event buffer: a key press that was
+/// in flight when the daemon took over (e.g. the Enter key used to start
+/// the daemon itself) is still delivered to the grabbing process.  Forwarding
+/// those stale events would inject a bare key-up without a matching press
+/// into the virtual device and, for a still-held key, a burst of
+/// auto-repeat taps.  The daemon's stream therefore starts clean at the
+/// grab, and keys actually held at takeover are re-established by
+/// [`sync_initial_state`] instead.
+///
+/// The read inside `fetch_events` already removed the batch from the ring,
+/// so the returned iterator may be dropped unprocessed; the only thing of
+/// interest is the count of discarded events.
+pub(super) fn drain_pending_events(device: &mut Device, path: &str) {
+    let mut discarded = 0;
+    loop {
+        match device.fetch_events() {
+            Ok(batch) => {
+                let count = batch.count();
+                discarded += count;
+                // A zero-length read means the device went away mid-drain;
+                // stop rather than spin on the end of the stream.
+                if count == 0 {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                continue;
+            }
+            Err(e) => {
+                warn!("Linux: error draining pending events from {path}: {e}");
+                break;
+            }
+        }
+    }
+    if discarded > 0 {
+        debug!(
+            "Linux: discarded {discarded} stale event(s) from before the \
+             grab on {path}"
+        );
+    }
+}
+
 /// Read the keyboard's current key state from the kernel and sync any held
 /// keys to the virtual output device and this device's engine.
 ///
-/// Grabbing a device delivers events only from the grab onward, so a key
-/// (commonly a modifier) that is already held is invisible to the event
-/// stream.  Without this sync the virtual keyboard and the engine's modifier
-/// state start out of step with the physical keyboard and stay that way,
-/// which is why a modifier held at grab time silently breaks later key
-/// combinations.
+/// The event stream starts at the grab, with everything buffered before it
+/// discarded by [`drain_pending_events`], so a key (commonly a modifier) that
+/// is already held is invisible to the event stream.  Without this sync the
+/// virtual keyboard and the engine's modifier state start out of step with
+/// the physical keyboard and stay that way, which is why a modifier held at
+/// grab time silently breaks later key combinations.
 pub(super) fn sync_initial_state(
     managed: &mut ManagedDevice,
     virtual_device: &mut VirtualDevice,

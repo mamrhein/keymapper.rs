@@ -14,7 +14,7 @@ The daemon runs as an ordinary user, typically via the systemd user service inst
 At startup the daemon:
 
 1. Discovers keyboards via udev (subsystem `input`, property `ID_INPUT_KEYBOARD=1`). Devices that also support absolute (pointer) events are excluded — they are typically touchpads or touchscreens that happen to announce keyboard capabilities.
-2. Applies the document-level `keyboards` filter, then grabs each selected device and sets it non-blocking.
+2. Applies the document-level `keyboards` filter, then grabs each selected device and sets it non-blocking. Grabbing does not flush the device's kernel ring buffer, so the daemon discards every event already buffered there (e.g. the Enter press that started the daemon itself), which would otherwise be re-emitted as a bare key-up without a matching press or a burst of auto-repeat taps. Keys still held at grab time are re-established from the kernel's key state (`EVIOCGKEY`) before the event loop starts.
 3. Creates the uinput virtual keyboard (`CrossPlatform_Virtual_Keyboard`) with the full evdev key range, and waits 200 ms before continuing.
 4. Registers `SIGINT`/`SIGTERM` handlers, adds all grabbed devices to a single epoll instance, and starts the hot-plug monitor.
 
@@ -57,7 +57,7 @@ The daemon's own uinput device is also tagged as a keyboard by udev. The hot-plu
 
 A background thread listens for udev add/remove events on the input subsystem:
 
-- **Add:** open the device, skip pointer devices and the daemon's own virtual keyboard, apply the global filter, grab, and register with epoll and the managed list (rolling back if the epoll registration fails).
+- **Add:** open the device, skip pointer devices and the daemon's own virtual keyboard, apply the global filter, grab, set it non-blocking, discard events already buffered in the kernel ring (as at startup), and register with epoll and the managed list (rolling back if the epoll registration fails).
 - **Remove:** drop the device from the managed list (closing the fd releases the grab) and remove it from epoll.
 - **Resync:** the startup snapshot and the monitor's `listen()` call are not atomic. A one-time rescan after `listen()` adopts any keyboard that appeared in between, closing that race window.
 

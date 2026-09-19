@@ -28,7 +28,7 @@ use udev::{Enumerator, MonitorBuilder};
 
 use super::{
     VIRTUAL_KEYBOARD_NAME,
-    device::ManagedDevice,
+    device::{ManagedDevice, drain_pending_events},
     epoll::{epoll_add, epoll_del},
 };
 use crate::{
@@ -272,6 +272,11 @@ fn handle_device_add(
         warn!("Failed to set non-blocking on {}: {e}", kb.device);
         return;
     }
+
+    // Same as at startup: grabbing does not flush the kernel's event ring,
+    // so drop anything buffered before the grab to keep the adopted
+    // device's stream clean.
+    drain_pending_events(&mut device, &kb.device);
 
     let fd = device.as_raw_fd();
     let managed = ManagedDevice {
