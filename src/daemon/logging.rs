@@ -9,21 +9,29 @@
 
 //! Logging setup for the daemon.
 //!
-//! All daemon-side output goes through the `log` facade. The sink is
-//! selected at compile time and installed once per process by [`init`]:
+//! All daemon-side output goes through the `log` facade. The sink is an
+//! ftlog logger installed once per process by [`init`], writing to a
+//! platform-specific destination:
 //!
-//! - **unix (Linux + macOS):** RFC 3164 syslog on `/dev/log` with facility
-//!   `LOG_USER`. On macOS `/dev/log` routes into unified logging, so one code
-//!   path covers both platforms.
-//! - **Windows:** the Windows Event Log (Application log, source
-//!   `keymapperd`).
+//! - **Linux:** stderr, without an embedded timestamp (the journal adds one).
+//!   systemd forwards it to the journal.
+//! - **macOS:** a rotating file at `~/Library/Logs/keymapper/keymapperd.log`
+//!   (daily rotation, 7-day retention).
+//! - **Windows:** a rotating file at
+//!   `%LOCALAPPDATA%\keymapperd\logs\keymapperd.log` (daily rotation, 7-day
+//!   retention).
 //!
-//! If the platform sink cannot be established — `/dev/log` is absent on a
-//! journald-only system, or the Windows event source could not be opened —
-//! a minimal stderr fallback logger ([`StderrLogger`]) is installed instead
-//! and a one-time notice is printed. The daemon must never fail to start
-//! over logging; on a systemd-managed Linux install the stderr fallback
-//! still reaches the journal.
+//! The line format is `{timestamp} {LEVEL} {target}: {message}`, where the
+//! timestamp (ftlog's default `YYYY-MM-DD HH:MM:SS.mmm±HH`) appears only on
+//! the file platforms. ftlog hard-codes a `{latency}ms` field into every
+//! line and offers no public API to remove it, so the destination is wrapped
+//! in [`LatencyStrippingWriter`], which strips that field from each line.
+//!
+//! If the ftlog logger cannot be built — the log directory is not writable,
+//! for example — a minimal stderr fallback logger ([`StderrLogger`]) is
+//! installed instead and a one-time notice is printed. The daemon must never
+//! fail to start over logging; on Linux and macOS the stderr fallback still
+//! reaches the system log.
 //!
 //! Whatever sink is chosen is wrapped in a level-gating logger
 //! ([`LevelGateLogger`]) that is the single point at which records are
@@ -41,7 +49,12 @@
 //!
 //! [`init`] is once per process: later calls are a no-op.
 
+#[cfg(not(target_os = "linux"))]
+use std::path::PathBuf;
 use std::{
+    borrow::Cow,
+    fmt,
+    io::{self, Write},
     panic::{PanicHookInfo, set_hook},
     sync::atomic::{AtomicBool, AtomicU8, Ordering},
 };
@@ -49,9 +62,11 @@ use std::{
 /// Re-export the `log` level type so callers (the CLI, the control
 /// socket) can name it without adding a direct `log` dependency.
 pub use log::LevelFilter;
-use log::{Log, Metadata, Record, error, info};
+use log::{Level, Log, Metadata, Record, error, info};
+#[cfg(target_os = "linux")]
+use time::format_description::OwnedFormatItem;
 
-/// The process tag (syslog) / event source (Windows Event Log) name.
+/// The process name used in the fallback notice.
 const LOG_TAG: &str = "keymapperd";
 
 /// Environment variable that seeds the initial log level.
@@ -64,8 +79,7 @@ const LOG_TAG: &str = "keymapperd";
 const LOG_LEVEL_ENV: &str = "KEYMAPPERD_LOG_LEVEL";
 
 /// The log level used when [`LOG_LEVEL_ENV`] is unset or unrecognised.
-// const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
-const DEFAULT_LEVEL: LevelFilter = LevelFilter::Trace;
+const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
 
 /// The runtime log-level gate.
 ///
@@ -163,17 +177,189 @@ fn install_sink() {
     install_gate(inner);
 }
 
-/// Build the platform sink (syslog on unix, the Windows Event Log on
-/// Windows) as an inner sink. Sink selection is unchanged; the stderr
-/// fallback is applied by the caller when this fails.
-#[cfg(unix)]
+/// Build the platform sink (ftlog on every platform) as an inner sink. The
+/// stderr fallback is applied by the caller when this fails.
 fn install_platform_sink() -> Result<Box<dyn Log + Send + Sync>, String> {
-    install_syslog()
+    install_ftlog()
 }
 
-#[cfg(windows)]
-fn install_platform_sink() -> Result<Box<dyn Log + Send + Sync>, String> {
-    install_eventlog()
+/// Build the ftlog sink: the platform destination, wrapped in the latency
+/// stripper, with the line format and (on Linux) the empty timestamp.
+fn install_ftlog() -> Result<Box<dyn Log + Send + Sync>, String> {
+    let root = platform_root()?;
+    build_ftlog(root)
+        .map(|logger| Box::new(logger) as Box<dyn Log + Send + Sync>)
+}
+
+/// The destination the ftlog logger writes to, per platform.
+///
+/// - **Linux:** stderr; systemd forwards it to the journal.
+/// - **macOS / Windows:** a rotating file appender (daily rotation, 7-day
+///   retention). The parent directory is created if absent because ftlog's
+///   appender does not create it.
+fn platform_root() -> Result<Box<dyn Write + Send>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(io::stderr()))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let path = log_file_path()?;
+        if let Some(parent) = path.parent() {
+            fs_err::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        let appender = ftlog::appender::FileAppender::builder()
+            .path(&path)
+            .rotate(ftlog::appender::Period::Day)
+            .expire(ftlog::appender::Duration::days(7))
+            .build();
+        Ok(Box::new(appender))
+    }
+}
+
+/// The log file path on the file-based platforms (macOS, Windows).
+#[cfg(not(target_os = "linux"))]
+fn log_file_path() -> Result<PathBuf, String> {
+    let dir = if cfg!(windows) {
+        // The config lives in %APPDATA%; the logs go to %LOCALAPPDATA%.
+        dirs::data_local_dir()
+            .ok_or_else(|| {
+                "no local data directory (LOCALAPPDATA) available".to_string()
+            })?
+            .join("keymapperd")
+            .join("logs")
+    } else {
+        dirs::home_dir()
+            .ok_or_else(|| "no home directory available".to_string())?
+            .join("Library")
+            .join("Logs")
+            .join("keymapper")
+    };
+    Ok(dir.join("keymapperd.log"))
+}
+
+/// Build the ftlog logger writing to *root*.
+///
+/// The logger's own level is pinned to [`LevelFilter::Trace`] so it never
+/// filters on its own; the gate's atomic is the single level gate. On Linux
+/// the timestamp is empty (the journal adds one); on the file platforms
+/// ftlog's default `YYYY-MM-DD HH:MM:SS.mmm±HH` is used.
+fn build_ftlog(
+    root: impl Write + Send + 'static,
+) -> Result<ftlog::Logger, String> {
+    let builder = ftlog::builder()
+        .max_log_level(LevelFilter::Trace)
+        .format(FtLogFormat);
+
+    #[cfg(target_os = "linux")]
+    let builder = builder.time_format(empty_time_format());
+
+    builder
+        .root(LatencyStrippingWriter { inner: root })
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// An empty `time` format description, so ftlog writes no timestamp on
+/// Linux (the journal adds one).
+#[cfg(target_os = "linux")]
+fn empty_time_format() -> OwnedFormatItem {
+    // An empty description always parses (to an empty compound item that
+    // formats to the empty string).
+    time::format_description::parse_owned::<1>("")
+        .expect("an empty format description always parses")
+}
+
+/// The line body ftlog writes for every record: `{LEVEL} {target}: {message}`.
+///
+/// The timestamp (file platforms only) is ftlog's own field, written before
+/// the body; the hard-coded `{latency}ms` field is stripped by
+/// [`LatencyStrippingWriter`]. Together they produce the locked format
+/// `{timestamp} {LEVEL} {target}: {message}`.
+struct FtLogFormat;
+
+impl ftlog::FtLogFormat for FtLogFormat {
+    fn msg(&self, record: &Record) -> Box<dyn Send + Sync + fmt::Display> {
+        Box::new(FtLogMessage {
+            level: record.level(),
+            // The standard `log` macros set the module path as a static, so
+            // the common case borrows instead of allocating.
+            target: record
+                .module_path_static()
+                .map(Cow::Borrowed)
+                .unwrap_or_else(|| Cow::Owned(record.target().to_owned())),
+            args: record
+                .args()
+                .as_str()
+                .map(Cow::Borrowed)
+                .unwrap_or_else(|| Cow::Owned(format!("{}", record.args()))),
+        })
+    }
+}
+
+/// The formatted body of one log line (see [`FtLogFormat`]).
+struct FtLogMessage {
+    level: Level,
+    target: Cow<'static, str>,
+    args: Cow<'static, str>,
+}
+
+impl fmt::Display for FtLogMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}: {}", self.level, self.target, self.args)
+    }
+}
+
+/// A `Write` wrapper that strips ftlog's hard-coded `{latency}ms` field from
+/// each line.
+///
+/// ftlog writes every line as `"{timestamp} {latency}ms {body}\n"` in a
+/// single `write` call and offers no option to drop the latency field, so it
+/// is removed here: the first ` {N}ms ` (space, digits, `ms`, space) is
+/// always the latency field — it sits right after the possibly empty
+/// timestamp, before the level — so matching the first occurrence is safe
+/// even when the message body itself contains a ` {N}ms ` sequence. On Linux
+/// the strip also removes the leading space the empty timestamp leaves.
+struct LatencyStrippingWriter<W: Write> {
+    inner: W,
+}
+
+impl<W: Write> Write for LatencyStrippingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match find_latency_field(buf) {
+            Some((start, end)) => {
+                self.inner.write_all(&buf[..start])?;
+                self.inner.write_all(&buf[end..])?;
+            }
+            None => {
+                self.inner.write_all(buf)?;
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Find the first ` {N}ms ` field (space, one or more ASCII digits, `ms`,
+/// space) in *line*; the returned bounds span the field including both
+/// spaces.
+fn find_latency_field(line: &[u8]) -> Option<(usize, usize)> {
+    let mut from = 0;
+    while let Some(rel) = line[from..].iter().position(|&b| b == b' ') {
+        let start = from + rel;
+        let rest = &line[start + 1..];
+        let digits = rest.iter().take_while(|&&b| b.is_ascii_digit()).count();
+        if digits > 0 && rest[digits..].starts_with(b"ms ") {
+            return Some((start, start + 1 + digits + 3));
+        }
+        from = start + 1;
+    }
+    None
 }
 
 /// Wrap *inner* in the level-gating logger and install it as the global
@@ -192,49 +378,10 @@ fn install_gate(inner: Box<dyn Log + Send + Sync>) {
     log::set_max_level(LevelFilter::Trace);
 }
 
-/// Install the unix syslog sink (RFC 3164 on `/dev/log`).
-#[cfg(unix)]
-fn install_syslog() -> Result<Box<dyn Log + Send + Sync>, String> {
-    let formatter = syslog::Formatter3164 {
-        facility: syslog::Facility::LOG_USER,
-        // Leave the hostname to the syslog daemon.
-        hostname: None,
-        process: LOG_TAG.into(),
-        pid: std::process::id() as u32,
-    };
-
-    let logger = syslog::unix(formatter).map_err(|e| e.to_string())?;
-    Ok(Box::new(syslog::BasicLogger::new(logger)))
-}
-
-/// Install the Windows Event Log sink.
-#[cfg(windows)]
-fn install_eventlog() -> Result<Box<dyn Log + Send + Sync>, String> {
-    // Registering the event source writes an HKLM key and requires
-    // elevation. It only adds the event source's message-file entry, so a
-    // failure is a one-time notice rather than a fatal error.
-    if let Err(e) = eventlog::register(LOG_TAG) {
-        eprintln!(
-            "{LOG_TAG}: could not register the Windows event source ({e}). \
-             Run `keymapper daemon start` once from an elevated prompt to \
-             fix this."
-        );
-    }
-
-    // Build the sink directly (not via `eventlog::init`, which installs its
-    // own `log` backend and pins the level). The sink's own level is set to
-    // `Trace` so it forwards everything the gate lets through; the gate's
-    // atomic is the single level gate, which is what keeps debug records
-    // flowing on Windows where the raw sink would otherwise drop them.
-    let inner = eventlog::EventLog::new(LOG_TAG, log::Level::Trace)
-        .map_err(|e| e.to_string())?;
-    Ok(Box::new(inner))
-}
-
 /// The level-gating `log` backend installed as the global logger.
 ///
 /// [`enabled`] reads the runtime [`CURRENT_LEVEL`] — the single gate for
-/// every record — and forwards to the platform sink underneath. Because the
+/// every record — and forwards to the ftlog sink underneath. Because the
 /// facade is pinned to `Trace`, a record reaches [`log`] only if it passes
 /// this gate. Wrapping every sink in this way keeps all three platforms
 /// identical and lets the level be raised at runtime without a restart.
@@ -263,9 +410,9 @@ impl Log for LevelGateLogger {
 
 /// Minimal `log` backend that writes `[LEVEL] message` lines to stderr.
 ///
-/// Only installed (as the inner sink) when the platform sink (syslog or the
-/// Windows Event Log) could not be established. It forwards every record the
-/// level gate admits; the gate is the single level gate.
+/// Only installed (as the inner sink) when the ftlog logger could not be
+/// built. It forwards every record the level gate admits; the gate is the
+/// single level gate.
 struct StderrLogger;
 
 impl Log for StderrLogger {
@@ -294,8 +441,8 @@ fn panic_hook(info: &PanicHookInfo) {
     let message = panic_message(info);
     error!("panic at {location}: {message}");
 
-    // A separate record: a long backtrace may exceed what a single syslog
-    // datagram carries, and the message itself should survive that.
+    // A separate record so a long backtrace cannot crowd out the panic
+    // message itself.
     error!(
         "Panic backtrace:\n{}",
         std::backtrace::Backtrace::force_capture()
@@ -316,8 +463,6 @@ fn panic_message(info: &PanicHookInfo) -> String {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-
-    use log::Level;
 
     use super::*;
 
@@ -412,5 +557,39 @@ mod tests {
         assert_eq!(parse_log_level(Some("Debug")), LevelFilter::Debug);
         assert_eq!(parse_log_level(Some("TRACE")), LevelFilter::Trace);
         assert_eq!(parse_log_level(Some("bogus")), DEFAULT_LEVEL);
+    }
+
+    /// The ftlog sink receives records through the gate and writes the
+    /// locked line format — `{LEVEL} {target}: {message}`, with no ftlog
+    /// latency field — to its destination.
+    #[test]
+    fn ftlog_sink_writes_the_locked_format() {
+        let _guard = LEVEL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("probe.log");
+        let appender =
+            ftlog::appender::FileAppender::builder().path(&path).build();
+
+        let logger = build_ftlog(appender).expect("ftlog logger");
+        install_gate(Box::new(logger));
+
+        CURRENT_LEVEL.store(level_to_u8(LevelFilter::Info), Ordering::SeqCst);
+        info!("ftlog sink probe");
+        // ftlog writes from a background thread; the synchronous flush
+        // blocks until the record has reached the file.
+        log::logger().flush();
+
+        let content = fs_err::read_to_string(&path).expect("log file");
+        assert!(
+            content.contains(
+                "INFO keymapper::daemon::logging::tests: ftlog sink probe"
+            ),
+            "unexpected line format: {content:?}"
+        );
+        assert!(
+            !content.contains("ms "),
+            "latency field not stripped: {content:?}"
+        );
     }
 }
