@@ -492,8 +492,22 @@ pub(super) fn capture_held_keys(managed: &mut ManagedDevice) {
         );
         return;
     };
-    managed.pending_held_modifiers =
-        note_held_keys(&mut managed.engine, &held);
+    let modifiers = note_held_keys(&mut managed.engine, &held);
+    managed.pending_held_modifiers = modifiers;
+    // Log the grab-time snapshot: it is the only record of which keys the
+    // client already had before the grab, and it decides how their post-grab
+    // repeats and release are handled (stale vs. forwarded), so a mis-timed
+    // sample is visible in the journal instead of showing up later as phantom
+    // key presses.
+    if !held.is_empty() {
+        debug!(
+            "Linux: held key(s) at grab on {}: {} ({} modifier(s) queued for \
+             key-down re-emission)",
+            managed.path,
+            format_key_codes(&held),
+            managed.pending_held_modifiers.len()
+        );
+    }
 }
 
 /// Note a grab-time held-key list in the engine.
@@ -552,9 +566,27 @@ pub(super) fn sync_initial_state(
     virtual_device: &mut VirtualDevice,
 ) {
     for &code in &managed.pending_held_modifiers {
+        debug!(
+            "Linux: re-emitting held modifier key-down {} on {}",
+            code, managed.path
+        );
         forward_key_event(virtual_device, code, 1);
     }
     managed.pending_held_modifiers.clear();
+}
+
+/// Render a list of evdev key codes for logging: each code's canonical HID
+/// name, or the raw code when the translation table cannot resolve it.
+fn format_key_codes(codes: &[u16]) -> String {
+    codes
+        .iter()
+        .map(|&code| {
+            keycode_to_hid_usage(code)
+                .map(|usage| usage.as_str().to_string())
+                .unwrap_or_else(|| format!("code {code}"))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Build the `EVIOCGKEY` request word for a buffer of `buf_len` bytes.
@@ -729,6 +761,14 @@ mod tests {
         assert!(engine.has_stale_key(729u16));
         engine.clear_stale_key(729u16);
         assert!(!engine.has_stale_key(729u16));
+    }
+
+    #[test]
+    fn format_key_codes_renders_names_and_fallback() {
+        // Resolvable codes render their canonical name; a code the table
+        // cannot resolve falls back to the raw code.
+        assert_eq!(format_key_codes(&[30u16, 729u16]), "A, code 729");
+        assert_eq!(format_key_codes(&[]), "");
     }
 
     // -----------------------------------------------------------------------
