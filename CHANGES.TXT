@@ -1,9 +1,11 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
-   0.2.7  Route keymapperd's logging through the log facade: syslog on
-          Linux/macOS, Windows Event Log on Windows, with a stderr
-          fallback when neither sink is available.
+   0.2.7  Route keymapperd's logging through the log facade with ftlog:
+          stderr on Linux (recorded by journald), a rotating file on
+          macOS (~/Library/Logs/keymapper/keymapperd.log) and Windows
+          (%LOCALAPPDATA%\keymapperd\logs\keymapperd.log), with daily
+          rotation and 7-day retention.
 
    0.2.3  Migrate winget manifests to multi-file format.
           Migrate Windows installer to Inno Setup 7.
