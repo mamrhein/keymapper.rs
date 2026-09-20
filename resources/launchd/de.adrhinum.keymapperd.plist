@@ -12,11 +12,11 @@
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardOutPath</key>
-    <string>@LOG_DIR@/keymapperd.log</string>
-    <key>StandardErrorPath</key>
-    <string>@LOG_DIR@/keymapperd-err.log</string>
     <!--
+        There is deliberately no StandardOutPath/StandardErrorPath: the
+        daemon writes its own rotating log file (ftlog), and launchd would
+        otherwise open the same file for stdout.
+
         The daemon runs as the logged-in user (a LaunchAgent in gui/<UID>).
         Keyboard events are captured with a CGEventTap, which requires the
         Input Monitoring and Accessibility privacy permissions (TCC).  Mapped

@@ -195,7 +195,6 @@ fi
 
 sed \
     -e "s|@BINARY_PATH@|$KEYMAPPERD_BIN|g" \
-    -e "s|@LOG_DIR@|$KEYMAPPERD_LOG_DIR|g" \
     "$KEYMAPPERD_TEMPLATE" > "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 dequarantine "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
 chown "$CONSOLE_USER" "${LAUNCH_AGENTS_DIR}/${KEYMAPPERD_LABEL}.plist"
@@ -209,7 +208,7 @@ if gui_launchctl print "gui/${CONSOLE_UID}/${KEYMAPPERD_LABEL}" >/dev/null 2>&1;
     echo "keymapperd is running via launchd."
 else
     echo "Warning: keymapperd was installed but does not appear to be running." >&2
-    echo "Check the system log: log show --predicate 'process == \"keymapperd\"' --last 5m" >&2
+    echo "Check the log file: ${KEYMAPPERD_LOG_DIR}/keymapperd.log" >&2
 fi
 
 # ---------------------------------------------------------------------------
