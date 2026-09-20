@@ -28,7 +28,7 @@ use udev::{Enumerator, MonitorBuilder};
 
 use super::{
     VIRTUAL_KEYBOARD_NAME,
-    device::{ManagedDevice, drain_pending_events},
+    device::{ManagedDevice, capture_held_keys, drain_pending_events},
     epoll::{epoll_add, epoll_del},
 };
 use crate::{
@@ -279,15 +279,21 @@ fn handle_device_add(
     drain_pending_events(&mut device, &kb.device);
 
     let fd = device.as_raw_fd();
-    let managed = ManagedDevice {
+    let mut managed = ManagedDevice {
         device,
         path: kb.device.clone(),
-        engine: MappingEngine::new(Arc::clone(lookup)),
+        engine: MappingEngine::new(Arc::clone(&lookup)),
         pending_scan: None,
         // The hot-plug thread cannot reach the virtual device, so the event
-        // loop syncs this device's current key state on its first event.
+        // loop re-emits the held modifiers' key-downs on the device's first
+        // event.
         pending_initial_state: true,
+        pending_held_modifiers: Vec::new(),
     };
+    // Same as at startup: capture the held keys at the grab instant, so a
+    // key released before the event loop starts does not leak its
+    // auto-repeat tail into the virtual device.
+    capture_held_keys(&mut managed);
 
     // Register with managed devices.
     {

@@ -34,8 +34,8 @@ use std::{
 };
 
 use device::{
-    ManagedDevice, drain_pending_events, process_device_events,
-    sync_initial_state,
+    ManagedDevice, capture_held_keys, drain_pending_events,
+    process_device_events, sync_initial_state,
 };
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
@@ -100,21 +100,27 @@ pub fn start_mapping(
         device.set_nonblocking(true)?;
         // Grabbing does not flush the kernel's event ring: drop everything
         // already buffered (e.g. the Enter press that started the daemon)
-        // so the stream starts clean at the grab.  Keys still held at this
-        // point are re-established by sync_initial_state below, which also
-        // marks non-modifiers as stale so the kernel's post-grab repeats and
-        // release for them do not reach the virtual device.
+        // so the stream starts clean at the grab.
         drain_pending_events(&mut device, &kb.device);
 
         info!("Grabbed keyboard: {} ({})", kb.device, kb.name);
-        managed_devices.push(ManagedDevice {
+        let mut managed = ManagedDevice {
             device,
             path: kb.device,
             engine: MappingEngine::new(Arc::clone(&lookup)),
             pending_scan: None,
             // Synced inline below, before the event loop starts.
             pending_initial_state: false,
-        });
+            pending_held_modifiers: Vec::new(),
+        };
+        // Capture the held keys into the engine right now, while the
+        // kernel's key state still reflects the grab instant: a key
+        // released before a late sample would leave its auto-repeat tail in
+        // the ring, and repeats for a key the engine never saw down for are
+        // decided as a fresh press (each forwarded as a tap).  The held
+        // modifiers' key-down re-emission waits for the virtual device.
+        capture_held_keys(&mut managed);
+        managed_devices.push(managed);
     }
 
     // KEY_CNT is the total number of key codes defined by the kernel
@@ -130,11 +136,12 @@ pub fn start_mapping(
     thread::sleep(Duration::from_millis(200));
     info!("Linux virtual keyboard ready.");
 
-    // Sync each grabbed keyboard's currently-held keys to the virtual device
-    // and per-device modifier tracking.  This runs before the event loop so
-    // the first real event is never processed against a stale (neutral)
-    // modifier state — the root cause of a held-at-start modifier breaking
-    // later key combinations.
+    // Re-emit the key-downs of the modifiers that were held when their
+    // devices were grabbed (see capture_held_keys), now that the virtual
+    // device exists.  This runs before the event loop so the first real
+    // event is never processed against a stale (neutral) modifier state —
+    // the root cause of a held-at-start modifier breaking later key
+    // combinations.
     for managed in &mut managed_devices {
         sync_initial_state(managed, &mut virtual_device);
     }

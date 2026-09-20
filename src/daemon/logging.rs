@@ -49,7 +49,7 @@ use std::{
 /// Re-export the `log` level type so callers (the CLI, the control
 /// socket) can name it without adding a direct `log` dependency.
 pub use log::LevelFilter;
-use log::{Log, Metadata, Record, error};
+use log::{Log, Metadata, Record, error, info};
 
 /// The process tag (syslog) / event source (Windows Event Log) name.
 const LOG_TAG: &str = "keymapperd";
@@ -64,7 +64,8 @@ const LOG_TAG: &str = "keymapperd";
 const LOG_LEVEL_ENV: &str = "KEYMAPPERD_LOG_LEVEL";
 
 /// The log level used when [`LOG_LEVEL_ENV`] is unset or unrecognised.
-const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
+// const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
+const DEFAULT_LEVEL: LevelFilter = LevelFilter::Trace;
 
 /// The runtime log-level gate.
 ///
@@ -122,6 +123,7 @@ pub fn init() {
 
     install_sink();
     set_hook(Box::new(panic_hook));
+    info!("Initial log level: {initial:?}");
 }
 
 /// Change the runtime log level without a restart.
@@ -133,6 +135,7 @@ pub fn init() {
 /// calls this; the environment variable only seeds the initial level.
 pub fn set_level(level: LevelFilter) {
     CURRENT_LEVEL.store(level_to_u8(level), Ordering::SeqCst);
+    info!("Log level changed to: {level:?}");
 }
 
 /// Parse the [`LOG_LEVEL_ENV`] value into a [`LevelFilter`].

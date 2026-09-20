@@ -262,6 +262,29 @@ impl<K: Ord + Copy> MappingEngine<K> {
         }
     }
 
+    /// Mark a key held at stream start as stale without a HID identity.
+    ///
+    /// [`note_held_key`] needs a `HidUsage` to choose between the modifier
+    /// and the non-modifier form. Keys the translation table cannot resolve
+    /// never reach [`decide`], so they are tracked by key code only: their
+    /// auto-repeat tail is dropped and their release is forwarded like any
+    /// other held key.
+    pub fn note_stale_key(&mut self, key: K) {
+        self.tracker.stale_keys.insert(key);
+    }
+
+    /// Whether *key* carries a stale mark from [`note_held_key`] or
+    /// [`note_stale_key`]: its auto-repeats are dropped until the release
+    /// clears the mark.
+    pub fn has_stale_key(&self, key: K) -> bool {
+        self.tracker.stale_keys.contains(&key)
+    }
+
+    /// Clear a key's stale mark on its release, which the caller forwards.
+    pub fn clear_stale_key(&mut self, key: K) {
+        self.tracker.stale_keys.remove(&key);
+    }
+
     /// Decide how to handle a single key event.
     ///
     /// `key` is the platform's identity for the physical key, `usage` its HID
@@ -1027,6 +1050,19 @@ mod tests {
                 outputs: vec![nk(HidUsage::B)]
             }
         );
+    }
+
+    #[test]
+    fn stale_key_without_usage_tracks_by_code_only() {
+        // A key held at grab time with no resolvable HID identity never
+        // reaches decide, so it is tracked stale by key code only: the mark
+        // is visible while set, and the release clears it.
+        let mut e = engine("- mappings:\n    A: B");
+        assert!(!e.has_stale_key(HidUsage::A.id()));
+        e.note_stale_key(HidUsage::A.id());
+        assert!(e.has_stale_key(HidUsage::A.id()));
+        e.clear_stale_key(HidUsage::A.id());
+        assert!(!e.has_stale_key(HidUsage::A.id()));
     }
 
     #[test]

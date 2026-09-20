@@ -53,11 +53,19 @@ pub(super) struct ManagedDevice {
     /// same press; key-ups and repeats carry no scan code, so those fall
     /// back to the `EV_KEY` reverse lookup.
     pub(super) pending_scan: Option<u32>,
-    /// Set when a hot-plugged device was adopted before its current key state
-    /// was synced to the virtual device.  The event loop syncs it once on the
-    /// device's first pass, then clears this.  Devices grabbed at startup are
-    /// synced inline in `start_mapping` and start `false`.
+    /// Set when a hot-plug-adopted device still has held-modifier key-downs
+    /// queued for re-emission (see `pending_held_modifiers`) but the
+    /// hot-plug thread cannot reach the virtual device.  The event loop
+    /// runs `sync_initial_state` once on the device's first pass, then
+    /// clears this.  Devices grabbed at startup are synced inline in
+    /// `start_mapping` and start `false`.
     pub(super) pending_initial_state: bool,
+    /// Key codes of the modifiers held when the device was grabbed, queued
+    /// for their key-down re-emission on the virtual device.  The engine is
+    /// noted for every held key at grab time ([`capture_held_keys`]); only
+    /// the emission is deferred until the virtual device exists, and
+    /// [`sync_initial_state`] performs it.
+    pub(super) pending_held_modifiers: Vec<u16>,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +215,18 @@ pub(super) fn process_device_events(
 
         let Some(usage) = usage else {
             // Unknown key with no resolvable HID identity: forward it
-            // unchanged.
+            // unchanged.  Such a key never reaches the engine's decide
+            // path, so a key held at grab time is tracked stale by key code
+            // only: its auto-repeat tail is dropped (re-emitting it would
+            // inject a second press), and its release — forwarded, as
+            // always — clears the mark.
+            if value == 2 {
+                if managed.engine.has_stale_key(code) {
+                    continue;
+                }
+            } else if value == 0 {
+                managed.engine.clear_stale_key(code);
+            }
             forward_key_event(virtual_device, code, value);
             continue;
         };
@@ -404,10 +423,12 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
 /// into the virtual device and, for a still-held key, a burst of
 /// auto-repeat taps.  The daemon's stream therefore starts clean at the
 /// grab, and keys actually held at takeover are re-established by
-/// [`sync_initial_state`] instead.  Note that this only covers events that
-/// were already buffered: the repeats and release the kernel still generates
-/// after the grab for a key that is physically held at takeover are handled
-/// by the engine's stale-key tracking, not here.
+/// [`capture_held_keys`] (engine state, sampled at the grab instant) and
+/// [`sync_initial_state`] (the held modifiers' key-down re-emission) instead.
+/// Note that this only covers events that were already buffered: the
+/// repeats and release the kernel still generates after the grab for a key
+/// that is physically held at takeover are handled by the engine's stale-key
+/// tracking, not here.
 ///
 /// The read inside `fetch_events` already removed the batch from the ring,
 /// so the returned iterator may be dropped unprocessed; the only thing of
@@ -443,52 +464,97 @@ pub(super) fn drain_pending_events(device: &mut Device, path: &str) {
     }
 }
 
-/// Read the keyboard's current key state from the kernel and sync any held
-/// keys to the virtual output device and this device's engine.
+/// Note every key currently held on the physical keyboard in the engine and
+/// queue the held modifiers for re-emission.
 ///
-/// The event stream starts at the grab, with everything buffered before it
-/// discarded by [`drain_pending_events`], so a key that is still held —
-/// commonly a modifier, but also the Return key that started the daemon if
-/// the press is still in flight — is invisible to the event stream.  Without
-/// this sync the virtual keyboard and the engine's modifier state start out
-/// of step with the physical keyboard and stay that way, which is why a
-/// modifier held at grab time silently breaks later key combinations.
+/// Runs immediately after the grab and the drain, while the kernel's key
+/// state still reflects the grab instant itself.  Sampling later — after the
+/// virtual device is built, for instance — misses a key that was released in
+/// the meantime: its auto-repeat tail, generated between the grab and the
+/// release, is still buffered in the device ring, and a repeat for a key the
+/// engine never saw a key-down for is decided as a fresh press.  Each of
+/// those repeats would be forwarded as a press+release tap; for the Return
+/// key that started the daemon, that is a burst of extra newlines.
 ///
-/// Held **modifiers** are re-emitted as key-downs on the virtual device and
-/// noted as forwarded in the engine: the re-emission is idempotent (the
-/// client already has the physical key-down) and keeps the output key state
-/// in step, and the engine's modifier state starts correct so the first real
-/// event is never looked up against a stale (neutral) mask.  Held
-/// **non-modifiers** are only noted in the engine (as stale): their key-down
-/// was already consumed by the client before the grab, so re-emitting it —
-/// plus the auto-repeat tail and the release that follow — would inject a
-/// second press.  The engine swallows their repeats and forwards their
-/// release, which balances the pre-grab key-down.
+/// Held **modifiers** are noted as forwarded in the engine (restoring the
+/// lookup bit and marking the key so its release is forwarded) and queued in
+/// `pending_held_modifiers` for their key-down re-emission once the virtual
+/// device exists.  Held **non-modifiers** are only noted as stale: their
+/// key-down was already consumed by the client before the grab, so
+/// re-emitting it — plus the auto-repeat tail and the release that follow —
+/// would inject a second press.  The engine swallows their repeats and
+/// forwards their release, which balances the pre-grab key-down.
+pub(super) fn capture_held_keys(managed: &mut ManagedDevice) {
+    let Ok(held) = read_kernel_key_state(managed.device.as_raw_fd()) else {
+        warn!(
+            "Linux: failed to read the held key state of {} at grab time",
+            managed.path
+        );
+        return;
+    };
+    managed.pending_held_modifiers =
+        note_held_keys(&mut managed.engine, &held);
+}
+
+/// Note a grab-time held-key list in the engine.
+///
+/// Every resolvable key is noted as held (a modifier is marked forwarded
+/// with its lookup bit set, a non-modifier stale), and a key the
+/// translation table cannot resolve is marked stale by key code only, since
+/// it never reaches the engine's decide path.
+///
+/// Returns the key codes of the held modifiers, which the caller queues for
+/// their key-down re-emission on the virtual device.
+pub(super) fn note_held_keys(
+    engine: &mut MappingEngine<u16>,
+    held: &[u16],
+) -> Vec<u16> {
+    let mut modifiers = Vec::new();
+    for &code in held {
+        match keycode_to_hid_usage(code) {
+            Some(usage) => {
+                engine.note_held_key(code, usage);
+                if HidUsage::hid_usage_to_modifier_bit(usage).is_some() {
+                    modifiers.push(code);
+                }
+            }
+            None => {
+                // No resolvable HID identity: track it stale by key code
+                // only, so its auto-repeat tail is dropped and its release
+                // forwarded like any other held key.
+                engine.note_stale_key(code);
+            }
+        }
+    }
+    modifiers
+}
+
+/// Re-emit the key-downs of the modifiers that were held when the device
+/// was grabbed, completing the initial-state sync that
+/// [`capture_held_keys`] started at grab time.
+///
+/// The engine was already noted at grab time; only the emission is deferred
+/// until the virtual device exists (inline at startup, or on the device's
+/// first pass when adopted by the hot-plug monitor).  Re-emitting from the
+/// grab-time set — rather than re-reading the key state now — keeps a fresh
+/// press made in the window between the grab and this point out of the
+/// re-emission: its own key-down event is buffered in the ring and is
+/// forwarded as usual.  A modifier released in that window still gets its
+/// key-down re-emitted: the matching key-up is either already buffered in
+/// the ring (processed right after, forwarded, and balancing the press) or
+/// still to come.  The re-emission is idempotent when the modifier is still
+/// held (the client already has the physical key-down), and the engine's
+/// modifier state starts correct, so the first real event is never looked
+/// up against a stale (neutral) mask — the root cause of a held-at-start
+/// modifier breaking later key combinations.
 pub(super) fn sync_initial_state(
     managed: &mut ManagedDevice,
     virtual_device: &mut VirtualDevice,
 ) {
-    let Ok(held) = read_kernel_key_state(managed.device.as_raw_fd()) else {
-        return;
-    };
-    for code in held {
-        let usage = keycode_to_hid_usage(code);
-        let is_modifier = usage
-            .and_then(HidUsage::hid_usage_to_modifier_bit)
-            .is_some();
-        // Note the held key in the engine so its later release (and any
-        // repeats) are not treated as a fresh press; for a modifier this
-        // also restores the bit in the lookup state and marks it forwarded
-        // so its release is forwarded (not swallowed) to the virtual device.
-        if let Some(usage) = usage {
-            managed.engine.note_held_key(code, usage);
-        }
-        // Only a modifier's key-down is re-emitted on the virtual device (see
-        // the function docs for why a non-modifier's must not be).
-        if is_modifier {
-            forward_key_event(virtual_device, code, 1);
-        }
+    for &code in &managed.pending_held_modifiers {
+        forward_key_event(virtual_device, code, 1);
     }
+    managed.pending_held_modifiers.clear();
 }
 
 /// Build the `EVIOCGKEY` request word for a buffer of `buf_len` bytes.
@@ -605,6 +671,64 @@ mod tests {
         // _IOC(_IOC_READ=2, 'E'=0x45, nr=0x18, size=96) =
         // (2 << 30) | (0x45 << 8) | (0x18 << 0) | (96 << 16).
         assert_eq!(eviocgkey_request(96), 0x80604518);
+    }
+
+    // -----------------------------------------------------------------------
+    // Grab-time held-key capture
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn note_held_keys_notes_engine_and_collects_modifiers() {
+        use std::sync::Arc;
+
+        use parking_lot::RwLock;
+
+        use crate::daemon::{state::Lookup, test_lookup::TestLookup};
+
+        // Grab-time held keys: Return (28), LeftCtrl (29), and 729, which
+        // the translation table cannot resolve.
+        let lookup: Arc<RwLock<dyn Lookup>> = Arc::new(RwLock::new(
+            TestLookup::from_yaml("- mappings:\n    LeftControl+A: B"),
+        ));
+        let mut engine = MappingEngine::new(lookup);
+        let held = vec![28u16, 29u16, 729u16];
+
+        // Only the held modifier is queued for key-down re-emission.
+        let modifiers = note_held_keys(&mut engine, &held);
+        assert_eq!(modifiers, vec![29u16]);
+
+        // The held non-modifier's auto-repeat is swallowed and its release
+        // forwarded (it balances the pre-grab key-down)...
+        assert_eq!(
+            engine.decide(28, HidUsage::Return, true, None, true),
+            Decision::Swallow { release: 0 }
+        );
+        assert_eq!(
+            engine.decide(28, HidUsage::Return, false, None, true),
+            Decision::Pass
+        );
+        // ...the held modifier's bit is active for rule lookup, so the chord
+        // fires against the forwarded modifier...
+        assert_eq!(
+            engine.decide(30, HidUsage::A, true, None, true),
+            Decision::Emit {
+                release: 1,
+                outputs: vec![NativeKey {
+                    modifiers: 0,
+                    usage: HidUsage::B
+                }]
+            }
+        );
+        // ...and its physical release is a consumed release (the output
+        // device already dropped it when the trigger fired).
+        assert_eq!(
+            engine.decide(29, HidUsage::LeftControl, false, None, true),
+            Decision::ConsumedRelease
+        );
+        // The unresolvable key is tracked stale by code only.
+        assert!(engine.has_stale_key(729u16));
+        engine.clear_stale_key(729u16);
+        assert!(!engine.has_stale_key(729u16));
     }
 
     // -----------------------------------------------------------------------
