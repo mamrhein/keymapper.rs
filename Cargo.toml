@@ -95,7 +95,6 @@ objc2-foundation = "0.3"
 # Windows-specific dependencies
 [target.'cfg(target_os = "windows")'.dependencies]
 crossbeam-channel = "0.5"  # lock-free IPC between input threads
-eventlog = "0.4"  # Windows Event Log daemon logging
 windows = {
   version = "0.62",
   features = [
@@ -121,4 +120,3 @@ windows = {
 [target."cfg(unix)".dependencies]
 libc = "0.2"
 signal-hook = "0.4"
-syslog = "7"  # RFC 3164 daemon logging
