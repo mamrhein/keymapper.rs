@@ -176,13 +176,13 @@ log show --predicate 'subsystem == "com.apple.systemextensions"' --last 1h
 
 ## Daemon logs
 
-keymapperd (user domain) logs through the `log` facade to a rotating file at `~/Library/Logs/keymapper/keymapperd.log` (daily rotation, 7-day retention). View it with:
+keymapperd (user domain) logs through the `log` facade to a rotating file in `~/Library/Logs/keymapper/`, one file per day named `keymapperd-YYYYMMDD.log` (7-day retention). View today's log with:
 
 ```bash
-tail -f ~/Library/Logs/keymapper/keymapperd.log
+tail -f ~/Library/Logs/keymapper/keymapperd-$(date +%Y%m%d).log
 ```
 
-The launchd plist deliberately sets no `StandardOutPath`/`StandardErrorPath`: the daemon owns its log file, and launchd on macOS 27 discards a job's stderr rather than routing it to unified logging, so there is no `log stream` view of keymapperd.
+The launchd plist deliberately sets no `StandardOutPath`/`StandardErrorPath`: the daemon owns its log files, and launchd on macOS 27 discards a job's stderr rather than routing it to unified logging, so there is no `log stream` view of keymapperd.
 
 virtkbdd (system domain) has no `log` facade yet and writes logs to `/var/log/virtkbdd/`:
 
@@ -192,7 +192,7 @@ virtkbdd (system domain) has no `log` facade yet and writes logs to `/var/log/vi
 View live logs:
 
 ```bash
-tail -f ~/Library/Logs/keymapper/keymapperd.log
+tail -f ~/Library/Logs/keymapper/keymapperd-$(date +%Y%m%d).log
 sudo tail -f /var/log/virtkbdd/virtkbdd.log
 ```
 
@@ -200,7 +200,7 @@ sudo tail -f /var/log/virtkbdd/virtkbdd.log
 
 ### Remapping not working, tap error in the log
 
-**Symptom:** keys are not remapped and the log (`~/Library/Logs/keymapper/keymapperd.log`) reports a CGEventTap creation failure.
+**Symptom:** keys are not remapped and the log (`~/Library/Logs/keymapper/keymapperd-YYYYMMDD.log`) reports a CGEventTap creation failure.
 
 **Cause:** the Input Monitoring or Accessibility permission for `keymapperd` is missing or stale.
 
@@ -251,7 +251,7 @@ Mappings resume as soon as keymapperd reconnects — there is no need to restart
 **Fix:**
 1. Check that the binary path in the plist is correct: `cat ~/Library/LaunchAgents/de.adrhinum.keymapperd.plist` and `sudo cat /Library/LaunchDaemons/de.adrhinum.virtkbdd.plist`.
 2. Verify the binaries are executable: `ls -la ~/.local/bin/keymapperd /usr/local/bin/virtkbdd`.
-3. Check the logs: `tail ~/Library/Logs/keymapper/keymapperd.log` and `sudo cat /var/log/virtkbdd/virtkbdd-err.log`.
+3. Check the logs: `tail ~/Library/Logs/keymapper/keymapperd-$(date +%Y%m%d).log` and `sudo cat /var/log/virtkbdd/virtkbdd-err.log`.
 4. Reinstall: `sudo scripts/install-macos.sh`.
 
 ## Known limitations

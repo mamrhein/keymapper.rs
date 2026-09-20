@@ -92,10 +92,10 @@ These are accepted trade-offs of the final architecture:
 
 ## Logs
 
-keymapperd logs through the `log` facade to a rotating file at `%LOCALAPPDATA%\keymapperd\logs\keymapperd.log` (daily rotation, 7-day retention). View it with:
+keymapperd logs through the `log` facade to a rotating file in `%LOCALAPPDATA%\keymapperd\logs\`, one file per day named `keymapperd-YYYYMMDD.log` (7-day retention). View today's log with:
 
 ```powershell
-Get-Content -Wait "$env:LOCALAPPDATA\keymapperd\logs\keymapperd.log"
+Get-Content -Wait "$env:LOCALAPPDATA\keymapperd\logs\keymapperd-$(Get-Date -Format yyyyMMdd).log"
 ```
 
 ## E2e capture
