@@ -91,7 +91,9 @@ journalctl --user -u keymapperd -f
 
 ## E2e capture
 
-The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd`, and focuses an ordinary raw-mode stdin reader (`keymapper_reader`) on the virtual console. The harness stops `getty@tty1` (the service, so it does not respawn) and switches to VT1; the reader then becomes a session leader and opens `/dev/tty1` itself, so the kernel assigns it as the controlling terminal and makes its process group the VT's foreground group. The daemon's uinput output is routed by the kernel to the active VT, so it reaches the reader's stdin; the daemon still grabs the injector's uinput device, so raw injected keys never leak to the VT. The reader appends every received byte to a file (created only after focus and raw mode are established — the harness's ready signal), and the harness compares each phase's recorded bytes against a character-space translation of the expected output events.
+The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd` with its stderr (the log stream) redirected to a temp file, and waits for the readiness line in that stream. For each phase it raises the daemon's log level to `debug` via the control socket, injects the phase's key sequence through a uinput virtual keyboard (which the daemon grabs, so raw injected keys never leak to the active VT), and collects the log window until the expected `emit` lines appear and the stream goes quiescent. The harness then checks the window against the expected model derived from the config: the `emit` sequence must match exactly, every key that must pass through must appear in a `recv` and a `pass` line, and no `ERROR` lines may occur.
+
+Outside CI the same harness runs in local mode: it drives an already-running daemon (never starting or stopping it) and reads its log from the systemd user journal.
 
 ## Source files
 

@@ -7,9 +7,7 @@
 // $Source$
 // $Revision$
 
-//! Test helpers for the e2e test harness: the key event injector and the
-//! `keymapper_reader` stdin recorder (the "normal app" that receives the
-//! daemon's output through the OS's regular input path).
+//! Test helpers for the e2e test harness: the key event injector, which
+//! feeds a virtual keyboard into the daemon's capture path.
 
 pub mod key_injector;
-pub mod reader;

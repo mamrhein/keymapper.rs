@@ -26,8 +26,7 @@ class Keymapper < Formula
   depends_on "rust" => :build
 
   def install
-    # Build and install all Rust binaries (keymapper, keymapperd, virtkbdd,
-    # keymapper_reader).
+    # Build and install all Rust binaries (keymapper, keymapperd, virtkbdd).
     system "cargo", "install", "--path", ".", "--root", prefix, "--locked"
 
     # Keep the uninstall scripts in the prefix so `brew uninstall` can stop

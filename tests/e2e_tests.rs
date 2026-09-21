@@ -29,8 +29,9 @@
 //!   and never starts or stops it.  Preconditions, checked before anything
 //!   destructive: the daemon is running (on Linux, as the systemd user
 //!   service), its log stream (the systemd user journal on Linux, the rotating
-//!   log file elsewhere) is readable, and its control socket is reachable.
-//!   When a precondition is unmet, the test skips with a message.
+//!   log file elsewhere) is readable, the key injector is available, and its
+//!   control socket is reachable.  When a precondition is unmet, the test
+//!   skips with a message.
 //!
 //! In both modes the original config is backed up and restored on teardown
 //! (the daemon hot-reloads it back).
@@ -1024,6 +1025,25 @@ fn run_e2e_local(phases: &[Option<&Path>], label: &str) {
             return;
         }
     };
+    // The key injector must be available (on macOS this requires root and a
+    // running Karabiner daemon; on Linux, write access to /dev/uinput).
+    let created = match create_injector() {
+        Ok(created) => created,
+        Err(e) => {
+            eprintln!(
+                "skipping {label}: the key injector is unavailable: {e}"
+            );
+            return;
+        }
+    };
+    let Some(mut injector) = created else {
+        eprintln!(
+            "skipping {label}: the key injector is not supported on this \
+             platform"
+        );
+        return;
+    };
+
     if let Err(e) = set_debug() {
         eprintln!(
             "skipping {label}: the daemon's control socket is unreachable: \
@@ -1057,11 +1077,8 @@ fn run_e2e_local(phases: &[Option<&Path>], label: &str) {
         panic!("the daemon did not hot-reload the planted config: {e}")
     });
 
-    // 2. Create and set up the injector; the running daemon adopts its virtual
-    //    device via hot-plug.
-    let mut injector = create_injector()
-        .expect("failed to create injector")
-        .expect("injector is available on this platform");
+    // 2. Set up the injector (probed above); the running daemon adopts its
+    //    virtual device via hot-plug.
     injector.setup().expect("failed to set up injector");
     wait_for_injector_device(&*injector);
     #[cfg(target_os = "linux")]

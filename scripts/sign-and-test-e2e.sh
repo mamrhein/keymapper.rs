@@ -1,10 +1,17 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
-# Installs the Karabiner DriverKit VirtualHIDDevice driver, signs test
-# binaries with an ad-hoc signature, and runs e2e sandbox tests.
+# Installs the Karabiner DriverKit VirtualHIDDevice driver, signs the test
+# binary with an ad-hoc signature, and runs the e2e tests as root.
 #
-# On macOS, CGEventTap requires the calling process to be code-signed.
-# Ad-hoc signing (codesign --sign -) is sufficient; no certificate needed.
+# The tests run in ci mode (CI=true): the harness spawns and stops its own
+# keymapperd, so any already-running daemon is stopped first.  The user's
+# config is backed up and restored on exit, ownership included.
+#
+# Root is required twice over: the key injector talks to the Karabiner
+# DriverKit daemon's service socket, which only root may open, and running
+# as root bypasses the TCC Accessibility permission checks required for
+# the daemon's CGEventTap creation.  Ad-hoc signing (codesign --sign -) is
+# sufficient for the test binary; no certificate needed.
 # On other platforms this script skips signing and just runs the tests.
 # ---------------------------------------------------------------------------
 
@@ -27,13 +34,11 @@ if ! systemextensionsctl list 2>/dev/null \
     exit 1
 fi
 
-# Build the binaries the harness spawns as subprocesses, resolving each
+# Build the daemon binary the harness spawns as a subprocess, resolving it
 # relative to its own location in target/debug/.  The daemon is a plain
-# production build; the harness drives it and observes its output through
-# the reader, an ordinary raw-mode stdin app that the harness starts in a
-# Terminal.app window (which must be reachable via osascript, i.e. the
-# script should run in a GUI session).
-cargo build --bin keymapperd --bin keymapper_reader
+# production build; the harness drives it and verifies its decisions from
+# its own debug log.
+cargo build --bin keymapperd
 
 # Build and sign the test binary without running it.
 cargo nextest run --test e2e_tests --no-run
@@ -43,6 +48,6 @@ if [ -n "$bin" ]; then
     codesign --force --sign - "$bin"
 fi
 
-# Run the tests. Running as root bypasses TCC Accessibility permission checks
-# required for CGEventTap creation.
-sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
+# Run the tests in ci mode (the harness spawns and stops its own daemon).
+sudo -E env CI=true PATH="$PATH" $(which cargo) nextest run --no-capture \
+     --test e2e_tests

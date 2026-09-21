@@ -9,9 +9,9 @@
 
 //! Log-based verification for the e2e harness.
 //!
-//! This replaces the reader's byte comparison.  Instead of comparing the
-//! bytes a raw-mode application records, the harness reads the daemon's own
-//! debug log and checks three things for each phase:
+//! This replaces the previous byte-based verification.  Instead of comparing
+//! the bytes an ordinary application records, the harness reads the daemon's
+//! own debug log and checks three things for each phase:
 //!
 //! 1. **emit sequence equality** — the parsed `emit` lines equal, in order and
 //!    exactly, the expected sequence derived from the config.

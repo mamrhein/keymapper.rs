@@ -20,10 +20,6 @@ name = "keymapperd"
 path = "src/keymapperd.rs"
 
 [[bin]]
-name = "keymapper_reader"
-path = "src/keymapper_reader.rs"
-
-[[bin]]
 name = "virtkbdd"
 path = "src/virtkbdd.rs"
 

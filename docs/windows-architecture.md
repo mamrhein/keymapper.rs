@@ -70,7 +70,7 @@ Two consequences of the shared bookkeeping:
 
 ### Emission and self-exclusion
 
-The `SendInput` is performed by the hook procedure directly in the callback. A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches other hooks and the target window — the e2e reader observes the re-emission as the focused console window — so the previous design (worker thread, one-shot reply channel, deferred emission) is not load-bearing. The deferred queue remains only for standalone consumer events, whose emission originates on the raw input thread: a `SendInput` issued there can race a keyboard hook chain in progress and be dropped, so those outputs are queued and posted to the message loop, which drains them where the hook chain is idle.
+The `SendInput` is performed by the hook procedure directly in the callback. A `SendInput` issued from within a `WH_KEYBOARD_LL` callback reaches other hooks and the target window, so the previous design (worker thread, one-shot reply channel, deferred emission) is not load-bearing. The deferred queue remains only for standalone consumer events, whose emission originates on the raw input thread: a `SendInput` issued there can race a keyboard hook chain in progress and be dropped, so those outputs are queued and posted to the message loop, which drains them where the hook chain is idle.
 
 A mapped output is emitted as a complete tap via `SendInput`: modifiers down (ascending bit order), base key down, base key up, modifiers up (descending), with 1 ms pauses between events and `KEYEVENTF_EXTENDEDKEY` set for extended keys. An output whose base is itself a modifier key is the exception: only its key-downs are sent, and the matching key-ups go out when the physical key-up arrives (see [Modifier tracking](#modifier-tracking)). The output's `HidUsage` is resolved to a virtual-key code — Keyboard page usages through the `Key` table, Consumer page usages through a static translation table (media and volume keys). If an output has no VK equivalent (e.g. brightness keys), the daemon logs an error and releases any modifiers it already pressed, avoiding a stuck-modifier state.
 
@@ -100,7 +100,9 @@ Get-Content -Wait "$env:LOCALAPPDATA\keymapperd\logs\keymapperd-$(Get-Date -Form
 
 ## E2e capture
 
-The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd`, and focuses an ordinary raw-mode stdin reader (`keymapper_reader`) in its own console window (`CREATE_NEW_CONSOLE`, brought to the foreground with `SetForegroundWindow`). The daemon re-emits keys via `SendInput`, which the system delivers to the foreground window — i.e. the reader; because the daemon's hook swallows remapped inputs first, the reader receives exactly the daemon's outputs plus forwarded passthroughs, never the raw injected inputs. The reader appends every received byte to a file (created only after raw mode is established — the harness's ready signal), and the harness compares each phase's recorded bytes against a character-space translation of the expected output events.
+The end-to-end tests drive a plain production daemon (no test hooks): the harness plants a fixture config, spawns `keymapperd`, and waits for the readiness line in its rotating log file. For each phase it raises the daemon's log level to `debug` via the control socket, injects the phase's key sequence through a virtual keyboard, and collects the log window until the expected `emit` lines appear and the stream goes quiescent. The harness then checks the window against the expected model derived from the config: the `emit` sequence must match exactly, every key that must pass through must appear in a `recv` and a `pass` line, and no `ERROR` lines may occur.
+
+Outside CI the same harness runs in local mode: it drives an already-running daemon (never starting or stopping it) and reads its log from the same rotating file.
 
 ## Source files
 
