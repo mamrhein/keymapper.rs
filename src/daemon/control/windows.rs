@@ -32,8 +32,8 @@ use windows::{
             ACL, ACL_REVISION, AddAccessAllowedAce, FreeSid, GetLengthSid,
             GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
             PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-            SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_USER,
-            TokenUser,
+            SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_QUERY,
+            TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -46,7 +46,7 @@ use windows::{
                 NAMED_PIPE_MODE, PIPE_READMODE_BYTE,
                 PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
             },
-            Threading::{GetCurrentProcess, OpenProcessToken, TOKEN_QUERY},
+            Threading::{GetCurrentProcess, OpenProcessToken},
         },
     },
     core::PCWSTR,
@@ -77,13 +77,28 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 /// The `ERROR_PIPE_BUSY` code: the daemon exists but is serving a client.
 const ERROR_PIPE_BUSY: i32 = 231;
 
+/// A named-pipe handle owned by the control-socket thread.
+///
+/// `HANDLE` is a raw pointer and therefore neither `Send` nor `Sync`, but the
+/// pipe is created on the caller thread and served exclusively by the
+/// `control-socket` thread, so moving it across the thread boundary is safe.
+///
+/// Copying it only duplicates the pointer value (the same OS handle is reused
+/// for every connection), so it can be `Copy`.
+#[derive(Clone, Copy)]
+struct PipeHandle(HANDLE);
+
+// SAFETY: each `PipeHandle` is moved into the control-socket thread and never
+// shared between threads again.
+unsafe impl Send for PipeHandle {}
+
 /// A named-pipe handle as a `Read`/`Write` stream.
 ///
 /// `ReadFile`/`WriteFile` on a synchronous byte-mode pipe block until data is
 /// available, so a peer close surfaces as `ERROR_BROKEN_PIPE` (mapped to EOF)
 /// or an I/O error.
 struct Pipe {
-    handle: HANDLE,
+    handle: PipeHandle,
 }
 
 impl Read for Pipe {
@@ -94,7 +109,7 @@ impl Read for Pipe {
         let mut bytes_read = 0u32;
         match unsafe {
             ReadFile(
-                self.handle,
+                self.handle.0,
                 Some(buf),
                 Some(&mut bytes_read as *mut _),
                 None,
@@ -116,7 +131,7 @@ impl Write for Pipe {
         let mut bytes_written = 0u32;
         match unsafe {
             WriteFile(
-                self.handle,
+                self.handle.0,
                 Some(buf),
                 Some(&mut bytes_written as *mut _),
                 None,
@@ -139,6 +154,9 @@ impl Write for Pipe {
 struct OwnerOnlyDescriptor {
     attrs: SECURITY_ATTRIBUTES,
     sd: SECURITY_DESCRIPTOR,
+    /// Never read; the field only keeps the buffer alive because the
+    /// descriptor's DACL points into it.
+    #[allow(dead_code)]
     acl: Vec<u8>,
 }
 
@@ -214,7 +232,9 @@ fn owner_only_descriptor(sid: PSID) -> Option<OwnerOnlyDescriptor> {
         return None;
     }
 
-    let mut sd: SECURITY_DESCRIPTOR = core::mem::zeroed();
+    // `mem::zeroed` on a struct containing raw pointers is unsafe on Rust
+    // 2024; the descriptor is fully initialised by the calls below.
+    let sd: SECURITY_DESCRIPTOR = unsafe { core::mem::zeroed() };
     // Two-step cast: a reference may only become a raw pointer of its own type
     // in a single step, so route through `*mut SECURITY_DESCRIPTOR` first.
     let sd_ptr = PSECURITY_DESCRIPTOR(
@@ -315,9 +335,10 @@ pub fn start() {
     }
     info!("Control socket listening on {PIPE_NAME}");
 
+    let handle = PipeHandle(pipe);
     if let Err(e) = std::thread::Builder::new()
         .name("control-socket".into())
-        .spawn(move || serve(pipe))
+        .spawn(move || serve(handle))
     {
         warn!("Failed to spawn the control-socket thread: {e}");
     }
@@ -325,20 +346,20 @@ pub fn start() {
 
 /// Serve connections on a single pipe instance: connect, handle one command,
 /// disconnect, repeat.
-fn serve(handle: HANDLE) {
+fn serve(handle: PipeHandle) {
     loop {
         // With no default timeout, `ConnectNamedPipe` blocks until a client
         // connects; if one is already waiting it returns
         // `ERROR_PIPE_CONNECTED`, which we treat as a success.
         unsafe {
-            let _ = ConnectNamedPipe(handle, None);
+            let _ = ConnectNamedPipe(handle.0, None);
         }
         let mut conn = Pipe { handle };
         if let Err(e) = handle_connection(&mut conn) {
             debug!("control-socket connection ended: {e}");
         }
         unsafe {
-            let _ = DisconnectNamedPipe(handle);
+            let _ = DisconnectNamedPipe(conn.handle.0);
         }
     }
 }
@@ -363,7 +384,9 @@ pub(super) fn connect() -> std::io::Result<Box<dyn IoStream>> {
             return Err(std::io::Error::from_raw_os_error(code.0 as i32));
         }
     };
-    Ok(Box::new(Pipe { handle }))
+    Ok(Box::new(Pipe {
+        handle: PipeHandle(handle),
+    }))
 }
 
 /// Convert a failed client connection into a friendly message for the CLI.
