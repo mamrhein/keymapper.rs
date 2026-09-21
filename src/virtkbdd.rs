@@ -15,6 +15,11 @@
 
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install the log backend before any daemon output flows, mirroring
+    // keymapperd.  Without this the `log` facade drops every record virtkbdd
+    // emits, so connection and frame errors are invisible.  virtkbdd runs as
+    // root, so its log lands under /var/root.
+    keymapper::daemon::logging::init();
     keymapper::platform::start_virtkbd()
 }
 

@@ -237,7 +237,17 @@ fn log_file_path() -> Result<PathBuf, String> {
             .join("Logs")
             .join("keymapper")
     };
-    Ok(dir.join("keymapperd.log"))
+    // Name the file after the running process so keymapperd and virtkbdd log
+    // to separate files.  Fall back to the historical name when the executable
+    // path cannot be resolved.
+    let file_name = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.file_stem()
+                .map(|stem| format!("{}.log", stem.to_string_lossy()))
+        })
+        .unwrap_or_else(|| "keymapperd.log".to_string());
+    Ok(dir.join(file_name))
 }
 
 /// Build the ftlog logger writing to *root*.
