@@ -40,7 +40,7 @@ use std::{
     },
 };
 
-use log::{debug, info};
+use log::{debug, info, trace};
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation,
@@ -56,7 +56,7 @@ use super::{ipc_client::IpcClient, keycode::keycode_to_hid_usage};
 use crate::{
     common::{hid_usage::HidUsage, keyboard::KeyboardSpecifier},
     daemon::{
-        engine::{Decision, MappingEngine, fmt_native_keys},
+        engine::{Decision, MappingEngine, fmt_native_key},
         mapping_cache::NativeKey,
         state::Lookup,
     },
@@ -261,7 +261,15 @@ unsafe extern "C-unwind" fn tap_callback(
         return event.as_ptr();
     };
 
-    debug!("recv keycode={keycode} type={} -> {usage}", event_type.0);
+    // Both directions share the line, but the down is the informative one
+    // and stays at `debug`; the key-up is less useful and is logged at
+    // `trace` so it stays out of the default debug output, as on linux.
+    let action = if is_down { "down" } else { "up" };
+    if is_down {
+        debug!("recv keycode={keycode} {action} -> {usage}");
+    } else {
+        trace!("recv keycode={keycode} {action} -> {usage}");
+    }
 
     let reachable = ctx.reachable.load(Ordering::Acquire);
     let decision = {
@@ -272,12 +280,21 @@ unsafe extern "C-unwind" fn tap_callback(
     };
 
     match decision {
-        Decision::Pass => event.as_ptr(),
+        Decision::Pass => {
+            if is_down {
+                debug!("pass keycode={keycode} {action} -> {usage}");
+            } else {
+                trace!("pass keycode={keycode} {action} -> {usage}");
+            }
+            event.as_ptr()
+        }
         Decision::Emit {
             release: _,
             outputs,
         } => {
-            debug!("emit -> {}", fmt_native_keys(&outputs));
+            for native_key in &outputs {
+                debug!("emit {}", fmt_native_key(native_key));
+            }
             // The release mask is inert on macOS: the virtual keyboard's
             // modifier state is isolated from physical typing, so there is
             // nothing to release on the output device.  Fire-and-forget; drop
@@ -286,11 +303,18 @@ unsafe extern "C-unwind" fn tap_callback(
             std::ptr::null_mut()
         }
         // The release mask is inert for the same reason.
-        Decision::Swallow { release: _ } => std::ptr::null_mut(),
+        Decision::Swallow { release: _ } => {
+            trace!("swal keycode={keycode} up -> {usage}");
+            std::ptr::null_mut()
+        }
         // The physical release of a consumed modifier must reach the
         // application: forwarded events never touch the virtual keyboard, so
-        // swallowing it would leave the modifier stuck.
-        Decision::ConsumedRelease => event.as_ptr(),
+        // swallowing it would leave the modifier stuck.  It is therefore a
+        // pass, logged as one.
+        Decision::ConsumedRelease => {
+            trace!("pass keycode={keycode} up -> {usage}");
+            event.as_ptr()
+        }
     }
 }
 

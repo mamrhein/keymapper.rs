@@ -45,7 +45,7 @@ use std::sync::{
     atomic::{AtomicU32, Ordering},
 };
 
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use parking_lot::RwLock;
 // The drain wake post is only compiled into non-test builds (see
 // `queue_emission`); unit tests never queue an emission.
@@ -85,7 +85,7 @@ use crate::{
         modifier::ModifierRole,
     },
     daemon::{
-        engine::{Decision, MappingEngine, fmt_native_keys, output_held_mask},
+        engine::{Decision, MappingEngine, fmt_native_key, output_held_mask},
         mapping_cache::NativeKey,
         state::Lookup,
     },
@@ -441,7 +441,15 @@ extern "system" fn low_level_keyboard_proc(
         };
     };
 
-    debug!("recv vk={} is_down={is_key_down} -> {usage}", vk_code.0);
+    // Both directions share the line, but the down is the informative one
+    // and stays at `debug`; the key-up is less useful and is logged at
+    // `trace` so it stays out of the default debug output, as on linux.
+    let action = if is_key_down { "down" } else { "up" };
+    if is_key_down {
+        debug!("recv vk={} {action} -> {usage}", vk_code.0);
+    } else {
+        trace!("recv vk={} {action} -> {usage}", vk_code.0);
+    }
 
     // Identify the source keyboard non-blockingly.  Raw input and the hook
     // do not deliver in a guaranteed order, so retry for a few milliseconds
@@ -480,6 +488,11 @@ extern "system" fn low_level_keyboard_proc(
     match decision {
         // Unmapped (or the repeat of an unmapped key): let the event through.
         Decision::Pass => {
+            if is_key_down {
+                debug!("pass vk={} {action} -> {usage}", vk_code.0);
+            } else {
+                trace!("pass vk={} {action} -> {usage}", vk_code.0);
+            }
             unsafe {
                 CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
             }
@@ -490,11 +503,11 @@ extern "system" fn low_level_keyboard_proc(
         // for subsequent key presses; the matching release is emitted when
         // the physical key-up arrives.
         Decision::Emit { release, outputs } => {
-            debug!("emit -> {}", fmt_native_keys(&outputs));
             if release != 0 {
                 release_modifiers(release);
             }
             for native_key in &outputs {
+                debug!("emit {}", fmt_native_key(native_key));
                 if output_held_mask(native_key).is_some() {
                     hold_modifier_output(native_key);
                 } else {
@@ -506,6 +519,7 @@ extern "system" fn low_level_keyboard_proc(
         // A mapped key-up: swallow the event and, for a remapped modifier
         // key, release the output bits that have been held since the key-down.
         Decision::Swallow { release } => {
+            trace!("swal vk={} up -> {usage}", vk_code.0);
             if release != 0 {
                 release_modifiers(release);
             }
@@ -513,7 +527,10 @@ extern "system" fn low_level_keyboard_proc(
         }
         // A consumed modifier release: the synthetic key-up was already sent
         // when the trigger fired, so swallow the physical release.
-        Decision::ConsumedRelease => LRESULT(1),
+        Decision::ConsumedRelease => {
+            trace!("swal vk={} up -> {usage}", vk_code.0);
+            LRESULT(1)
+        }
     }
 }
 
