@@ -41,6 +41,7 @@
 mod char_translate;
 mod common;
 mod event_log;
+mod log_verify;
 
 use std::{
     env,
@@ -57,6 +58,7 @@ use common::E2eLock;
 use event_log::{LogEvent, event_str};
 use keymapper::{
     common::{config::AppConfig, hid_usage::HidUsage},
+    daemon::engine::fmt_key_event,
     test_util::key_injector::{InjectorError, KeyInjector, is_injectable},
 };
 
@@ -152,8 +154,12 @@ struct InjectionStep {
 struct TestSequences {
     /// Ordered injection steps: triggers interleaved with passthrough keys.
     steps: Vec<InjectionStep>,
-    /// Expected log events corresponding to each injection step.
+    /// Expected log events corresponding to each injection step.  Kept for
+    /// the legacy byte comparison; removed in phase 4.
     expected: Vec<LogEvent>,
+    /// The log-based expected model for the phase (emit sequence plus
+    /// passthrough and injected key sets), verified against the daemon's log.
+    model: log_verify::ExpectedPhase,
 }
 
 /// A rule collected from the config.  The harness supports global rules only
@@ -242,10 +248,18 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
     );
 
     // Build injection steps and expected events, alternating triggers and
-    // passthrough keys.
+    // passthrough keys.  The log-based model is built in parallel: each fired
+    // rule contributes its outputs as rendered `NativeKey`s, and every key
+    // that must pass through (trigger modifiers, the chord probe key, the
+    // fixed passthrough keys) is collected for the presence check.
     let platform = current_platform();
     let mut steps: Vec<InjectionStep> = Vec::new();
     let mut expected: Vec<LogEvent> = Vec::new();
+    let mut model = log_verify::ExpectedPhase {
+        emits: Vec::new(),
+        passthrough_keys: Vec::new(),
+        injected_keys: Vec::new(),
+    };
 
     let mut passthrough_iter = PASSTHROUGH_KEYS.iter();
     let mut rule_idx = 0;
@@ -259,9 +273,26 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
             if let Some((step, chord_events)) = modifier_chord_step(rule) {
                 steps.push(step);
                 expected.extend(chord_events);
+                // The rule fires on the trigger's down, emitting its single
+                // held output modifier; the probe key passes through.
+                model.emits.push(fmt_key_event(rule.outputs[0]));
+                model.passthrough_keys.push(CHORD_PROBE_KEY);
+                model.injected_keys.push(rule.trigger.base);
+                model.injected_keys.push(CHORD_PROBE_KEY);
             } else {
                 steps.push(key_event_to_injection_step(rule.trigger));
                 expected.extend(rule_expected_events(rule, &rules, platform));
+                for output in &rule.outputs {
+                    model.emits.push(fmt_key_event(output));
+                }
+                // The trigger's modifiers are forwarded to the application.
+                model
+                    .passthrough_keys
+                    .extend(rule.trigger.modifiers.iter().copied());
+                model
+                    .injected_keys
+                    .extend(rule.trigger.modifiers.iter().copied());
+                model.injected_keys.push(rule.trigger.base);
             }
             rule_idx += 1;
         }
@@ -269,11 +300,29 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
         if let Some(&passthrough_key) = passthrough_iter.next() {
             steps.push(single_key_injection_step(passthrough_key));
             expected.extend(passthrough_expected(passthrough_key));
+            model.passthrough_keys.push(passthrough_key);
+            model.injected_keys.push(passthrough_key);
             passthrough_count += 1;
         }
     }
 
-    TestSequences { steps, expected }
+    // A key can be both an emitted output and a passthrough trigger modifier
+    // (e.g. LeftControl in the comprehensive fixture); dedupe so each key is
+    // checked once, keeping first-seen order.
+    model.passthrough_keys = dedup_usages(model.passthrough_keys);
+    model.injected_keys = dedup_usages(model.injected_keys);
+
+    TestSequences {
+        steps,
+        expected,
+        model,
+    }
+}
+
+/// Remove duplicate usages, keeping first-seen order.
+fn dedup_usages(keys: Vec<HidUsage>) -> Vec<HidUsage> {
+    let mut seen = std::collections::HashSet::new();
+    keys.into_iter().filter(|key| seen.insert(*key)).collect()
 }
 
 /// If *rule* is a bare-modifier trigger whose single output is itself a bare
@@ -1240,4 +1289,131 @@ fn e2e_config_hot_reload() {
         ],
         "e2e_config_hot_reload",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the expected-model construction (no daemon needed)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    /// The comprehensive fixture: a modifier→modifier chord, a single-key
+    /// remap, a chord output, and a modifier trigger.  The emit sequence must
+    /// follow the config's document order, and the passthrough set must cover
+    /// the chord probe key, the trigger modifier, and the fixed keys.
+    #[test]
+    fn build_test_sequences_comprehensive_model() {
+        let content = std::fs::read_to_string(CONFIG_COMPREHENSIVE)
+            .expect("failed to read comprehensive fixture");
+        let sequences = build_test_sequences(&content);
+
+        assert_eq!(
+            sequences.model.emits,
+            vec!["LeftControl", "B", "LeftCommand+A", "C"]
+        );
+
+        // LeftControl is both an emitted output (the chord) and a passthrough
+        // trigger modifier; the dedupe keeps it exactly once.
+        assert_eq!(
+            sequences
+                .model
+                .passthrough_keys
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                HidUsage::X,
+                HidUsage::D,
+                HidUsage::LeftControl,
+                HidUsage::E,
+                HidUsage::F,
+                HidUsage::G,
+                HidUsage::H,
+            ])
+        );
+
+        assert_eq!(
+            sequences
+                .model
+                .injected_keys
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([
+                HidUsage::CapsLock,
+                HidUsage::X,
+                HidUsage::A,
+                HidUsage::D,
+                HidUsage::Escape,
+                HidUsage::LeftControl,
+                HidUsage::Semicolon,
+                HidUsage::E,
+                HidUsage::F,
+                HidUsage::G,
+                HidUsage::H,
+            ])
+        );
+    }
+
+    /// A minimal inline config: one bare remap and one modifier trigger.  The
+    /// trigger's base key is consumed (never passthrough), its modifier is.
+    #[test]
+    fn build_test_sequences_mini_config_model() {
+        let content =
+            "- name: \"mini\"\n  mappings:\n    A: B\n    Ctrl+C: V\n";
+        let sequences = build_test_sequences(content);
+
+        assert_eq!(sequences.model.emits, vec!["B", "V"]);
+        assert_eq!(
+            sequences.model.passthrough_keys,
+            vec![
+                HidUsage::LeftControl,
+                HidUsage::D,
+                HidUsage::E,
+                HidUsage::F,
+                HidUsage::G,
+                HidUsage::H,
+            ]
+        );
+        assert_eq!(
+            sequences.model.injected_keys,
+            vec![
+                HidUsage::A,
+                HidUsage::LeftControl,
+                HidUsage::C,
+                HidUsage::D,
+                HidUsage::E,
+                HidUsage::F,
+                HidUsage::G,
+                HidUsage::H,
+            ]
+        );
+    }
+
+    /// An empty config: no emits, and only the fixed passthrough keys are
+    /// injected and expected to pass through.
+    #[test]
+    fn build_test_sequences_empty_config_model() {
+        let sequences = build_test_sequences("groups: []");
+
+        assert!(sequences.model.emits.is_empty());
+        assert_eq!(
+            sequences.model.passthrough_keys,
+            vec![
+                HidUsage::D,
+                HidUsage::E,
+                HidUsage::F,
+                HidUsage::G,
+                HidUsage::H,
+            ]
+        );
+        assert_eq!(
+            sequences.model.injected_keys,
+            sequences.model.passthrough_keys
+        );
+    }
 }

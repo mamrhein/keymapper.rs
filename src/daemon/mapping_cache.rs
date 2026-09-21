@@ -205,8 +205,9 @@ fn compile_outputs(
 /// Compile modifier keys into a specific bitmask.
 ///
 /// Each modifier contributes its own specific bit (left vs right is
-/// preserved).
-fn compile_modifier_bits(modifiers: &[HidUsage]) -> u8 {
+/// preserved).  `pub(crate)` so the engine can render an output [`KeyEvent`]
+/// for debug logging (see `engine::fmt_key_event`).
+pub(crate) fn compile_modifier_bits(modifiers: &[HidUsage]) -> u8 {
     let mut bits: u8 = 0;
     for usage in modifiers {
         if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(*usage) {

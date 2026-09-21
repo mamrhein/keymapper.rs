@@ -54,8 +54,11 @@ use log::debug;
 use parking_lot::RwLock;
 
 use crate::{
-    common::{hid_usage::HidUsage, modifier::ModifierRole},
-    daemon::{mapping_cache::NativeKey, state::Lookup},
+    common::{config::KeyEvent, hid_usage::HidUsage, modifier::ModifierRole},
+    daemon::{
+        mapping_cache::{NativeKey, compile_modifier_bits},
+        state::Lookup,
+    },
 };
 
 /// The outcome of deciding how to handle a single key event.
@@ -505,6 +508,19 @@ pub(crate) fn fmt_native_keys(keys: &[NativeKey]) -> String {
         .map(fmt_native_key)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Render an output [`KeyEvent`] exactly as the daemon logs it in an `emit`
+/// line: compile its held modifiers to a bitmask and format the resulting
+/// [`NativeKey`] (e.g. `LeftCommand+A`, or just `A` when no modifier is held).
+///
+/// Public so the e2e harness can build its expected emit sequence from the
+/// config and compare it, string for string, against the daemon's log.
+pub fn fmt_key_event(event: &KeyEvent) -> String {
+    fmt_native_key(&NativeKey {
+        modifiers: compile_modifier_bits(&event.modifiers),
+        usage: event.base,
+    })
 }
 
 // ---------------------------------------------------------------------------
