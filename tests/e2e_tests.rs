@@ -41,6 +41,7 @@
 mod char_translate;
 mod common;
 mod event_log;
+mod log_capture;
 mod log_verify;
 
 use std::{
