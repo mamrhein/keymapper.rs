@@ -9,8 +9,7 @@
 
 //! End-to-end integration tests that drive a *production* daemon.
 //!
-//! The harness plants a fixture config in the real user config directory,
-//! starts `keymapperd` (a production build with no test features), and
+//! The harness plants a fixture config in the real user config directory and
 //! verifies the daemon's decisions from its own debug log: before each phase
 //! it raises the daemon's log level to `debug` (via the control socket),
 //! injects the phase's key sequence, collects the log window until the
@@ -20,24 +19,43 @@
 //! key that must pass through must appear in a `recv` and a `pass` line, and
 //! no `ERROR` lines may occur.
 //!
-//! Because the harness clobbers the real user config directory and injects
-//! session-wide keys, it refuses to run outside a CI environment (see
-//! [`in_ci`]).  The original config is backed up and restored on teardown.
+//! The mode is selected from the environment (see [`select_mode`]):
+//!
+//! - **CI** (`CI` or `GITHUB_ACTIONS` set): the harness starts `keymapperd` (a
+//!   production build with no test features) and stops it again.  The log
+//!   stream is the daemon's stderr (Linux, redirected to a temp file) or its
+//!   rotating log file (elsewhere).
+//! - **Local** (non-ci): the harness drives the user's already-running daemon
+//!   and never starts or stops it.  Preconditions, checked before anything
+//!   destructive: the daemon is running (on Linux, as the systemd user
+//!   service), its log stream (the systemd user journal on Linux, the rotating
+//!   log file elsewhere) is readable, and its control socket is reachable.
+//!   When a precondition is unmet, the test skips with a message.
+//!
+//! In both modes the original config is backed up and restored on teardown
+//! (the daemon hot-reloads it back).
+//!
+//! Local-mode caveats: the injected keys are session-wide and reach the
+//! user's focused app while the test runs (and the user's own key presses
+//! reach the daemon, so do not type while a phase runs); the log level is
+//! reset to `info` (the standard default), not the user's previous level; on
+//! macOS the full stack (driver, virtkbdd, keymapperd) must be running or no
+//! emits are produced.
 //!
 //! The test flow is:
-//! 1. Acquire the cross-process e2e lock and kill any stale daemons.
+//! 1. Acquire the cross-process e2e lock (CI: kill any stale daemons).
 //! 2. Plant the fixture config (global rules only; app-scoped groups are
 //!    rejected by the sequence builder).
-//! 3. Create and set up the key injector (its virtual device must exist before
-//!    the daemon starts so the daemon grabs it at startup).
-//! 4. Start the daemon and wait for its readiness line in the log stream (the
-//!    daemon's stderr, redirected to a temp file, on Linux; the daemon's
-//!    rotating log file elsewhere).
+//! 3. Create and set up the key injector (CI: its virtual device must exist
+//!    before the daemon starts so the daemon grabs it at startup; local: the
+//!    running daemon adopts it via hot-plug).
+//! 4. CI: start the daemon and wait for its readiness line in the log stream;
+//!    local: wait for the daemon's hot-swap line for the planted config.
 //! 5. For each phase: hot-reload the config first (later phases) and wait for
 //!    the daemon's hot-swap line, raise the log level to `debug`, inject the
 //!    phase's sequence once, collect and verify the log window, and reset the
 //!    level.
-//! 6. Teardown: stop the daemon; restore the config.
+//! 6. Teardown: stop the daemon (CI only); restore the config.
 
 mod common;
 mod log_capture;
@@ -53,41 +71,42 @@ use std::{
 
 use common::E2eLock;
 use keymapper::{
+    cli::daemon_cmd,
     common::{config::AppConfig, hid_usage::HidUsage},
     daemon::engine::fmt_key_event,
     test_util::key_injector::{InjectorError, KeyInjector, is_injectable},
 };
+#[cfg(target_os = "linux")]
+use log_capture::JournalLogSource;
 use log_capture::{
     FileLogSource, LogSource, Mark, reset_to_default, set_debug,
 };
 
 // ---------------------------------------------------------------------------
-// CI gate — e2e tests clobber the real config dir and inject session-wide keys
+// Mode selection — ci (spawn a daemon) vs. local (drive the user's daemon)
 // ---------------------------------------------------------------------------
 
 /// Whether the test is running in a CI environment.
 ///
-/// The harness overwrites the real user config directory and injects
-/// session-wide key events, so it must never run on an interactive machine.
-/// A real CI system sets `CI` (or `GITHUB_ACTIONS`) to a non-empty value;
-/// an empty value is treated as "not in CI".
+/// A real CI system sets `CI` (or `GITHUB_ACTIONS`) to a non-empty value; an
+/// empty value is treated as "not in CI".
 fn in_ci() -> bool {
     env::var("CI").is_ok_and(|v| !v.is_empty())
         || env::var("GITHUB_ACTIONS").is_ok_and(|v| !v.is_empty())
 }
 
-/// Refuse to run outside CI.  Prints a clear error and returns `false` so the
-/// caller can skip; no destructive action has been taken at this point.
-fn require_ci(label: &str) -> bool {
-    if in_ci() {
-        return true;
-    }
-    eprintln!(
-        "error: {label} requires a CI environment (set CI or \
-         GITHUB_ACTIONS); refusing to clobber the local config dir and \
-         inject session-wide keys"
-    );
-    false
+/// The e2e execution mode, selected from the environment.
+enum E2eMode {
+    /// CI: the harness spawns and stops its own daemon.
+    Ci,
+    /// Local (non-ci): the harness drives the user's already-running daemon
+    /// and never starts or stops it.
+    Local,
+}
+
+/// Select the e2e mode: CI when [`in_ci`], local otherwise.
+fn select_mode() -> E2eMode {
+    if in_ci() { E2eMode::Ci } else { E2eMode::Local }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,28 +531,16 @@ impl DaemonChild {
     }
 
     /// The log source for the daemon's log stream: the stderr temp file on
-    /// Linux, the rotating log file elsewhere.
+    /// Linux, the rotating log file elsewhere (the same source local mode
+    /// uses for a user's daemon).
     fn log_source(&self) -> Box<dyn LogSource> {
         #[cfg(target_os = "linux")]
         {
             Box::new(FileLogSource::fixed(self.stderr_path.clone()))
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(not(target_os = "linux"))]
         {
-            let dir = dirs::data_local_dir()
-                .expect("no local data directory (LOCALAPPDATA) available")
-                .join("keymapperd")
-                .join("logs");
-            Box::new(FileLogSource::rotated(dir, "keymapperd"))
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let dir = dirs::home_dir()
-                .expect("no home directory available")
-                .join("Library")
-                .join("Logs")
-                .join("keymapper");
-            Box::new(FileLogSource::rotated(dir, "keymapperd"))
+            local_log_source()
         }
     }
 
@@ -586,6 +593,40 @@ impl Drop for DaemonChild {
 }
 
 // ---------------------------------------------------------------------------
+// Log source for a user's running daemon (local mode)
+// ---------------------------------------------------------------------------
+
+/// The systemd user unit of the daemon (local Linux).
+#[cfg(target_os = "linux")]
+const DAEMON_UNIT: &str = "keymapperd.service";
+
+/// The log source for a user's running daemon: the systemd user journal on
+/// local Linux, the daemon's rotating log file elsewhere.
+fn local_log_source() -> Box<dyn LogSource> {
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(JournalLogSource::new(DAEMON_UNIT))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let dir = dirs::data_local_dir()
+            .expect("no local data directory (LOCALAPPDATA) available")
+            .join("keymapperd")
+            .join("logs");
+        Box::new(FileLogSource::rotated(dir, "keymapperd"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let dir = dirs::home_dir()
+            .expect("no home directory available")
+            .join("Library")
+            .join("Logs")
+            .join("keymapper");
+        Box::new(FileLogSource::rotated(dir, "keymapperd"))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Log-stream waits (readiness, hot-reload, phase windows)
 // ---------------------------------------------------------------------------
 
@@ -601,9 +642,13 @@ const HOT_SWAP_LINE: &str = "Configuration hot-swapped successfully!";
 /// Poll *source* for a line containing *needle* until one appears or the
 /// timeout elapses.  Fails fast when the daemon exits, but only after
 /// draining what it wrote, so a line flushed just before exit is not missed.
+///
+/// *exited* reports whether the daemon has exited; it is probed only while
+/// the stream is silent, because it may be expensive (local mode shells out
+/// to `systemctl`).
 fn wait_for_line(
     source: &mut Box<dyn LogSource>,
-    daemon: &mut DaemonChild,
+    mut exited: impl FnMut() -> bool,
     mark: Mark,
     needle: &str,
     timeout: Duration,
@@ -614,7 +659,7 @@ fn wait_for_line(
         if lines.iter().any(|line| line.contains(needle)) {
             return Ok(());
         }
-        if daemon.poll_exit() {
+        if lines.is_empty() && exited() {
             return Err("the daemon exited before the expected log line \
                         appeared"
                 .to_string());
@@ -637,7 +682,7 @@ fn wait_for_readiness(
     let mark = source.mark().expect("failed to mark the log stream");
     wait_for_line(
         source,
-        daemon,
+        || daemon.poll_exit(),
         mark,
         READINESS_LINE,
         Duration::from_secs(30),
@@ -649,9 +694,13 @@ fn wait_for_readiness(
 /// lines have appeared, then keep reading until the stream is quiescent (no
 /// new lines for 500 ms) so unexpected extras are captured in the window
 /// instead of leaking into the next phase.
+///
+/// *exited* reports whether the daemon has exited; it is probed only while
+/// the stream is silent, because it may be expensive (local mode shells out
+/// to `systemctl`).
 fn collect_window(
     source: &mut Box<dyn LogSource>,
-    daemon: &mut DaemonChild,
+    mut exited: impl FnMut() -> bool,
     mark: Mark,
     expected_emits: &[String],
 ) -> Result<Vec<String>, String> {
@@ -661,7 +710,8 @@ fn collect_window(
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let lines = source.read_new(mark).map_err(|e| e.to_string())?;
-        if !lines.is_empty() {
+        let silent = lines.is_empty();
+        if !silent {
             let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
             emit_count += log_verify::parse_lines(&refs).emits.len();
             window.extend(lines);
@@ -669,7 +719,7 @@ fn collect_window(
         if emit_count >= expected_emits.len() {
             break;
         }
-        if daemon.poll_exit() {
+        if silent && exited() {
             return Err(format!(
                 "the daemon exited after {} of the expected {} emit lines",
                 emit_count,
@@ -695,13 +745,12 @@ fn collect_window(
         if !lines.is_empty() {
             window.extend(lines);
             last_growth = Instant::now();
-        } else if Instant::now() - last_growth >= Duration::from_millis(500) {
-            break;
-        }
-        if daemon.poll_exit() {
+        } else if exited() {
             return Err("the daemon exited while the log stream was still \
                         active"
                 .to_string());
+        } else if Instant::now() - last_growth >= Duration::from_millis(500) {
+            break;
         }
         if Instant::now() >= quiesce_deadline {
             return Err("timed out waiting for the log stream to go \
@@ -841,12 +890,17 @@ fn config_dir() -> PathBuf {
 
 /// Run the e2e test for the given config phases.  Each phase is a fixture path
 /// (or `None` for an empty config).  Phases after the first hot-reload the
-/// config before injecting their sequence.
+/// config before injecting their sequence.  The mode is selected from the
+/// environment (see [`select_mode`]).
 fn run_e2e(phases: &[Option<&Path>], label: &str) {
-    if !require_ci(label) {
-        return;
+    match select_mode() {
+        E2eMode::Ci => run_e2e_ci(phases, label),
+        E2eMode::Local => run_e2e_local(phases, label),
     }
+}
 
+/// Run the e2e test in CI mode: the harness spawns and stops its own daemon.
+fn run_e2e_ci(phases: &[Option<&Path>], label: &str) {
     let _lock = E2eLock::acquire();
     kill_orphaned_daemons();
 
@@ -888,7 +942,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
             config.overwrite(&content);
             wait_for_line(
                 &mut source,
-                &mut daemon,
+                || daemon.poll_exit(),
                 reload_mark,
                 HOT_SWAP_LINE,
                 Duration::from_secs(30),
@@ -911,7 +965,7 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
 
         let window = collect_window(
             &mut source,
-            &mut daemon,
+            || daemon.poll_exit(),
             mark,
             &sequences.model.emits,
         )
@@ -928,6 +982,155 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     // 5. Teardown: stop the daemon; the config is restored via its Drop impl.
     daemon.stop();
 
+    eprintln!("{label} PASSED");
+}
+
+/// RAII guard that resets the daemon's log level to `info` on drop, so a
+/// failed local run does not leave the user's daemon at `debug`.
+struct LevelResetGuard;
+
+impl Drop for LevelResetGuard {
+    fn drop(&mut self) {
+        reset_to_default().ok();
+    }
+}
+
+/// Run the e2e test in local mode: drive the user's already-running daemon,
+/// never start or stop it.  Skips with a message when a precondition is
+/// unmet (daemon not running, log stream not readable, control socket
+/// unreachable).
+fn run_e2e_local(phases: &[Option<&Path>], label: &str) {
+    let _lock = E2eLock::acquire();
+
+    // Preconditions, checked before anything destructive.  The log-source
+    // probe comes before `set_debug` so a skip never leaves the daemon at
+    // debug; on Linux, `is_running` already requires the daemon to run as
+    // the systemd user service (the journal access precondition).
+    if !daemon_cmd::is_running() {
+        eprintln!(
+            "skipping {label}: keymapperd is not running; start it (e.g. \
+             `keymapper daemon start`) and re-run"
+        );
+        return;
+    }
+    let mut source = local_log_source();
+    let initial_mark = match source.mark() {
+        Ok(mark) => mark,
+        Err(e) => {
+            eprintln!(
+                "skipping {label}: the daemon's log stream is not readable: \
+                 {e}"
+            );
+            return;
+        }
+    };
+    if let Err(e) = set_debug() {
+        eprintln!(
+            "skipping {label}: the daemon's control socket is unreachable: \
+             {e}"
+        );
+        return;
+    }
+    // Declared before `config` so it drops after it: the level is reset only
+    // once the user's config has been restored.
+    let _level_guard = LevelResetGuard;
+
+    eprintln!(
+        "warning: {label} runs in local mode: the injected keys are \
+         session-wide and reach your focused app while the test runs, so do \
+         not use the keyboard; the daemon's log level is reset to info (the \
+         standard default) when done"
+    );
+
+    // 1. Plant the initial config (global rules only) and wait for the
+    //    daemon's hot-swap line.  The level is already at debug from the
+    //    precondition probe, so the wait also proves the daemon reacts.
+    let config = ConfigGuard::plant(&phase_content(phases[0]));
+    wait_for_line(
+        &mut source,
+        || !daemon_cmd::is_running(),
+        initial_mark,
+        HOT_SWAP_LINE,
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| {
+        panic!("the daemon did not hot-reload the planted config: {e}")
+    });
+
+    // 2. Create and set up the injector; the running daemon adopts its virtual
+    //    device via hot-plug.
+    let mut injector = create_injector()
+        .expect("failed to create injector")
+        .expect("injector is available on this platform");
+    injector.setup().expect("failed to set up injector");
+    wait_for_injector_device(&*injector);
+    #[cfg(target_os = "linux")]
+    {
+        // Give the daemon's udev hot-plug monitor a moment to adopt the new
+        // device before the first injection.
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    // 3. For each phase: hot-reload the config first (later phases) and wait
+    //    for the daemon's hot-swap line, raise the log level to debug, inject
+    //    the sequence once, collect and verify the log window, and reset the
+    //    level.
+    for (i, phase) in phases.iter().enumerate() {
+        let content = phase_content(*phase);
+        let sequences = build_test_sequences(&content);
+
+        if i > 0 {
+            eprintln!(
+                "hot-reloading config (phase {} of {})...",
+                i + 1,
+                phases.len()
+            );
+            // Mark before the overwrite so the hot-swap line (logged at INFO,
+            // before debug is raised) stays out of the phase's window.
+            let reload_mark =
+                source.mark().expect("failed to mark the log stream");
+            config.overwrite(&content);
+            wait_for_line(
+                &mut source,
+                || !daemon_cmd::is_running(),
+                reload_mark,
+                HOT_SWAP_LINE,
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|e| panic!("the config hot-reload failed: {e}"));
+        }
+
+        set_debug().expect("failed to raise the daemon's log level to debug");
+        let mark = source.mark().expect("failed to mark the log stream");
+
+        eprintln!(
+            "phase {}: injecting {} steps, expecting {} emit lines...",
+            i + 1,
+            sequences.steps.len(),
+            sequences.model.emits.len()
+        );
+        for step in &sequences.steps {
+            inject_step(&*injector, step);
+        }
+
+        let window = collect_window(
+            &mut source,
+            || !daemon_cmd::is_running(),
+            mark,
+            &sequences.model.emits,
+        )
+        .unwrap_or_else(|e| panic!("phase {} failed: {e}", i + 1));
+        reset_to_default()
+            .expect("failed to reset the daemon's log level to info");
+
+        let lines: Vec<&str> = window.iter().map(String::as_str).collect();
+        log_verify::verify_window(&sequences.model, &lines).unwrap_or_else(
+            |e| panic!("phase {} verification failed:\n{e}", i + 1),
+        );
+    }
+
+    // Teardown: the config is restored via its Drop impl (the daemon
+    // hot-reloads it back); the user's daemon keeps running.
     eprintln!("{label} PASSED");
 }
 
