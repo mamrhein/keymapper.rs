@@ -351,19 +351,13 @@ pub enum LevelControlError {
     Unexpected(String),
 }
 
-// The harness calls these per phase; they are dead code until phase 4 wires
-// them into `run_e2e`, so the lint is allowed on the entry points (which
-// keeps the rest of this section live).
-
 /// Set the running daemon's log level to `debug`, so a phase's key events
 /// and emits are logged.
-#[allow(dead_code)]
 pub fn set_debug() -> Result<(), LevelControlError> {
     set_level(LevelFilter::Debug)
 }
 
 /// Reset the running daemon's log level to `info`, the standard default.
-#[allow(dead_code)]
 pub fn reset_to_default() -> Result<(), LevelControlError> {
     set_level(LevelFilter::Info)
 }

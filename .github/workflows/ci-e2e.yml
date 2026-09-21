@@ -2,10 +2,10 @@
 # name:     ci-e2e
 # triggers: push to main, pull requests
 #
-# Runs the end-to-end sandbox tests on Linux, macOS, and Windows.  Linux
-# requires root for /dev/uinput access.  macOS requires root to bypass
-# TCC Accessibility permission.  Windows runs without elevation since
-# SendInput and WH_KEYBOARD_LL work at session level.
+# Runs the end-to-end sandbox tests on Linux and Windows (macOS stays
+# skipped: the Karabiner driver needs a one-time user approval).  Linux
+# requires root for /dev/uinput access.  Windows runs without elevation
+# since SendInput and WH_KEYBOARD_LL work at session level.
 # ---------------------------------------------------------------------------
 
 name: ci-e2e
@@ -49,34 +49,27 @@ jobs:
             libdbus-1-dev \
             libudev-dev \
             libxkbcommon-dev \
-            libxcb1-dev \
-            kbd
+            libxcb1-dev
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
 
       - name: Build daemon and e2e test binary
-        # The e2e harness spawns keymapperd and keymapper_reader as
-        # subprocesses and resolves each from target/debug/ relative to the
-        # test binary's location.  The daemon is a plain production build; the
-        # harness drives it and observes its output through the reader, an
-        # ordinary raw-mode stdin app with keyboard focus.
+        # The e2e harness spawns keymapperd as a subprocess and resolves it
+        # from target/debug/ relative to the test binary's location.  The
+        # daemon is a plain production build; the harness drives it and
+        # verifies its decisions from its own debug log.
         run: |
-          cargo build --bin keymapperd --bin keymapper_reader
+          cargo build --bin keymapperd
           cargo nextest run --test e2e_tests --no-run
 
       - name: Run e2e tests as root (for /dev/uinput access)
         # Running as root is required because the sandbox needs write access
-        # to /dev/uinput.  GitHub Actions runners allow this with sudo.  The
-        # console keymap is pinned to US so the reader's recorded bytes are
-        # deterministic; the harness itself stops getty@tty1 and switches to
-        # VT1 so the reader receives the daemon's uinput output.
+        # to /dev/uinput.  GitHub Actions runners allow this with sudo.
         run: |
           # Load the uinput module — it may already be loaded but this is
           # idempotent and harmless.
           sudo modprobe uinput || true
-          # Pin the console keymap to US for deterministic byte comparison.
-          sudo loadkeys us
           # The ubuntu-latest runner has /dev/uinput with root:root 0660.
           # Running tests as root grants the required write access.
           sudo -E PATH="$PATH" $(which cargo) nextest run --no-capture --test e2e_tests
@@ -129,17 +122,17 @@ jobs:
         uses: taiki-e/install-action@nextest
 
       - name: Build daemon and e2e test binary
-        # The e2e harness spawns keymapperd and keymapper_reader as
-        # subprocesses and resolves each from target/debug/ relative to the
-        # test binary's location.
+        # The e2e harness spawns keymapperd as a subprocess and resolves it
+        # from target/debug/ relative to the test binary's location.  The
+        # daemon is a plain production build; the harness drives it and
+        # verifies its decisions from its own debug log.
         run: |
-          cargo build --bin keymapperd --bin keymapper_reader
+          cargo build --bin keymapperd
           cargo nextest run --test e2e_tests --no-run
 
       - name: Run e2e tests
         # SendInput and WH_KEYBOARD_LL work at session level; no elevation
-        # is required.  The runner has a desktop session, so the harness can
-        # bring the reader's console window to the foreground.
+        # is required.
         run: cargo nextest run --no-capture --test e2e_tests
 
       - name: Run CLI integration tests

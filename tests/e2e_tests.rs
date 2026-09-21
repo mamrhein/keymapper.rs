@@ -11,13 +11,14 @@
 //!
 //! The harness plants a fixture config in the real user config directory,
 //! starts `keymapperd` (a production build with no test features), and
-//! focuses a "normal" application — `keymapper_reader`, an ordinary raw-mode
-//! stdin reader with no capture machinery of its own — so the daemon's
-//! output reaches it through the OS's regular input path, exactly as if a
-//! user had typed the keys.  The harness injects each phase's key sequence
-//! once, waits for the reader to record the expected number of bytes, and
-//! compares them against the character-space translation of the config's
-//! expected output events (see [`char_translate`]).
+//! verifies the daemon's decisions from its own debug log: before each phase
+//! it raises the daemon's log level to `debug` (via the control socket),
+//! injects the phase's key sequence, collects the log window until the
+//! expected emits appear and the stream goes quiescent, resets the level to
+//! `info`, and checks the window against the expected model derived from the
+//! config (see [`log_verify`]): the `emit` sequence must match exactly, every
+//! key that must pass through must appear in a `recv` and a `pass` line, and
+//! no `ERROR` lines may occur.
 //!
 //! Because the harness clobbers the real user config directory and injects
 //! session-wide keys, it refuses to run outside a CI environment (see
@@ -29,38 +30,35 @@
 //!    rejected by the sequence builder).
 //! 3. Create and set up the key injector (its virtual device must exist before
 //!    the daemon starts so the daemon grabs it at startup).
-//! 4. Start the daemon (waits for its readiness line on stdout).
-//! 5. Start the reader and wait until it has keyboard focus (its output file
-//!    is created only after focus and raw mode are established).
-//! 6. For each phase: record the reader's byte offset, inject the phase's
-//!    sequence once, wait for the expected bytes (plus a quiescence check for
-//!    unexpected extras), and compare; for later phases, hot-reload the config
-//!    first.
-//! 7. Teardown: stop the daemon and reader; restore the config.
+//! 4. Start the daemon and wait for its readiness line in the log stream (the
+//!    daemon's stderr, redirected to a temp file, on Linux; the daemon's
+//!    rotating log file elsewhere).
+//! 5. For each phase: hot-reload the config first (later phases) and wait for
+//!    the daemon's hot-swap line, raise the log level to `debug`, inject the
+//!    phase's sequence once, collect and verify the log window, and reset the
+//!    level.
+//! 6. Teardown: stop the daemon; restore the config.
 
-mod char_translate;
 mod common;
-mod event_log;
 mod log_capture;
 mod log_verify;
 
 use std::{
     env,
-    io::BufRead,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
-use char_translate::{Platform, current_platform, events_to_bytes};
 use common::E2eLock;
-use event_log::{LogEvent, event_str};
 use keymapper::{
     common::{config::AppConfig, hid_usage::HidUsage},
     daemon::engine::fmt_key_event,
     test_util::key_injector::{InjectorError, KeyInjector, is_injectable},
+};
+use log_capture::{
+    FileLogSource, LogSource, Mark, reset_to_default, set_debug,
 };
 
 // ---------------------------------------------------------------------------
@@ -126,8 +124,7 @@ fn bin_path(name: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// The fixed passthrough keys: plain letters that no fixture rule uses, so
-/// they are forwarded unchanged and compare as lowercase bytes on every
-/// platform.
+/// they are forwarded unchanged.
 const PASSTHROUGH_KEYS: [HidUsage; 5] = [
     HidUsage::D,
     HidUsage::E,
@@ -137,8 +134,8 @@ const PASSTHROUGH_KEYS: [HidUsage; 5] = [
 ];
 
 /// The probe key for modifier→modifier chords: a plain letter that no fixture
-/// rule uses, pressed while the remapped modifier is held so the remap
-/// produces an observable byte (e.g. Ctrl+X = 0x18).
+/// rule uses, pressed while the remapped modifier is held so the chord
+/// produces an observable emit.
 const CHORD_PROBE_KEY: HidUsage = HidUsage::X;
 
 /// Represents a single injection step in the test sequence.  Each step injects
@@ -155,11 +152,8 @@ struct InjectionStep {
 struct TestSequences {
     /// Ordered injection steps: triggers interleaved with passthrough keys.
     steps: Vec<InjectionStep>,
-    /// Expected log events corresponding to each injection step.  Kept for
-    /// the legacy byte comparison; removed in phase 4.
-    expected: Vec<LogEvent>,
-    /// The log-based expected model for the phase (emit sequence plus
-    /// passthrough and injected key sets), verified against the daemon's log.
+    /// The expected model for the phase (emit sequence plus passthrough and
+    /// injected key sets), verified against the daemon's log.
     model: log_verify::ExpectedPhase,
 }
 
@@ -248,14 +242,12 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
         CHORD_PROBE_KEY.as_str()
     );
 
-    // Build injection steps and expected events, alternating triggers and
-    // passthrough keys.  The log-based model is built in parallel: each fired
-    // rule contributes its outputs as rendered `NativeKey`s, and every key
-    // that must pass through (trigger modifiers, the chord probe key, the
-    // fixed passthrough keys) is collected for the presence check.
-    let platform = current_platform();
+    // Build injection steps, alternating triggers and passthrough keys.  The
+    // expected model is built in parallel: each fired rule contributes its
+    // outputs as rendered `NativeKey`s, and every key that must pass through
+    // (trigger modifiers, the chord probe key, the fixed passthrough keys) is
+    // collected for the presence check.
     let mut steps: Vec<InjectionStep> = Vec::new();
-    let mut expected: Vec<LogEvent> = Vec::new();
     let mut model = log_verify::ExpectedPhase {
         emits: Vec::new(),
         passthrough_keys: Vec::new(),
@@ -271,9 +263,8 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
         let triggers_to_add = std::cmp::min(2, rules.len() - rule_idx);
         for _ in 0..triggers_to_add {
             let rule = &rules[rule_idx];
-            if let Some((step, chord_events)) = modifier_chord_step(rule) {
+            if let Some(step) = modifier_chord_step(rule) {
                 steps.push(step);
-                expected.extend(chord_events);
                 // The rule fires on the trigger's down, emitting its single
                 // held output modifier; the probe key passes through.
                 model.emits.push(fmt_key_event(rule.outputs[0]));
@@ -282,7 +273,6 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
                 model.injected_keys.push(CHORD_PROBE_KEY);
             } else {
                 steps.push(key_event_to_injection_step(rule.trigger));
-                expected.extend(rule_expected_events(rule, &rules, platform));
                 for output in &rule.outputs {
                     model.emits.push(fmt_key_event(output));
                 }
@@ -300,7 +290,6 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
 
         if let Some(&passthrough_key) = passthrough_iter.next() {
             steps.push(single_key_injection_step(passthrough_key));
-            expected.extend(passthrough_expected(passthrough_key));
             model.passthrough_keys.push(passthrough_key);
             model.injected_keys.push(passthrough_key);
             passthrough_count += 1;
@@ -313,11 +302,7 @@ fn build_test_sequences(config_content: &str) -> TestSequences {
     model.passthrough_keys = dedup_usages(model.passthrough_keys);
     model.injected_keys = dedup_usages(model.injected_keys);
 
-    TestSequences {
-        steps,
-        expected,
-        model,
-    }
+    TestSequences { steps, model }
 }
 
 /// Remove duplicate usages, keeping first-seen order.
@@ -327,17 +312,11 @@ fn dedup_usages(keys: Vec<HidUsage>) -> Vec<HidUsage> {
 }
 
 /// If *rule* is a bare-modifier trigger whose single output is itself a bare
-/// modifier, build the chord step that makes the remap observable in
-/// character space: hold the trigger, tap the probe key while the remapped
-/// modifier is held, then release.  A plain tap would produce no bytes (the
-/// output modifier is pressed and released with nothing in between).
-///
-/// The expected events model the daemon's output: the rule fires on the
-/// trigger's down (emitting the held output modifier), the probe passes
-/// through with it held, and the trigger's release emits the modifier's up.
-fn modifier_chord_step(
-    rule: &CollectedRule,
-) -> Option<(InjectionStep, Vec<LogEvent>)> {
+/// modifier, build the chord step that makes the remap observable: hold the
+/// trigger, tap the probe key while the remapped modifier is held, then
+/// release.  A plain tap would emit nothing observable (the output modifier
+/// is pressed and released with nothing in between).
+fn modifier_chord_step(rule: &CollectedRule) -> Option<InjectionStep> {
     let trigger = rule.trigger;
     if !trigger.modifiers.is_empty() || rule.outputs.len() != 1 {
         return None;
@@ -349,114 +328,10 @@ fn modifier_chord_step(
         return None;
     }
 
-    Some((
-        InjectionStep {
-            keys_down: vec![trigger.base, CHORD_PROBE_KEY],
-            keys_up: vec![CHORD_PROBE_KEY, trigger.base],
-        },
-        vec![
-            event_str(output.base.as_str(), true),
-            event_str(CHORD_PROBE_KEY.as_str(), true),
-            event_str(CHORD_PROBE_KEY.as_str(), false),
-            event_str(output.base.as_str(), false),
-        ],
-    ))
-}
-
-/// Build the expected events for a forwarded (passthrough) key press+release.
-fn passthrough_expected(key: HidUsage) -> Vec<LogEvent> {
-    vec![
-        event_str(key.as_str(), true),
-        event_str(key.as_str(), false),
-    ]
-}
-
-/// Find a firing rule whose trigger is the bare modifier *mod_key* (no
-/// modifiers held), if one exists.
-fn find_bare_modifier_rule<'a>(
-    mod_key: HidUsage,
-    rules: &'a [CollectedRule<'a>],
-) -> Option<&'a CollectedRule<'a>> {
-    rules.iter().find(|rule| {
-        rule.trigger.base == mod_key && rule.trigger.modifiers.is_empty()
+    Some(InjectionStep {
+        keys_down: vec![trigger.base, CHORD_PROBE_KEY],
+        keys_up: vec![CHORD_PROBE_KEY, trigger.base],
     })
-}
-
-/// Modifier bit position, shared with the daemon's bitmask layout.  The daemon
-/// emits output modifiers in ascending bit order.
-fn modifier_bit(key: HidUsage) -> Option<u8> {
-    HidUsage::hid_usage_to_modifier_bit(key)
-}
-
-/// Build the expected events for one daemon-emitted output tap.
-fn output_tap_events(
-    outputs: &[&keymapper::common::config::KeyEvent],
-) -> Vec<LogEvent> {
-    let mut events = Vec::new();
-
-    for output in outputs {
-        let mut mod_keys: Vec<HidUsage> = output.modifiers.clone();
-        mod_keys.sort_by_key(|k| modifier_bit(*k).unwrap_or(8));
-
-        for mod_key in &mod_keys {
-            events.push(event_str(mod_key.as_str(), true));
-        }
-
-        events.push(event_str(output.base.as_str(), true));
-        events.push(event_str(output.base.as_str(), false));
-
-        for mod_key in mod_keys.iter().rev() {
-            events.push(event_str(mod_key.as_str(), false));
-        }
-    }
-
-    events
-}
-
-/// Build the expected events for one trigger injection step.
-///
-/// On Linux and Windows the daemon releases the trigger's forwarded modifiers
-/// before emitting the mapped output (a clean tap), so the modifier ups come
-/// first.  On macOS the release mask is inert: the trigger's modifiers are
-/// physical events that pass through the tap, and their release reaches the
-/// application only when the injector releases them — after the output.
-fn rule_expected_events(
-    rule: &CollectedRule,
-    rules: &[CollectedRule],
-    platform: Platform,
-) -> Vec<LogEvent> {
-    let mut events = Vec::new();
-    let trigger = rule.trigger;
-
-    for mod_key in &trigger.modifiers {
-        if let Some(bare) = find_bare_modifier_rule(*mod_key, rules) {
-            events.extend(output_tap_events(&bare.outputs));
-        } else {
-            events.push(event_str(mod_key.as_str(), true));
-        }
-    }
-
-    if platform == Platform::Macos {
-        for output in &rule.outputs {
-            events.extend(output_tap_events(std::slice::from_ref(output)));
-        }
-        for mod_key in trigger.modifiers.iter().rev() {
-            if find_bare_modifier_rule(*mod_key, rules).is_none() {
-                events.push(event_str(mod_key.as_str(), false));
-            }
-        }
-    } else {
-        for mod_key in trigger.modifiers.iter().rev() {
-            if find_bare_modifier_rule(*mod_key, rules).is_none() {
-                events.push(event_str(mod_key.as_str(), false));
-            }
-        }
-        for output in &rule.outputs {
-            events.extend(output_tap_events(std::slice::from_ref(output)));
-        }
-    }
-
-    events
 }
 
 /// Convert a `[KeyEvent]` into an injection step with properly ordered
@@ -569,83 +444,133 @@ fn phase_content(fixture: Option<&Path>) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon management (directly spawned, readiness line on stdout)
+// Daemon management (directly spawned, readiness line in the log stream)
 // ---------------------------------------------------------------------------
 
 /// RAII guard for a directly-spawned `keymapperd` child.
 struct DaemonChild {
+    /// The daemon process, until it is stopped.
     child: Option<std::process::Child>,
+    /// The exit status, once the daemon has exited (cached by `poll_exit`).
+    exit_status: Option<std::process::ExitStatus>,
+    /// The file the daemon's stderr (its log stream) is redirected to.
+    #[cfg(target_os = "linux")]
+    stderr_path: PathBuf,
+    /// Keeps the temp directory alive for the daemon's lifetime.
+    #[cfg(target_os = "linux")]
+    _stderr_tempdir: tempfile::TempDir,
 }
 
 impl DaemonChild {
-    /// Spawn `keymapperd` with CWD = the config directory and piped stdout,
-    /// then wait for its readiness line.
+    /// Spawn `keymapperd` with CWD = the config directory.  On Linux the
+    /// daemon's stderr (its log stream) is redirected to a temp file the
+    /// harness tails; on the other platforms the daemon logs to its rotating
+    /// file and stderr is inherited (it carries only fallback notices).
     fn spawn(config_dir: &Path) -> Self {
-        let mut child = Command::new(bin_path("keymapperd"))
-            .current_dir(config_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("failed to spawn keymapperd");
+        #[cfg(target_os = "linux")]
+        let (stderr_path, stderr_tempdir) = {
+            let tempdir =
+                tempfile::tempdir().expect("failed to create temp dir");
+            let path = tempdir.path().join("daemon-stderr.log");
+            (path, tempdir)
+        };
 
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let (ready_tx, ready_rx) = mpsc::channel::<()>();
-
-        // Drain the daemon's stdout for its lifetime, echoing each line to
-        // stderr and signaling readiness.  The daemon logs after the
-        // readiness line (e.g. the Windows hook-install notice); if the
-        // pipe's read end were closed here, those writes would fail — on
-        // Windows the daemon's main thread panics on the broken pipe and
-        // dies, silently disabling all remapping.
-        thread::spawn(move || {
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                let Ok(line) = line else { break };
-                eprintln!("daemon: {line}");
-                if line.contains(
-                    "Cross-platform runtime engines fully synchronized.",
-                ) {
-                    let _ = ready_tx.send(());
-                }
-            }
-        });
-
-        // Wait for the readiness line with a timeout.  Polling (rather than
-        // blocking on recv) also catches a daemon that exits before it ever
-        // signals readiness.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            match ready_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(()) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    child.kill().ok();
-                    panic!("daemon exited before signaling readiness");
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if Instant::now() >= deadline {
-                        child.kill().ok();
-                        panic!("daemon did not signal readiness within 30 s");
-                    }
-                }
-            }
+        let mut cmd = Command::new(bin_path("keymapperd"));
+        cmd.current_dir(config_dir);
+        // The daemon writes nothing to stdout (its log goes to stderr or a
+        // file); null it rather than leaving a pipe that would fill up.
+        cmd.stdout(Stdio::null());
+        #[cfg(target_os = "linux")]
+        {
+            let file = fs_err::File::create(&stderr_path)
+                .expect("failed to create the daemon's stderr file");
+            cmd.stderr(Stdio::from(file));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            cmd.stderr(Stdio::inherit());
         }
 
-        DaemonChild { child: Some(child) }
+        let child = cmd.spawn().expect("failed to spawn keymapperd");
+
+        #[cfg(target_os = "linux")]
+        {
+            Self {
+                child: Some(child),
+                exit_status: None,
+                stderr_path,
+                _stderr_tempdir: stderr_tempdir,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self {
+                child: Some(child),
+                exit_status: None,
+            }
+        }
+    }
+
+    /// The log source for the daemon's log stream: the stderr temp file on
+    /// Linux, the rotating log file elsewhere.
+    fn log_source(&self) -> Box<dyn LogSource> {
+        #[cfg(target_os = "linux")]
+        {
+            Box::new(FileLogSource::fixed(self.stderr_path.clone()))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let dir = dirs::data_local_dir()
+                .expect("no local data directory (LOCALAPPDATA) available")
+                .join("keymapperd")
+                .join("logs");
+            Box::new(FileLogSource::rotated(dir, "keymapperd"))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let dir = dirs::home_dir()
+                .expect("no home directory available")
+                .join("Library")
+                .join("Logs")
+                .join("keymapper");
+            Box::new(FileLogSource::rotated(dir, "keymapperd"))
+        }
+    }
+
+    /// Check whether the daemon has exited, caching its status.  Returns
+    /// `true` once it has.
+    fn poll_exit(&mut self) -> bool {
+        if self.exit_status.is_some() {
+            return true;
+        }
+        let Some(child) = self.child.as_mut() else {
+            return true;
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                self.exit_status = Some(status);
+                true
+            }
+            Ok(None) => false,
+            Err(e) => panic!("failed to poll the daemon: {e}"),
+        }
     }
 
     /// Stop the daemon: SIGTERM (unix) with a grace period, then SIGKILL.
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             eprintln!("stopping daemon...");
-            #[cfg(unix)]
-            {
-                // Safety: kill(2) on a PID we own (our child).
-                unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-                for _ in 0..50 {
-                    if child.try_wait().ok().flatten().is_some() {
-                        break;
+            if self.exit_status.is_none() {
+                #[cfg(unix)]
+                {
+                    // Safety: kill(2) on a PID we own (our child).
+                    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+                    for _ in 0..50 {
+                        if child.try_wait().ok().flatten().is_some() {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(100));
                     }
-                    thread::sleep(Duration::from_millis(100));
                 }
             }
             child.kill().ok();
@@ -661,396 +586,131 @@ impl Drop for DaemonChild {
 }
 
 // ---------------------------------------------------------------------------
-// Reader (the "normal app" with keyboard focus)
+// Log-stream waits (readiness, hot-reload, phase windows)
 // ---------------------------------------------------------------------------
 
-/// RAII guard for the `keymapper_reader` child: an ordinary raw-mode stdin
-/// reader that records whatever bytes the OS delivers to the focused
-/// terminal.  The platform-specific spawn gives it keyboard focus (the Linux
-/// VT foreground, the macOS Terminal window, or the Windows console
-/// foreground); its output file is created only after focus and raw mode are
-/// established, which the harness uses as its ready signal.
-struct Reader {
-    /// The reader process, when it is a direct child (Linux and Windows).
-    /// On macOS the reader runs inside Terminal.app and is killed via its
-    /// unique output path instead.
-    child: Option<std::process::Child>,
-    /// The file the reader appends recorded bytes to.
-    output_path: PathBuf,
-    /// Keeps the unique temp directory alive for the reader's lifetime.
-    _tempdir: tempfile::TempDir,
-}
+/// The daemon's readiness line (INFO): emitted once the device grab, the
+/// config watcher, and the engine sync are all done.
+const READINESS_LINE: &str =
+    "Cross-platform runtime engines fully synchronized.";
 
-impl Reader {
-    /// Spawn the reader with keyboard focus and wait for its ready signal
-    /// (the output file).
-    fn spawn() -> Self {
-        let tempdir = tempfile::tempdir().expect("failed to create temp dir");
-        let output_path = tempdir.path().join("recorded.bin");
+/// The daemon's hot-reload line (INFO): emitted once a config change has been
+/// compiled and swapped in.
+const HOT_SWAP_LINE: &str = "Configuration hot-swapped successfully!";
 
-        #[cfg(target_os = "linux")]
-        {
-            // The daemon's uinput output is routed by the kernel to the
-            // active VT; stop getty (so it cannot retake the foreground) and
-            // make tty1 active before the reader opens it.
-            stop_getty_tty1();
-            switch_to_vt(1);
-        }
-
-        let child = spawn_reader_process(&output_path);
-        wait_for_ready(&output_path, Duration::from_secs(15));
-
-        Reader {
-            child,
-            output_path,
-            _tempdir: tempdir,
-        }
-    }
-
-    /// The number of bytes recorded so far.
-    fn len(&self) -> u64 {
-        std::fs::metadata(&self.output_path)
-            .map(|meta| meta.len())
-            .unwrap_or(0)
-    }
-
-    /// Read the bytes recorded in [*start*, *end*).
-    fn read_range(&self, start: u64, end: u64) -> Vec<u8> {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = fs_err::File::open(&self.output_path)
-            .expect("failed to open reader output file");
-        file.seek(SeekFrom::Start(start))
-            .expect("failed to seek in reader output");
-        let mut buf = vec![0u8; (end - start) as usize];
-        file.read_exact(&mut buf)
-            .expect("failed to read reader output");
-        buf
-    }
-}
-
-impl Drop for Reader {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            child.kill().ok();
-            let _ = child.wait();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // The reader runs inside Terminal.app (not our child); the
-            // unique output path makes the match unambiguous.  The Terminal
-            // window itself is left open (local-only test).
-            let _ = Command::new("pkill")
-                .arg("-f")
-                .arg(self.output_path.as_os_str())
-                .status();
-        }
-        #[cfg(target_os = "linux")]
-        start_getty_tty1();
-    }
-}
-
-/// Spawn the reader process for this platform.  Returns `None` when the
-/// reader is not a direct child (macOS: it runs inside Terminal.app).
-#[cfg(target_os = "linux")]
-fn spawn_reader_process(output_path: &Path) -> Option<std::process::Child> {
-    // The reader setsid()s and opens /dev/tty1 itself in its own main, so
-    // the kernel assigns it the controlling terminal and the VT's foreground
-    // process group (an inherited fd would not do that).
-    let child = Command::new(bin_path("keymapper_reader"))
-        .arg(output_path)
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("failed to spawn keymapper_reader");
-    Some(child)
-}
-
-/// Spawn the reader in a Terminal.app window (its stdin is then the window's
-/// pty) and bring Terminal to the foreground.  The reader is not a direct
-/// child of the harness, so `None` is returned.
-#[cfg(target_os = "macos")]
-fn spawn_reader_process(output_path: &Path) -> Option<std::process::Child> {
-    let reader_bin = bin_path("keymapper_reader");
-    // Two levels of quoting: the shell command inside `do script`, then the
-    // AppleScript string literal around it.
-    let shell_cmd = format!(
-        "\"{}\" \"{}\"",
-        escape_for_shell(&reader_bin.to_string_lossy()),
-        escape_for_shell(&output_path.to_string_lossy()),
-    );
-    let script = format!(
-        "tell application \"Terminal\"\nactivate\ndo script \
-         \"{script}\"\nend tell",
-        script = escape_for_applescript(&shell_cmd),
-    );
-
-    let mut child = Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("failed to spawn osascript");
-    // osascript exits once Terminal has started the script.
-    let _ = child.wait();
-
-    None
-}
-
-/// Escape a path for embedding in a double-quoted shell word.
-#[cfg(target_os = "macos")]
-fn escape_for_shell(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Escape a string for embedding in an AppleScript string literal.
-#[cfg(target_os = "macos")]
-fn escape_for_applescript(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-/// Spawn the reader in its own console window (`CREATE_NEW_CONSOLE`) and
-/// bring that window to the foreground so it has keyboard focus.  The daemon
-/// re-emits keys via `SendInput`, which the system delivers to the foreground
-/// window — i.e. here.
-#[cfg(target_os = "windows")]
-fn spawn_reader_process(output_path: &Path) -> Option<std::process::Child> {
-    use std::os::windows::process::CommandExt;
-
-    use windows::Win32::{
-        Foundation::HWND,
-        System::Threading::{AttachThreadInput, GetCurrentThreadId},
-        UI::WindowsAndMessaging::{
-            EnumWindows, GetForegroundWindow, GetWindowThreadProcessId,
-            SetForegroundWindow,
-        },
-    };
-
-    const CREATE_NEW_CONSOLE: u32 = 0x00000010;
-
-    let child = Command::new(bin_path("keymapper_reader"))
-        .arg(output_path)
-        .stderr(Stdio::inherit())
-        .creation_flags(CREATE_NEW_CONSOLE)
-        .spawn()
-        .expect("failed to spawn keymapper_reader");
-
-    // The foreground lock may block SetForegroundWindow, so attach to the
-    // current foreground window's thread first (the standard workaround).
-    let mut ctx = EnumCtx {
-        pid: child.id(),
-        target: HWND::default(),
-    };
-    unsafe {
-        let foreground = GetForegroundWindow();
-        let fg_thread = if foreground.is_invalid() {
-            0
-        } else {
-            GetWindowThreadProcessId(foreground, None)
-        };
-        let our_thread = GetCurrentThreadId();
-        if fg_thread != 0 && fg_thread != our_thread {
-            let _ = AttachThreadInput(our_thread, fg_thread, true);
-        }
-
-        // Safety: the callback only reads window properties and stores the
-        // HWND of the reader's console window in the context.
-        let _ = EnumWindows(
-            Some(find_reader_window),
-            windows::Win32::Foundation::LPARAM(
-                &mut ctx as *mut EnumCtx as isize,
-            ),
-        );
-
-        if !ctx.target.is_invalid() {
-            let _ = SetForegroundWindow(ctx.target);
-        } else {
-            eprintln!("warning: could not find the reader's console window");
-        }
-
-        if fg_thread != 0 && fg_thread != our_thread {
-            let _ = AttachThreadInput(our_thread, fg_thread, false);
-        }
-    }
-
-    Some(child)
-}
-
-/// Context for the `EnumWindows` callback (which cannot capture).
-#[cfg(target_os = "windows")]
-struct EnumCtx {
-    /// The reader's process id.
-    pid: u32,
-    /// The reader's console window, once found.
-    target: windows::Win32::Foundation::HWND,
-}
-
-/// `EnumWindows` callback: finds the console window of the reader's process.
-///  Cannot capture, so the context is passed via *lparam*.
-#[cfg(target_os = "windows")]
-unsafe extern "system" fn find_reader_window(
-    hwnd: windows::Win32::Foundation::HWND,
-    lparam: windows::Win32::Foundation::LPARAM,
-) -> windows::core::BOOL {
-    use windows::Win32::{
-        Foundation::{FALSE, TRUE},
-        UI::WindowsAndMessaging::GetWindowThreadProcessId,
-    };
-    // Safety: *lparam* is the context pointer passed by the caller, which
-    // keeps it alive for the duration of the enumeration.
-    let ctx = unsafe { &mut *(lparam.0 as *mut EnumCtx) };
-    let mut window_pid = 0u32;
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
-    if window_pid == ctx.pid {
-        ctx.target = hwnd;
-        FALSE // stop the enumeration.
-    } else {
-        TRUE
-    }
-}
-
-/// Stop the getty service on tty1 so it cannot retake the VT's foreground
-/// process group mid-test.  Best-effort: a failure is reported but not fatal
-/// (the getty may already be stopped).
-#[cfg(target_os = "linux")]
-fn stop_getty_tty1() {
-    match Command::new("systemctl")
-        .args(["stop", "getty@tty1"])
-        .output()
-    {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => eprintln!(
-            "warning: systemctl stop getty@tty1 failed ({}): {}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => eprintln!("warning: failed to run systemctl: {e}"),
-    }
-}
-
-/// Restart the getty service on tty1 (best-effort cleanup).
-#[cfg(target_os = "linux")]
-fn start_getty_tty1() {
-    let _ = Command::new("systemctl")
-        .args(["start", "getty@tty1"])
-        .output();
-}
-
-/// Switch the active console to VT *vt* so the daemon's uinput output (which
-/// the kernel routes to the active VT) reaches tty1.  Done via ioctl on
-/// /dev/console rather than the `chvt` binary, because the harness process
-/// has no controlling terminal in CI.
-#[cfg(target_os = "linux")]
-fn switch_to_vt(vt: i32) {
-    // KDVT_SWITCHTO from linux/kd.h; not in the libc crate.
-    const KDVT_SWITCHTO: libc::c_ulong = 0x4B39;
-    // Safety: open(2)/ioctl(2)/close(2) on /dev/console; the harness runs as
-    // root in CI.
-    unsafe {
-        let fd = libc::open(c"/dev/console".as_ptr(), libc::O_RDWR);
-        if fd < 0 {
-            eprintln!(
-                "warning: failed to open /dev/console: {}",
-                std::io::Error::last_os_error()
-            );
-            return;
-        }
-        if libc::ioctl(fd, KDVT_SWITCHTO, vt) < 0 {
-            eprintln!(
-                "warning: KDVT_SWITCHTO to VT{vt} failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-        libc::close(fd);
-    }
-}
-
-/// Wait for the reader's ready signal: its output file, which it creates only
-/// after keyboard focus and raw mode are established.
-fn wait_for_ready(path: &Path, timeout: Duration) {
+/// Poll *source* for a line containing *needle* until one appears or the
+/// timeout elapses.  Fails fast when the daemon exits, but only after
+/// draining what it wrote, so a line flushed just before exit is not missed.
+fn wait_for_line(
+    source: &mut Box<dyn LogSource>,
+    daemon: &mut DaemonChild,
+    mark: Mark,
+    needle: &str,
+    timeout: Duration,
+) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
-    while !path.exists() {
+    loop {
+        let lines = source.read_new(mark).map_err(|e| e.to_string())?;
+        if lines.iter().any(|line| line.contains(needle)) {
+            return Ok(());
+        }
+        if daemon.poll_exit() {
+            return Err("the daemon exited before the expected log line \
+                        appeared"
+                .to_string());
+        }
         if Instant::now() >= deadline {
-            panic!(
-                "the reader did not create its output file {path:?} within \
-                 {} s (keyboard focus or raw mode failed)",
+            return Err(format!(
+                "timed out after {} s waiting for the log line {needle:?}",
                 timeout.as_secs()
-            );
+            ));
         }
         thread::sleep(Duration::from_millis(100));
     }
 }
 
-// ---------------------------------------------------------------------------
-// Byte comparison
-// ---------------------------------------------------------------------------
-
-/// Format bytes as a hex string for failure messages.
-fn hex(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+/// Wait for the daemon's readiness line in its log stream.
+fn wait_for_readiness(
+    source: &mut Box<dyn LogSource>,
+    daemon: &mut DaemonChild,
+) {
+    let mark = source.mark().expect("failed to mark the log stream");
+    wait_for_line(
+        source,
+        daemon,
+        mark,
+        READINESS_LINE,
+        Duration::from_secs(30),
+    )
+    .unwrap_or_else(|e| panic!("the daemon did not become ready: {e}"));
 }
 
-/// Assert that *actual* bytes match *expected* exactly, with a readable diff.
-fn assert_bytes_match(actual: &[u8], expected: &[u8], message: &str) {
-    if actual == expected {
-        return;
-    }
-    panic!(
-        "{message}\nactual   = [{hex_actual}] ({text_actual})\nexpected = \
-         [{hex_expected}] ({text_expected})",
-        hex_actual = hex(actual),
-        text_actual = String::from_utf8_lossy(actual),
-        hex_expected = hex(expected),
-        text_expected = String::from_utf8_lossy(expected),
-    );
-}
+/// Collect the phase's log window: poll until at least *expected_emits* emit
+/// lines have appeared, then keep reading until the stream is quiescent (no
+/// new lines for 500 ms) so unexpected extras are captured in the window
+/// instead of leaking into the next phase.
+fn collect_window(
+    source: &mut Box<dyn LogSource>,
+    daemon: &mut DaemonChild,
+    mark: Mark,
+    expected_emits: &[String],
+) -> Result<Vec<String>, String> {
+    let mut window: Vec<String> = Vec::new();
+    let mut emit_count = 0usize;
 
-/// Wait until the reader has recorded at least *expected_len* new bytes
-/// beyond *offset*, verify that no unexpected extra bytes follow (a
-/// quiescence check), and return the phase's byte window.
-fn read_phase_bytes(
-    reader: &Reader,
-    offset: u64,
-    expected_len: usize,
-    timeout: Duration,
-) -> Vec<u8> {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
-        if (reader.len() - offset) as usize >= expected_len {
+        let lines = source.read_new(mark).map_err(|e| e.to_string())?;
+        if !lines.is_empty() {
+            let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+            emit_count += log_verify::parse_lines(&refs).emits.len();
+            window.extend(lines);
+        }
+        if emit_count >= expected_emits.len() {
             break;
         }
+        if daemon.poll_exit() {
+            return Err(format!(
+                "the daemon exited after {} of the expected {} emit lines",
+                emit_count,
+                expected_emits.len()
+            ));
+        }
         if Instant::now() >= deadline {
-            let got = reader.read_range(offset, reader.len());
-            panic!(
-                "timed out waiting for {expected_len} bytes; got {} so far: \
-                 [{}] ({})",
-                got.len(),
-                hex(&got),
-                String::from_utf8_lossy(&got)
-            );
+            return Err(format!(
+                "timed out after 15 s waiting for {} emit lines; got {}",
+                expected_emits.len(),
+                emit_count
+            ));
         }
         thread::sleep(Duration::from_millis(50));
     }
 
-    // Quiescence: give the daemon a moment to emit any (unexpected) extra
-    // bytes, then fail if more than expected arrived — an extra byte here
-    // would otherwise leak into the next phase's window.
-    thread::sleep(Duration::from_millis(500));
-    let len = reader.len();
-    if len > offset + expected_len as u64 {
-        let extra = reader.read_range(offset + expected_len as u64, len);
-        panic!(
-            "received {} unexpected extra byte(s) after the expected \
-             sequence: [{}] ({})",
-            extra.len(),
-            hex(&extra),
-            String::from_utf8_lossy(&extra)
-        );
+    // Quiescence: keep reading until 500 ms pass with no new lines.
+    let quiesce_deadline = Instant::now() + Duration::from_secs(15);
+    let mut last_growth = Instant::now();
+    loop {
+        thread::sleep(Duration::from_millis(100));
+        let lines = source.read_new(mark).map_err(|e| e.to_string())?;
+        if !lines.is_empty() {
+            window.extend(lines);
+            last_growth = Instant::now();
+        } else if Instant::now() - last_growth >= Duration::from_millis(500) {
+            break;
+        }
+        if daemon.poll_exit() {
+            return Err("the daemon exited while the log stream was still \
+                        active"
+                .to_string());
+        }
+        if Instant::now() >= quiesce_deadline {
+            return Err("timed out waiting for the log stream to go \
+                        quiescent"
+                .to_string());
+        }
     }
 
-    reader.read_range(offset, offset + expected_len as u64)
+    Ok(window)
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,6 +830,15 @@ fn wait_for_injector_device(_injector: &dyn KeyInjector) {}
 // Main orchestration
 // ---------------------------------------------------------------------------
 
+/// The directory containing the default config file (the daemon's CWD).
+fn config_dir() -> PathBuf {
+    keymapper::common::config_path::default_config_path()
+        .expect("no default config path")
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
 /// Run the e2e test for the given config phases.  Each phase is a fixture path
 /// (or `None` for an empty config).  Phases after the first hot-reload the
 /// config before injecting their sequence.
@@ -1193,30 +862,18 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
     injector.setup().expect("failed to set up injector");
     wait_for_injector_device(&*injector);
 
-    // 3. Start the daemon (waits for its readiness line).
-    let config_dir = keymapper::common::config_path::default_config_path()
-        .expect("no default config path")
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    let mut daemon = DaemonChild::spawn(&config_dir);
+    // 3. Start the daemon and wait for its readiness line in the log stream.
+    let mut daemon = DaemonChild::spawn(&config_dir());
+    let mut source = daemon.log_source();
+    wait_for_readiness(&mut source, &mut daemon);
 
-    // Give the daemon a moment to finish `start_mapping` (install its hook /
-    // create its output device) before the reader takes focus.
-    thread::sleep(Duration::from_millis(500));
-
-    // 4. Start the reader (the "normal app" with keyboard focus) and wait for
-    //    its ready signal.
-    let reader = Reader::spawn();
-
-    // 5. For each phase: inject the sequence once and compare the recorded
-    //    bytes against the character-space translation of the expected events.
-    //    Later phases hot-reload the config first.
+    // 4. For each phase: hot-reload the config first (later phases) and wait
+    //    for the daemon's hot-swap line, raise the log level to debug, inject
+    //    the sequence once, collect and verify the log window, and reset the
+    //    level.
     for (i, phase) in phases.iter().enumerate() {
         let content = phase_content(*phase);
         let sequences = build_test_sequences(&content);
-        let expected_bytes =
-            events_to_bytes(&sequences.expected, current_platform());
 
         if i > 0 {
             eprintln!(
@@ -1224,37 +881,51 @@ fn run_e2e(phases: &[Option<&Path>], label: &str) {
                 i + 1,
                 phases.len()
             );
+            // Mark before the overwrite so the hot-swap line (logged at INFO,
+            // before debug is raised) stays out of the phase's window.
+            let reload_mark =
+                source.mark().expect("failed to mark the log stream");
             config.overwrite(&content);
-            // Wait for the daemon's reload debounce plus compilation time.
-            thread::sleep(Duration::from_secs(2));
+            wait_for_line(
+                &mut source,
+                &mut daemon,
+                reload_mark,
+                HOT_SWAP_LINE,
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|e| panic!("the config hot-reload failed: {e}"));
         }
 
-        let offset = reader.len();
+        set_debug().expect("failed to raise the daemon's log level to debug");
+        let mark = source.mark().expect("failed to mark the log stream");
+
         eprintln!(
-            "phase {}: injecting {} steps, expecting {} bytes...",
+            "phase {}: injecting {} steps, expecting {} emit lines...",
             i + 1,
             sequences.steps.len(),
-            expected_bytes.len()
+            sequences.model.emits.len()
         );
         for step in &sequences.steps {
             inject_step(&*injector, step);
         }
 
-        let actual = read_phase_bytes(
-            &reader,
-            offset,
-            expected_bytes.len(),
-            Duration::from_secs(15),
-        );
-        assert_bytes_match(
-            &actual,
-            &expected_bytes,
-            "recorded bytes do not match the expected sequence",
+        let window = collect_window(
+            &mut source,
+            &mut daemon,
+            mark,
+            &sequences.model.emits,
+        )
+        .unwrap_or_else(|e| panic!("phase {} failed: {e}", i + 1));
+        reset_to_default()
+            .expect("failed to reset the daemon's log level to info");
+
+        let lines: Vec<&str> = window.iter().map(String::as_str).collect();
+        log_verify::verify_window(&sequences.model, &lines).unwrap_or_else(
+            |e| panic!("phase {} verification failed:\n{e}", i + 1),
         );
     }
 
-    // 6. Teardown: stop the daemon; the reader (and its getty restart) and the
-    //    config are restored via their Drop impls.
+    // 5. Teardown: stop the daemon; the config is restored via its Drop impl.
     daemon.stop();
 
     eprintln!("{label} PASSED");
