@@ -83,13 +83,11 @@ These are accepted trade-offs of the architecture:
 
 ## Logs
 
-keymapperd logs through the `log` facade as RFC 3164 syslog records (facility `LOG_USER`) on `/dev/log`. When the daemon runs under the systemd user service, journald picks them up:
+keymapperd logs through the `log` facade to stderr, without an embedded timestamp (the journal adds one). When the daemon runs under the systemd user service, journald records it:
 
 ```bash
 journalctl --user -u keymapperd -f
 ```
-
-On systems without `/dev/log` (journald-only installs), the daemon falls back to stderr, which the systemd unit likewise records in the journal — `journalctl` works either way.
 
 ## E2e capture
 

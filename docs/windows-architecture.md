@@ -92,9 +92,11 @@ These are accepted trade-offs of the final architecture:
 
 ## Logs
 
-keymapperd logs through the `log` facade to the Windows Event Log (Application log, source `keymapperd`). View the events in Event Viewer under **Windows Logs** → **Application**, filtered by source `keymapperd`.
+keymapperd logs through the `log` facade to a rotating file in `%LOCALAPPDATA%\keymapperd\logs\`, one file per day named `keymapperd-YYYYMMDD.log` (7-day retention). View today's log with:
 
-Registering the event source's message-file entry requires a one-time elevated run — the per-user installer cannot do it. Until `keymapper daemon start` has been run once from an elevated prompt, the daemon falls back to stderr: visible in dev mode, but lost in the windowless scheduled-task mode.
+```powershell
+Get-Content -Wait "$env:LOCALAPPDATA\keymapperd\logs\keymapperd-$(Get-Date -Format yyyyMMdd).log"
+```
 
 ## E2e capture
 

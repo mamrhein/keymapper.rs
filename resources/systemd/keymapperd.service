@@ -4,6 +4,7 @@ After=default.target
 
 [Service]
 Type=simple
+# Logs go to the journal via stderr (journalctl --user -u keymapperd).
 ExecStart=@BINARY_PATH@
 Restart=on-failure
 RestartSec=3
