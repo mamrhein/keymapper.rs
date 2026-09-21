@@ -35,7 +35,7 @@ use std::{
 
 use device::{
     ManagedDevice, capture_held_keys, drain_pending_events,
-    process_device_events, sync_initial_state,
+    native_release_window, process_device_events, sync_initial_state,
 };
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
@@ -101,7 +101,7 @@ pub fn start_mapping(
         // Grabbing does not flush the kernel's event ring: drop everything
         // already buffered (e.g. the Enter press that started the daemon)
         // so the stream starts clean at the grab.
-        drain_pending_events(&mut device, &kb.device);
+        let drained = drain_pending_events(&mut device, &kb.device);
 
         info!("Grabbed keyboard: {} ({})", kb.device, kb.name);
         let mut managed = ManagedDevice {
@@ -119,7 +119,12 @@ pub fn start_mapping(
         // the ring, and repeats for a key the engine never saw down for are
         // decided as a fresh press (each forwarded as a tap).  The held
         // modifiers' key-down re-emission waits for the virtual device.
-        capture_held_keys(&mut managed);
+        let held_at_grab = capture_held_keys(&mut managed);
+        // Let grab-time releases flow natively to the compositor (see
+        // native_release_window) before the virtual device is built, so the
+        // compositor's per-device key state stays in sync and the first
+        // presses after startup are not swallowed.
+        native_release_window(&mut managed, held_at_grab, drained > 0);
         managed_devices.push(managed);
     }
 

@@ -19,7 +19,7 @@
 use std::{
     os::unix::io::{AsRawFd, RawFd},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use evdev::{Device, EventType, InputEvent, MiscCode, uinput::VirtualDevice};
@@ -432,8 +432,10 @@ fn forward_key_event(device: &mut VirtualDevice, code: u16, value: i32) {
 ///
 /// The read inside `fetch_events` already removed the batch from the ring,
 /// so the returned iterator may be dropped unprocessed; the only thing of
-/// interest is the count of discarded events.
-pub(super) fn drain_pending_events(device: &mut Device, path: &str) {
+/// interest is the count of discarded events, which the caller uses to
+/// decide whether a grace window is needed (see
+/// [`native_release_window`]).
+pub(super) fn drain_pending_events(device: &mut Device, path: &str) -> usize {
     let mut discarded = 0;
     loop {
         match device.fetch_events() {
@@ -462,10 +464,14 @@ pub(super) fn drain_pending_events(device: &mut Device, path: &str) {
              grab on {path}"
         );
     }
+    discarded
 }
 
 /// Note every key currently held on the physical keyboard in the engine and
 /// queue the held modifiers for re-emission.
+///
+/// Returns the grab-time snapshot of held key codes, which the caller feeds
+/// to [`native_release_window`].
 ///
 /// Runs immediately after the grab and the drain, while the kernel's key
 /// state still reflects the grab instant itself.  Sampling later — after the
@@ -484,13 +490,13 @@ pub(super) fn drain_pending_events(device: &mut Device, path: &str) {
 /// re-emitting it — plus the auto-repeat tail and the release that follow —
 /// would inject a second press.  The engine swallows their repeats and
 /// forwards their release, which balances the pre-grab key-down.
-pub(super) fn capture_held_keys(managed: &mut ManagedDevice) {
+pub(super) fn capture_held_keys(managed: &mut ManagedDevice) -> Vec<u16> {
     let Ok(held) = read_kernel_key_state(managed.device.as_raw_fd()) else {
         warn!(
             "Linux: failed to read the held key state of {} at grab time",
             managed.path
         );
-        return;
+        return Vec::new();
     };
     let modifiers = note_held_keys(&mut managed.engine, &held);
     managed.pending_held_modifiers = modifiers;
@@ -508,6 +514,7 @@ pub(super) fn capture_held_keys(managed: &mut ManagedDevice) {
             managed.pending_held_modifiers.len()
         );
     }
+    held
 }
 
 /// Note a grab-time held-key list in the engine.
@@ -543,6 +550,161 @@ pub(super) fn note_held_keys(
     modifiers
 }
 
+/// How long the startup ungrab window waits for the release of a key held
+/// at grab time; after the deadline, whatever is still held falls back to
+/// the stale-release-forward behavior.
+///
+/// Generous on purpose: the key that started the daemon (typically Return)
+/// is often held for a couple of seconds while the service comes up.  The
+/// window exits shortly after the release is observed, so the timeout only
+/// bounds the pathological case of a key still held long after startup;
+/// while the window runs the keyboard is simply not grabbed, so the cost of
+/// waiting is a keyboard that is briefly unmapped, not lost input.
+const NATIVE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Grace window when nothing was held at grab time but the drain discarded
+/// events: their release may still sit in the compositor's own buffer,
+/// unreadable while the device is grabbed.
+const NATIVE_RELEASE_GRACE: Duration = Duration::from_millis(200);
+
+/// Briefly release the grab so grab-time key releases reach the compositor
+/// natively, then re-grab.
+///
+/// The compositor only learns about a release from an event on the very
+/// device it last saw the press on.  A release that the grab intercepts and
+/// the daemon later re-emits on the virtual keyboard is a release for a key
+/// the virtual keyboard never pressed: the compositor's state for the
+/// physical keyboard desynchronizes from the kernel's, and the first
+/// presses of that key on the virtual keyboard are dropped while it
+/// reconciles (observed on wlroots: the first one or two post-startup
+/// Return presses were swallowed).  Delivering the release natively on the
+/// physical device keeps every state consistent, as on the platforms where
+/// nothing is grabbed at all.
+///
+/// While ungrabbed, every event reaches this process and the compositor
+/// (each evdev reader keeps its own copy), so the daemon reads and
+/// discards here: forwarding would double-deliver.  A grab-time held key
+/// whose release is observed is unnoted in the engine, so its key-down is
+/// not re-emitted on the virtual device (the client already has the
+/// complete pair from the physical device); a key still held when the
+/// deadline passes keeps its note and falls back to the stale-release
+/// forward.
+pub(super) fn native_release_window(
+    managed: &mut ManagedDevice,
+    held_at_grab: Vec<u16>,
+    drain_found_events: bool,
+) {
+    if held_at_grab.is_empty() && !drain_found_events {
+        // Clean takeover: nothing held, nothing pending -- the
+        // compositor's state is already complete, no window needed.
+        return;
+    }
+    let timeout = if held_at_grab.is_empty() {
+        NATIVE_RELEASE_GRACE
+    } else {
+        NATIVE_RELEASE_TIMEOUT
+    };
+
+    let has_held_keys = !held_at_grab.is_empty();
+    let mut pending: Vec<u16> = held_at_grab;
+    if managed.device.ungrab().is_err() {
+        warn!(
+            "Linux: failed to ungrab {} for the native release window; \
+             falling back to the stale-release forward",
+            managed.path
+        );
+        return;
+    }
+    debug!(
+        "Linux: ungrabbed {} for {timeout:?} so grab-time releases flow \
+         natively",
+        managed.path
+    );
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        // A held set that became empty is a full native release: a short
+        // grace so the compositor's read loop picks the release up before
+        // the grab returns.
+        if has_held_keys && pending.is_empty() {
+            thread::sleep(Duration::from_millis(50));
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        let batch = match managed.device.fetch_events() {
+            Ok(batch) => batch,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                continue;
+            }
+            Err(e) => {
+                warn!(
+                    "Linux: error reading {} during the native release \
+                     window: {e}",
+                    managed.path
+                );
+                break;
+            }
+        };
+        // Collect owned copies so the device borrow from `fetch_events`
+        // ends before the engine is mutated below.
+        let events: Vec<InputEvent> = batch.into_iter().collect();
+        for event in events {
+            // Every event is discarded here: the compositor received its
+            // own copy natively, and forwarding would double-deliver.
+            if event.event_type() == EventType::KEY
+                && event.value() == 0
+                && let Some(pos) =
+                    pending.iter().position(|&code| code == event.code())
+            {
+                let code = pending.swap_remove(pos);
+                unnote_natively_released(managed, code);
+            }
+        }
+    }
+
+    drain_pending_events(&mut managed.device, &managed.path);
+    if let Err(e) = managed.device.grab() {
+        warn!("Linux: failed to re-grab {}: {e}", managed.path);
+    }
+    if !pending.is_empty() {
+        debug!(
+            "Linux: still held after the native release window on {}: {} \
+             (their release will be forwarded via the virtual keyboard)",
+            managed.path,
+            format_key_codes(&pending)
+        );
+    }
+}
+
+/// Undo the engine's held-key note for a key whose release was delivered
+/// natively during the ungrab window.
+fn unnote_natively_released(managed: &mut ManagedDevice, code: u16) {
+    match keycode_to_hid_usage(code) {
+        Some(usage) => {
+            managed.engine.unnote_held_key(code, usage);
+            debug!(
+                "Linux: {} released natively during the startup window on {}",
+                usage.as_str(),
+                managed.path
+            );
+        }
+        None => {
+            managed.engine.clear_stale_key(code);
+            debug!(
+                "Linux: key code {code} released natively during the startup \
+                 window on {}",
+                managed.path
+            );
+        }
+    }
+}
+
 /// Re-emit the key-downs of the modifiers that were held when the device
 /// was grabbed, completing the initial-state sync that
 /// [`capture_held_keys`] started at grab time.
@@ -566,6 +728,16 @@ pub(super) fn sync_initial_state(
     virtual_device: &mut VirtualDevice,
 ) {
     for &code in &managed.pending_held_modifiers {
+        // A modifier released during the native release window was
+        // unnoted: the client already has the complete down+up pair from
+        // the physical device, and re-emitting the key-down would leave it
+        // stuck on the virtual device.
+        let Some(usage) = keycode_to_hid_usage(code) else {
+            continue;
+        };
+        if !managed.engine.held_modifier_forwarded(usage) {
+            continue;
+        }
         debug!(
             "Linux: re-emitting held modifier key-down {} on {}",
             code, managed.path

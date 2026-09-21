@@ -285,6 +285,37 @@ impl<K: Ord + Copy> MappingEngine<K> {
         self.tracker.stale_keys.remove(&key);
     }
 
+    /// Undo [`note_held_key`] for a key whose release was delivered
+    /// natively to the client before the stream started (Linux: the
+    /// startup ungrab window, see the platform module).
+    ///
+    /// The client already has the complete down+up pair from the physical
+    /// device, so nothing is re-emitted on the virtual device: the key
+    /// leaves the pressed set, a modifier's lookup and forwarded bits are
+    /// cleared, and a non-modifier's stale mark is dropped.
+    pub fn unnote_held_key(&mut self, key: K, usage: HidUsage) {
+        self.tracker.pressed_keys.remove(&key);
+        if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
+            self.modifier_state &= !(1 << bit);
+            self.tracker.forwarded_modifiers &= !(1 << bit);
+        } else {
+            self.tracker.stale_keys.remove(&key);
+        }
+    }
+
+    /// Whether a held modifier (noted by [`note_held_key`]) is still marked
+    /// forwarded and therefore expects its key-down re-emission during the
+    /// initial-state sync.
+    ///
+    /// False when its release was already delivered natively (see
+    /// [`unnote_held_key`]): re-emitting the key-down would leave the
+    /// modifier stuck on the virtual device.
+    pub fn held_modifier_forwarded(&self, usage: HidUsage) -> bool {
+        HidUsage::hid_usage_to_modifier_bit(usage).is_some_and(|bit| {
+            self.tracker.forwarded_modifiers & (1 << bit) != 0
+        })
+    }
+
     /// Decide how to handle a single key event.
     ///
     /// `key` is the platform's identity for the physical key, `usage` its HID
@@ -776,7 +807,8 @@ mod tests {
             t.release(ALT, HidUsage::LeftAlt), // consumed
             Some(ReleaseFate::Consumed)
         );
-        assert_eq!(t.release(META, HidUsage::LeftCommand), None); // never forwarded
+        // META was never forwarded, so there is nothing to release.
+        assert_eq!(t.release(META, HidUsage::LeftCommand), None);
     }
 
     #[test]
@@ -1032,7 +1064,10 @@ mod tests {
         // to balance the pre-grab key-down.
         let mut e = engine("- mappings:\n    A: B");
         e.note_held_key(HidUsage::A.id(), HidUsage::A);
-        assert_eq!(down(&mut e, HidUsage::A), Decision::Swallow { release: 0 });
+        assert_eq!(
+            down(&mut e, HidUsage::A),
+            Decision::Swallow { release: 0 }
+        );
         assert_eq!(up(&mut e, HidUsage::A), Decision::Pass);
     }
 
@@ -1050,6 +1085,40 @@ mod tests {
                 outputs: vec![nk(HidUsage::B)]
             }
         );
+    }
+
+    #[test]
+    fn unnoted_held_key_is_decided_fresh() {
+        // A non-modifier held at grab time but released natively during the
+        // startup ungrab window is unnoted: its stale mark is gone, so a
+        // later press is decided from the lookup as a fresh press instead
+        // of being swallowed as a stale repeat.
+        let mut e = engine("- mappings:\n    A: B");
+        e.note_held_key(HidUsage::A.id(), HidUsage::A);
+        e.unnote_held_key(HidUsage::A.id(), HidUsage::A);
+        assert!(!e.has_stale_key(HidUsage::A.id()));
+        assert_eq!(
+            down(&mut e, HidUsage::A),
+            Decision::Emit {
+                release: 0,
+                outputs: vec![nk(HidUsage::B)]
+            }
+        );
+    }
+
+    #[test]
+    fn unnoted_held_modifier_is_inactive_for_lookup() {
+        // A modifier held at grab time but released natively during the
+        // startup ungrab window is unnoted: its bit leaves the lookup state
+        // and its forwarded mark is cleared, so the initial-state sync skips
+        // its key-down re-emission and a plain press maps without it.
+        let mut e = engine("- mappings:\n    LeftControl+A: B");
+        e.note_held_key(HidUsage::LeftControl.id(), HidUsage::LeftControl);
+        assert!(e.held_modifier_forwarded(HidUsage::LeftControl));
+        e.unnote_held_key(HidUsage::LeftControl.id(), HidUsage::LeftControl);
+        assert!(!e.held_modifier_forwarded(HidUsage::LeftControl));
+        // Without the held Ctrl, a plain A is unmapped and passes through.
+        assert_eq!(down(&mut e, HidUsage::A), Decision::Pass);
     }
 
     #[test]
