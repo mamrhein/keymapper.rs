@@ -64,8 +64,7 @@ const LOG_TAG: &str = "keymapperd";
 const LOG_LEVEL_ENV: &str = "KEYMAPPERD_LOG_LEVEL";
 
 /// The log level used when [`LOG_LEVEL_ENV`] is unset or unrecognised.
-// const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
-const DEFAULT_LEVEL: LevelFilter = LevelFilter::Trace;
+const DEFAULT_LEVEL: LevelFilter = LevelFilter::Info;
 
 /// The runtime log-level gate.
 ///
