@@ -74,10 +74,7 @@ fn evict_stale(buffer: &mut Vec<BufferedRawInput>, max_age: Duration) {
 ///
 /// The buffer is not strictly ordered, so the scan keeps the latest
 /// `received_at` it has seen.
-fn find_match(
-    buffer: &Vec<BufferedRawInput>,
-    usage: HidUsage,
-) -> Option<usize> {
+fn find_match(buffer: &[BufferedRawInput], usage: HidUsage) -> Option<usize> {
     let mut best_idx: Option<usize> = None;
     let mut best_time: Option<Instant> = None;
 
