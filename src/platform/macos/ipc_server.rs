@@ -44,20 +44,6 @@ const SOCKET_NAME: &str = "keymapperd.sock";
 /// Poll timeout for the listener, so shutdown signals are observed promptly.
 const POLL_TIMEOUT_MS: i32 = 500;
 
-/// The macOS `struct xid` returned by `getpeereid(2)`.
-#[repr(C)]
-struct Xid {
-    xi_uid: libc::uid_t,
-    xi_euid: libc::uid_t,
-    xi_gid: libc::gid_t,
-}
-
-// The `libc` crate's `getpeereid` binding uses the NetBSD signature; macOS
-// passes a `struct xid`, so declare the correct prototype here.
-unsafe extern "C" {
-    fn getpeereid(socket: libc::c_int, peercred: *mut Xid) -> libc::c_int;
-}
-
 /// Run the virtkbdd IPC server until a shutdown signal is received.
 ///
 /// Creates the socket and keeps it owned by the current console user, then
@@ -116,7 +102,7 @@ pub fn run_server(
         };
 
         // Verify the peer is the console user; reject (and drop) otherwise.
-        match (peer_uid(&stream), console_uid()) {
+        match (peer_euid(&stream), console_uid()) {
             (Some(peer), Some(console)) if peer == console => {
                 info!("Service keymapperd connected (uid {peer})");
                 handle_connection(stream, conn);
@@ -150,18 +136,21 @@ fn wait_for_peer(listener: &UnixListener) -> bool {
     result > 0
 }
 
-/// Return the real uid of the connected peer, via `getpeereid(2)`.
-fn peer_uid(stream: &UnixStream) -> Option<libc::uid_t> {
-    let mut xid = Xid {
-        xi_uid: 0,
-        xi_euid: 0,
-        xi_gid: 0,
-    };
-    let status = unsafe { getpeereid(stream.as_raw_fd(), &mut xid) };
+/// Return the effective uid of the connected peer, via `getpeereid(2)`.
+///
+/// macOS 27 changed `getpeereid` from the classic `(int, struct xid *)`
+/// signature to `(int, uid_t *, gid_t *)`, and `libc` declares the current
+/// prototype.  The effective uid is the identity that matters here: for a
+/// normal user process such as keymapperd it equals the real uid.
+fn peer_euid(stream: &UnixStream) -> Option<libc::uid_t> {
+    let mut euid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let status =
+        unsafe { libc::getpeereid(stream.as_raw_fd(), &mut euid, &mut gid) };
     if status != 0 {
         return None;
     }
-    Some(xid.xi_uid)
+    Some(euid)
 }
 
 /// Read frames from a keymapperd connection and emit each batch in order.
