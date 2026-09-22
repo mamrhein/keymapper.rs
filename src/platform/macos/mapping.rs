@@ -25,12 +25,20 @@
 //! subsequent physical keys), and a consumed modifier's physical release is
 //! passed through, because forwarded events never touch the virtual keyboard.
 //!
+//! Because the DriverKit virtual keyboard is a hardware-level device, the keys
+//! it emits re-enter the HID pipeline and are re-received by this tap.  An
+//! [`EchoTracker`] predicts the echo of each emission and lets the callback
+//! pass those events through without re-deciding them, so a mapped key's echo
+//! is never re-mapped (which would make `Escape: Cmd+T` fire on the echo of an
+//! earlier `RightControl: Escape`, and cyclic rules emit forever).
+//!
 //! This runs in the user domain (keymapperd): a CGEventTap requires a
 //! WindowServer connection, which a root daemon cannot have.  It needs the
 //! Input Monitoring and Accessibility TCC grants; without them, tap creation
 //! fails and a clear, actionable error is logged.
 
 use std::{
+    collections::VecDeque,
     ffi::c_void,
     ptr::NonNull,
     sync::{
@@ -38,13 +46,15 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
+    time::{Duration, Instant},
 };
 
 use log::{debug, info, trace};
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapLocation,
-    CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
+    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
+    CGEventSourceStateID, CGEventTapLocation, CGEventTapOptions,
+    CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use parking_lot::{Mutex, RwLock};
 use signal_hook::{
@@ -54,7 +64,11 @@ use signal_hook::{
 
 use super::{ipc_client::IpcClient, keycode::keycode_to_hid_usage};
 use crate::{
-    common::{hid_usage::HidUsage, keyboard::KeyboardSpecifier},
+    common::{
+        hid_usage::{HidUsage, PAGE_KEYBOARD},
+        keyboard::KeyboardSpecifier,
+        modifier::ModifierRole,
+    },
     daemon::{
         engine::{Decision, MappingEngine, fmt_native_key},
         mapping_cache::NativeKey,
@@ -92,6 +106,13 @@ pub fn start_mapping(
     // CGEvents cannot be correlated with an IOKit device.
     let engine = MappingEngine::new(lookup);
 
+    // Seed the CapsLock previous-state tracker with the current alpha-shift
+    // state, so the first CapsLock event is classified against reality rather
+    // than an assumption.
+    let prev_alpha_shift =
+        CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState)
+            .contains(CGEventFlags::MaskAlphaShift);
+
     // Build the tap context.  The callback is a plain function pointer, so all
     // state travels through the refcon; the context is a local that stays
     // alive for the run loop's duration, and its address is passed as the
@@ -104,6 +125,8 @@ pub fn start_mapping(
         tx: ipc.sender(),
         reachable: ipc.reachable_flag(),
         tap_port: std::ptr::null(),
+        prev_alpha_shift,
+        echo: EchoTracker::new(),
     };
     let refcon = &mut ctx as *mut TapContext as *mut c_void;
 
@@ -170,28 +193,191 @@ fn run_event_loop(shutdown: &Arc<AtomicBool>) {
     info!("Shutdown signal received. Cleaning up...");
 }
 
-/// Compute the down/up state of a `FlagsChanged` event from its usage and
-/// flag mask.
+/// Compute the down/up state of a `FlagsChanged` event for one of the eight
+/// held modifiers, from its usage and flag mask.
 ///
-/// The eight held modifiers map to their HID modifier bits, and the state is
-/// read from the corresponding flag.  CapsLock is a toggle key with no
-/// modifier bit, whose state is the alpha-shift flag; it is still a valid
-/// trigger key, so it must reach the decision core (macOS delivers it only as
-/// `FlagsChanged`, never as key-down/key-up).  Returns `None` for usages that
-/// are not mappable keys (Fn, etc.).
+/// The state is read from the modifier's flag: set means down, cleared means
+/// up.  Returns `None` for usages that are not held modifiers (CapsLock is a
+/// toggle key and is handled separately by [`capslock_is_down`], as are Fn,
+/// etc.).
 fn flags_changed_state(usage: HidUsage, flags: CGEventFlags) -> Option<bool> {
-    match HidUsage::hid_usage_to_modifier_bit(usage) {
-        Some(bit) => Some(match bit {
-            0 | 4 => flags.contains(CGEventFlags::MaskControl),
-            1 | 5 => flags.contains(CGEventFlags::MaskShift),
-            2 | 6 => flags.contains(CGEventFlags::MaskAlternate),
-            _ => flags.contains(CGEventFlags::MaskCommand), // 3 | 7
-        }),
-        None if usage == HidUsage::CapsLock => {
-            Some(flags.contains(CGEventFlags::MaskAlphaShift))
+    HidUsage::hid_usage_to_modifier_bit(usage).map(|bit| match bit {
+        0 | 4 => flags.contains(CGEventFlags::MaskControl),
+        1 | 5 => flags.contains(CGEventFlags::MaskShift),
+        2 | 6 => flags.contains(CGEventFlags::MaskAlternate),
+        _ => flags.contains(CGEventFlags::MaskCommand), // 3 | 7
+    })
+}
+
+/// Classify a CapsLock `FlagsChanged` event as a press or a release.
+///
+/// CapsLock is a toggle key with no modifier bit: the alpha-shift flag stays
+/// set after the physical release, so the event's own mask cannot say whether
+/// it is a press or a release (a release with caps on looks exactly like a
+/// press with caps off).  Only the change between consecutive events can:
+/// a press toggles the state, a release leaves it unchanged.  *prev* is the
+/// alpha-shift state seen on the previous CapsLock event (or at startup);
+/// it is updated to the current state.
+fn capslock_is_down(flags: CGEventFlags, prev: &mut bool) -> bool {
+    let alpha_shift = flags.contains(CGEventFlags::MaskAlphaShift);
+    let is_down = alpha_shift != *prev;
+    *prev = alpha_shift;
+    is_down
+}
+
+/// A single predicted echo event: a keyboard-page usage and its down/up state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EchoEvent {
+    /// The HID usage of the echoed key.
+    usage: HidUsage,
+    /// Whether the echo is a press (`true`) or a release (`false`).
+    is_down: bool,
+}
+
+/// The maximum time an echo entry stays pending before it is considered stale.
+///
+/// Emitted keys travel through the virtkbdd IPC client and the DriverKit
+/// virtual keyboard before re-entering the HID pipeline as a `CGEvent`.  This
+/// window bounds how long we wait for that round trip; an entry older than
+/// this is dropped from the front of the queue.
+const ECHO_WINDOW: Duration = Duration::from_millis(500);
+
+/// Predicts and matches the echo of keys we emit through the virtual keyboard.
+///
+/// The DriverKit virtual keyboard is a hardware-level device: the keys it
+/// emits re-enter the HID pipeline and are re-received by our own
+/// `CGEventTap`.  Left unchecked, a mapped key's echo would be re-decided by
+/// the engine, so a rule like `Escape: Cmd+T` would fire on the echo of an
+/// earlier `RightControl: Escape`, and cyclic rules (`A: B` + `B: A`) would
+/// emit forever.  This tracker records the exact sequence of `(usage,
+/// is_down)` events each emission will produce (mirroring
+/// `emit::keyboard_report_sequence`) and lets the tap callback recognize and
+/// pass them through, bypassing the engine.
+///
+/// The echo is the emitted key's *only* delivery to the application, so a
+/// match must pass the event through (not swallow it) — only the engine
+/// decision is skipped.  Touched only on the main run-loop thread (the tap
+/// callback), so no synchronization is needed.
+struct EchoTracker {
+    /// Pending echo events, in the order they will arrive at the tap.  Each
+    /// is stamped with the time it was recorded, so stale entries can
+    /// expire.
+    pending: VecDeque<(Instant, EchoEvent)>,
+}
+
+impl EchoTracker {
+    /// Create an empty tracker.
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
         }
-        None => None,
     }
+
+    /// Record the predicted echo sequence for a batch of emitted outputs.
+    ///
+    /// For each keyboard-page output, the echo is: each output modifier down
+    /// (ascending bit order), the base key down, the base key up, then each
+    /// output modifier up (descending bit order) — the same order as
+    /// `emit::keyboard_report_sequence`, so the predicted sequence matches the
+    /// order the events actually arrive at the tap.  Consumer-page outputs are
+    /// skipped: they never re-enter the tap as a keyboard event, so an entry
+    /// for them would only clog the queue head.
+    fn record(&mut self, outputs: &[NativeKey], now: Instant) {
+        for native_key in outputs {
+            if native_key.usage.page() != PAGE_KEYBOARD {
+                continue;
+            }
+            let base = native_key.usage;
+            let modifiers = native_key.modifiers;
+
+            // Press each output modifier, one at a time in ascending bit
+            // order.
+            for bit in 0..8 {
+                if (modifiers >> bit) & 1 == 1 {
+                    let Some(usage) = modifier_usage(bit) else {
+                        continue;
+                    };
+                    self.pending.push_back((
+                        now,
+                        EchoEvent {
+                            usage,
+                            is_down: true,
+                        },
+                    ));
+                }
+            }
+
+            // Press and release the base key.
+            self.pending.push_back((
+                now,
+                EchoEvent {
+                    usage: base,
+                    is_down: true,
+                },
+            ));
+            self.pending.push_back((
+                now,
+                EchoEvent {
+                    usage: base,
+                    is_down: false,
+                },
+            ));
+
+            // Release each output modifier, one at a time in descending bit
+            // order.
+            for bit in (0..8).rev() {
+                if (modifiers >> bit) & 1 == 1 {
+                    let Some(usage) = modifier_usage(bit) else {
+                        continue;
+                    };
+                    self.pending.push_back((
+                        now,
+                        EchoEvent {
+                            usage,
+                            is_down: false,
+                        },
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Check whether the next pending echo matches `(usage, is_down)`.
+    ///
+    /// Expired entries (older than [`ECHO_WINDOW`]) are dropped from the front
+    /// first.  If the new head matches, it is consumed and `true` is returned;
+    /// otherwise nothing is consumed and `false` is returned.  A mismatch does
+    /// not consume, so an interleaved user event passes to the engine and the
+    /// echo still matches when it arrives.
+    fn matches(
+        &mut self,
+        usage: HidUsage,
+        is_down: bool,
+        now: Instant,
+    ) -> bool {
+        // Drop stale entries from the front.
+        while let Some((recorded, _)) = self.pending.front() {
+            if now.duration_since(*recorded) > ECHO_WINDOW {
+                self.pending.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        match self.pending.front() {
+            Some((_, head)) if *head == EchoEvent { usage, is_down } => {
+                self.pending.pop_front();
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Map a modifier bit position to its keyboard-page [`HidUsage`].
+fn modifier_usage(bit: u8) -> Option<HidUsage> {
+    ModifierRole::try_from_bit(bit)
+        .and_then(|role| HidUsage::keyboard(role.hid_id()))
 }
 
 /// The state shared with the CGEventTap callback via its refcon.
@@ -205,6 +391,15 @@ struct TapContext {
     /// The tap's mach port, so the callback can re-enable a disabled tap.
     /// Set after `tap_create`, before the run loop starts.
     tap_port: *const CFMachPort,
+    /// The alpha-shift (caps lock) flag state as of the last CapsLock event,
+    /// or at startup when there was none yet.  Touched only on the main
+    /// run-loop thread (the tap callback), so no synchronization is needed.
+    prev_alpha_shift: bool,
+    /// Predicts and matches the echo of keys emitted through the virtual
+    /// keyboard, so they pass through the tap without being re-decided by the
+    /// engine.  Touched only on the main run-loop thread, so no
+    /// synchronization is needed.
+    echo: EchoTracker,
 }
 
 /// The CGEventTap callback.
@@ -218,7 +413,9 @@ unsafe extern "C-unwind" fn tap_callback(
     event: NonNull<CGEvent>,
     refcon: *mut c_void,
 ) -> *mut CGEvent {
-    let ctx = unsafe { &*(refcon as *const TapContext) };
+    // Mutable because the callback updates the CapsLock previous-state
+    // tracker; it runs only on the main run-loop thread, so no aliasing.
+    let ctx = unsafe { &mut *(refcon as *mut TapContext) };
 
     // The system disables taps that block (or when secure input is active).
     // Re-enable and pass the event through.
@@ -242,14 +439,20 @@ unsafe extern "C-unwind" fn tap_callback(
         CGEventType::KeyUp => (keycode_to_hid_usage(keycode), false),
         // Modifier presses arrive here, not as key-down/key-up.  Resolve the
         // usage from the keycode; `is_down` is read from the event's flag
-        // mask.
+        // mask, except for CapsLock, a toggle key whose press/release is
+        // classified from the change against the previous state.
         CGEventType::FlagsChanged => {
             let Some(usage) = keycode_to_hid_usage(keycode) else {
                 return event.as_ptr(); // Fn, etc.: no HID equivalent.
             };
             let flags = CGEvent::flags(Some(cg_event));
-            let Some(is_down) = flags_changed_state(usage, flags) else {
-                return event.as_ptr();
+            let is_down = if usage == HidUsage::CapsLock {
+                capslock_is_down(flags, &mut ctx.prev_alpha_shift)
+            } else {
+                let Some(is_down) = flags_changed_state(usage, flags) else {
+                    return event.as_ptr();
+                };
+                is_down
             };
             (Some(usage), is_down)
         }
@@ -269,6 +472,22 @@ unsafe extern "C-unwind" fn tap_callback(
         debug!("recv keycode={keycode} {action} -> {usage}");
     } else {
         trace!("recv keycode={keycode} {action} -> {usage}");
+    }
+
+    // The virtual keyboard is a hardware-level device: the keys it emits
+    // re-enter the HID pipeline and are re-received by this tap.  If the event
+    // is the predicted echo of a key we just emitted, pass it through without
+    // re-deciding it — the echo is the key's only delivery to the application,
+    // so it must reach the app, but it must not be re-mapped (which would make
+    // `Escape: Cmd+T` fire on the echo of an earlier `RightControl: Escape`,
+    // and cyclic rules emit forever).
+    if ctx.echo.matches(usage, is_down, Instant::now()) {
+        if is_down {
+            debug!("pass keycode={keycode} {action} -> {usage}");
+        } else {
+            trace!("pass keycode={keycode} {action} -> {usage}");
+        }
+        return event.as_ptr();
     }
 
     let reachable = ctx.reachable.load(Ordering::Acquire);
@@ -299,7 +518,13 @@ unsafe extern "C-unwind" fn tap_callback(
             // modifier state is isolated from physical typing, so there is
             // nothing to release on the output device.  Fire-and-forget; drop
             // the batch if the channel is full.
-            let _ = ctx.tx.try_send(outputs);
+            let sent = ctx.tx.try_send(outputs.clone()).is_ok();
+            if sent {
+                // Record the predicted echo so the re-received keys pass
+                // through without being re-decided.  Only record on a
+                // successful send: a dropped batch produces no echo.
+                ctx.echo.record(&outputs, Instant::now());
+            }
             std::ptr::null_mut()
         }
         // The release mask is inert for the same reason.
@@ -352,22 +577,25 @@ mod tests {
         );
     }
 
-    /// CapsLock is a toggle key with no modifier bit; its state is the
-    /// alpha-shift flag, and it must still reach the decision core (macOS
-    /// delivers it only as `FlagsChanged`).
+    /// CapsLock is a toggle key: the alpha-shift flag stays set after the
+    /// physical release, so only the change between consecutive events
+    /// distinguishes a press from a release.  A state change is a press; an
+    /// unchanged state is a release, regardless of the flag's value.
     #[test]
-    fn capslock_state_from_alpha_shift_flag() {
-        assert_eq!(
-            flags_changed_state(
-                HidUsage::CapsLock,
-                CGEventFlags::MaskAlphaShift
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            flags_changed_state(HidUsage::CapsLock, CGEventFlags::empty()),
-            Some(false)
-        );
+    fn capslock_press_release_from_state_change() {
+        // Starting with caps off: the press sets the flag (down), the release
+        // leaves it set (up), the next press clears it (down).
+        let mut prev = false;
+        assert!(capslock_is_down(CGEventFlags::MaskAlphaShift, &mut prev));
+        assert!(!capslock_is_down(CGEventFlags::MaskAlphaShift, &mut prev));
+        assert!(capslock_is_down(CGEventFlags::empty(), &mut prev));
+        assert!(!capslock_is_down(CGEventFlags::empty(), &mut prev));
+
+        // Starting with caps on: the first press clears the flag (down), and
+        // the release leaves it cleared (up).
+        let mut prev = true;
+        assert!(capslock_is_down(CGEventFlags::empty(), &mut prev));
+        assert!(!capslock_is_down(CGEventFlags::empty(), &mut prev));
     }
 
     /// A usage that is neither a held modifier nor CapsLock is not mappable
@@ -378,5 +606,139 @@ mod tests {
             flags_changed_state(HidUsage::A, CGEventFlags::empty()),
             None
         );
+    }
+
+    /// A bare key (no modifiers) echoes as a down/up pair.
+    #[test]
+    fn echo_bare_key_sequence() {
+        let mut tracker = EchoTracker::new();
+        let now = Instant::now();
+        tracker.record(
+            &[NativeKey {
+                modifiers: 0,
+                usage: HidUsage::A,
+            }],
+            now,
+        );
+
+        assert!(tracker.matches(HidUsage::A, true, now));
+        assert!(tracker.matches(HidUsage::A, false, now));
+        // The queue is now empty.
+        assert!(!tracker.matches(HidUsage::A, true, now));
+    }
+
+    /// A chord (modifier + base key) echoes in the canonical order: modifier
+    /// down, base down, base up, modifier up.
+    #[test]
+    fn echo_chord_order() {
+        let mut tracker = EchoTracker::new();
+        let now = Instant::now();
+        tracker.record(
+            &[NativeKey {
+                modifiers: 0x08,
+                usage: HidUsage::T,
+            }], // LeftCommand + T
+            now,
+        );
+
+        assert!(tracker.matches(HidUsage::LeftCommand, true, now));
+        assert!(tracker.matches(HidUsage::T, true, now));
+        assert!(tracker.matches(HidUsage::T, false, now));
+        assert!(tracker.matches(HidUsage::LeftCommand, false, now));
+        // The queue is now empty.
+        assert!(!tracker.matches(HidUsage::T, true, now));
+    }
+
+    /// An entry older than the echo window expires and is dropped from the
+    /// front, so it no longer matches.
+    #[test]
+    fn echo_stale_expiry() {
+        let mut tracker = EchoTracker::new();
+        let now = Instant::now();
+        tracker.record(
+            &[NativeKey {
+                modifiers: 0,
+                usage: HidUsage::A,
+            }],
+            now,
+        );
+
+        // Within the window: the down matches.
+        assert!(tracker.matches(
+            HidUsage::A,
+            true,
+            now + Duration::from_millis(100)
+        ));
+        // The up is still pending.  Advance past the window: it expires.
+        assert!(!tracker.matches(
+            HidUsage::A,
+            false,
+            now + Duration::from_millis(600)
+        ));
+        // The queue is now empty.
+        assert!(!tracker.matches(
+            HidUsage::A,
+            false,
+            now + Duration::from_millis(600)
+        ));
+    }
+
+    /// A mismatch does not consume the head, so the echo still matches when it
+    /// arrives (an interleaved user event passes to the engine).
+    #[test]
+    fn echo_mismatch_does_not_consume() {
+        let mut tracker = EchoTracker::new();
+        let now = Instant::now();
+        tracker.record(
+            &[NativeKey {
+                modifiers: 0,
+                usage: HidUsage::A,
+            }],
+            now,
+        );
+
+        // A different key does not match and does not consume.
+        assert!(!tracker.matches(HidUsage::B, true, now));
+        // The echo still matches.
+        assert!(tracker.matches(HidUsage::A, true, now));
+        assert!(tracker.matches(HidUsage::A, false, now));
+    }
+
+    /// A consumer-page output never re-enters the tap as a keyboard event, so
+    /// no echo is recorded for it.
+    #[test]
+    fn echo_consumer_output_no_echo() {
+        let mut tracker = EchoTracker::new();
+        let now = Instant::now();
+        tracker.record(
+            &[NativeKey {
+                modifiers: 0,
+                usage: HidUsage::PlayPause,
+            }],
+            now,
+        );
+
+        // The queue is empty: no echo was recorded.
+        assert!(!tracker.matches(HidUsage::PlayPause, true, now));
+    }
+
+    /// A modifier key used as the base (no output modifiers) echoes as a
+    /// down/up pair of that modifier.
+    #[test]
+    fn echo_modifier_base_output() {
+        let mut tracker = EchoTracker::new();
+        let now = Instant::now();
+        tracker.record(
+            &[NativeKey {
+                modifiers: 0,
+                usage: HidUsage::LeftControl,
+            }],
+            now,
+        );
+
+        assert!(tracker.matches(HidUsage::LeftControl, true, now));
+        assert!(tracker.matches(HidUsage::LeftControl, false, now));
+        // The queue is now empty.
+        assert!(!tracker.matches(HidUsage::LeftControl, true, now));
     }
 }

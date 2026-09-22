@@ -1236,7 +1236,7 @@ mod tests {
                 .copied()
                 .collect::<HashSet<_>>(),
             HashSet::from([
-                HidUsage::CapsLock,
+                HidUsage::RightAlt,
                 HidUsage::X,
                 HidUsage::A,
                 HidUsage::D,

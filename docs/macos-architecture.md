@@ -47,6 +47,12 @@ The Karabiner daemon is registered as a LaunchDaemon (`/Library/LaunchDaemons/or
 
 virtkbdd has no configuration of its own; all mapping logic lives in keymapperd.
 
+### Self-exclusion (echo filtering)
+
+Because the DriverKit virtual keyboard is a hardware-level device, the keys it emits re-enter the HID pipeline and are re-received by keymapperd's own `CGEventTap`. Left unchecked, a mapped key's echo would be re-decided by the engine: `Escape: Cmd+T` would fire on the echo of an earlier `RightControl: Escape`, and cyclic rules (`A: B` + `B: A`) would emit forever.
+
+CGEvents expose no originating device or source (unlike Windows's `dwExtraInfo` tag or Linux's uinput device name), so the echo cannot be identified directly. Instead, keymapperd predicts it: on each emission it records the `(usage, is_down)` sequence the virtual keyboard will produce (modifier downs ascending, base down/up, modifier ups descending — the emission report order), and the tap callback passes a matching event through without re-deciding it. The echo is the emitted key's only delivery to the application, so it must reach the app — only the engine decision is skipped. Predictions expire after 500 ms, and a mismatch never consumes one, so an interleaved physical key still reaches the engine and the echo matches when it arrives.
+
 ### IPC between the two processes
 
 keymapperd and virtkbdd communicate over a UNIX stream socket at `/var/run/virtkbdd/keymapperd.sock`. The directory is created with mode 0755; the socket itself is chowned to the console user's UID and has mode 0600.
@@ -258,6 +264,7 @@ Mappings resume as soon as keymapperd reconnects — there is no need to restart
 
 - **Keyboard filtering is disabled on macOS.** CGEvents do not expose the originating device's location ID, so lookups pass `device_id = None` and global and per-rule `keyboards:` filters are skipped.
 - **Modifier-trigger semantics.** Trigger modifiers pass through natively, but the application does not union modifier state across devices: a virtual-keyboard output arrives clean even while a physical modifier is still held, so `Shift+Backspace → Delete` produces a plain `Delete` (verified empirically against the DriverKit virtual keyboard).
+- **Echo filtering is best-effort.** CGEvents expose no source, so the tap matches an emitted key's echo on its predicted `(usage, is_down)` sequence rather than identifying it. A physical key that coincides with an echo within the 500 ms window may pass through unmapped, and a modifier the user holds can coalesce with an echo's modifier state so some entries leak to the engine. Both degrade gracefully to the unfiltered behavior and are vanishingly rare.
 - **Held remapped modifiers are unsupported.** An output whose base is a modifier key (e.g. `CapsLock: LeftControl`) is tapped, not held: the virtual keyboard releases it immediately, so the remapped modifier does not modify subsequent physical keys (the virtual keyboard's modifier state is isolated from physical typing). Rule matching still sees the remapped modifier as held while the physical key is down, consistent with the other platforms.
 - **Consumer-page (media) keys pass through** and cannot be triggers.
 - **Auto-repeat of mapped keys is swallowed.** One virtual-keyboard tap per physical press.
