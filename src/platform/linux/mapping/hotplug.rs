@@ -285,7 +285,7 @@ fn handle_device_add(
     let mut managed = ManagedDevice {
         device,
         path: kb.device.clone(),
-        engine: MappingEngine::new(Arc::clone(&lookup)),
+        engine: MappingEngine::new(Arc::clone(lookup)),
         pending_scan: None,
         // The hot-plug thread cannot reach the virtual device, so the event
         // loop re-emits the held modifiers' key-downs on the device's first
