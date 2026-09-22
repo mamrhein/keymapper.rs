@@ -44,7 +44,7 @@ use windows::{
             Pipes::{
                 ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
                 NAMED_PIPE_MODE, PIPE_READMODE_BYTE,
-                PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+                PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, WaitNamedPipeW,
             },
             Threading::{GetCurrentProcess, OpenProcessToken},
         },
@@ -77,6 +77,13 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 /// The `ERROR_PIPE_BUSY` code: the daemon exists but is serving a client.
 const ERROR_PIPE_BUSY: i32 = 231;
 
+/// How long a client keeps waiting for the daemon's single pipe instance to
+/// be released. The serve loop disconnects within microseconds of the
+/// previous client's close, so this only matters under load or for a
+/// misbehaving peer that never closes; 2 s is a comfortable upper bound.
+const BUSY_RETRY_ATTEMPTS: u32 = 20;
+const BUSY_RETRY_WAIT_MS: u32 = 100;
+
 /// A named-pipe handle owned by the control-socket thread.
 ///
 /// `HANDLE` is a raw pointer and therefore neither `Send` nor `Sync`, but the
@@ -92,13 +99,48 @@ struct PipeHandle(HANDLE);
 // shared between threads again.
 unsafe impl Send for PipeHandle {}
 
-/// A named-pipe handle as a `Read`/`Write` stream.
+/// A named-pipe handle as a `Read`/`Write` stream (server side).
 ///
 /// `ReadFile`/`WriteFile` on a synchronous byte-mode pipe block until data is
 /// available, so a peer close surfaces as `ERROR_BROKEN_PIPE` (mapped to EOF)
 /// or an I/O error.
 struct Pipe {
     handle: PipeHandle,
+}
+
+/// A client-side pipe connection.
+///
+/// Closes its handle on drop. The daemon serves one connection at a time on a
+/// single pipe instance and releases the instance only after the client end
+/// closes (see `wait_for_client_close`), so a handle that outlived the
+/// exchange would keep the instance connected and every later `CreateFileW`
+/// would fail with `ERROR_PIPE_BUSY` until the client process exits.
+struct ClientPipe {
+    inner: Pipe,
+}
+
+impl Read for ClientPipe {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Write for ClientPipe {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl Drop for ClientPipe {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.inner.handle.0);
+        }
+    }
 }
 
 impl Read for Pipe {
@@ -295,6 +337,11 @@ fn to_wide(name: &str) -> Vec<u16> {
 
 /// Create the pipe and spawn the serve thread.
 pub fn start() {
+    start_with_name(PIPE_NAME)
+}
+
+/// Create the pipe at *name* and spawn the serve thread.
+fn start_with_name(name: &str) {
     let Some(sid) = current_user_sid() else {
         warn!(
             "Could not resolve the current user's SID; runtime log-level \
@@ -314,10 +361,10 @@ pub fn start() {
     // `current_user_sid`). `desc` (and its ACL) stays alive across the
     // `CreateNamedPipeW` call, which copies the descriptor.
 
-    let name = to_wide(PIPE_NAME);
+    let wide_name = to_wide(name);
     let pipe = unsafe {
         CreateNamedPipeW(
-            PCWSTR(name.as_ptr()),
+            PCWSTR(wide_name.as_ptr()),
             FILE_FLAGS_AND_ATTRIBUTES(
                 PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
             ),
@@ -338,13 +385,13 @@ pub fn start() {
     if pipe.is_invalid() {
         let code = unsafe { GetLastError() };
         warn!(
-            "Could not create the control pipe {PIPE_NAME} (error {:#010x}); \
+            "Could not create the control pipe {name} (error {:#010x}); \
              runtime log-level control is disabled",
             code.0
         );
         return;
     }
-    info!("Control socket listening on {PIPE_NAME}");
+    info!("Control socket listening on {name}");
 
     let handle = PipeHandle(pipe);
     if let Err(e) = std::thread::Builder::new()
@@ -406,7 +453,45 @@ fn wait_for_client_close(conn: &mut Pipe) {
 
 /// Open the control pipe as a client.
 pub(super) fn connect() -> std::io::Result<Box<dyn IoStream>> {
-    let name = to_wide(PIPE_NAME);
+    connect_to(PIPE_NAME)
+}
+
+/// Open the pipe at *name* as a client.
+///
+/// The daemon serves one connection at a time on a single pipe instance and
+/// releases it only after the previous client's end closed, so an open can
+/// land in the tiny window between that close and the daemon's
+/// `DisconnectNamedPipe` and fail with `ERROR_PIPE_BUSY`.  `WaitNamedPipeW`
+/// blocks until the instance is free again, then the open is retried.
+fn connect_to(name: &str) -> std::io::Result<Box<dyn IoStream>> {
+    let name = to_wide(name);
+    let mut last_busy = None;
+    for _ in 0..BUSY_RETRY_ATTEMPTS {
+        match open_pipe(&name) {
+            Ok(handle) => {
+                return Ok(Box::new(ClientPipe {
+                    inner: Pipe {
+                        handle: PipeHandle(handle),
+                    },
+                }));
+            }
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                last_busy = Some(e);
+                unsafe {
+                    let _ = WaitNamedPipeW(
+                        PCWSTR(name.as_ptr()),
+                        BUSY_RETRY_WAIT_MS,
+                    );
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_busy.expect("the loop exits only on a busy open"))
+}
+
+/// One attempt to open the pipe at *name*.
+fn open_pipe(name: &[u16]) -> std::io::Result<HANDLE> {
     let handle = match unsafe {
         CreateFileW(
             PCWSTR(name.as_ptr()),
@@ -424,9 +509,7 @@ pub(super) fn connect() -> std::io::Result<Box<dyn IoStream>> {
             return Err(std::io::Error::from_raw_os_error(code.0 as i32));
         }
     };
-    Ok(Box::new(Pipe {
-        handle: PipeHandle(handle),
-    }))
+    Ok(handle)
 }
 
 /// Convert a failed client connection into a friendly message for the CLI.
@@ -439,5 +522,84 @@ pub(super) fn connect_error(e: &std::io::Error) -> String {
             "the daemon control pipe is busy; try again".to_string()
         }
         _ => e.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        super::{read_frame, write_frame},
+        *,
+    };
+
+    /// The client must close its handle on drop, so the daemon's single pipe
+    /// instance is released for the next connection.  Before the fix the
+    /// handle leaked until process exit: a long-lived client (the e2e
+    /// harness) kept the instance connected after its probe exchange, and the
+    /// phase's `SET-LOG-LEVEL` connect failed with `ERROR_PIPE_BUSY`.  With
+    /// the leak back, the second connect's busy retries would all time out
+    /// and the test would fail.
+    ///
+    /// The serve thread is intentionally left running; it dies with the test
+    /// process.
+    #[test]
+    fn client_drop_frees_the_pipe_instance() {
+        let name =
+            format!("\\\\.\\pipe\\keymapperd_repro_{}", std::process::id());
+        // No security descriptor: the owner-only DACL only decides who may
+        // connect and is orthogonal to the close-on-drop behaviour pinned
+        // here, while it fails to create in the test process context.
+        let wide_name = to_wide(&name);
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide_name.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(
+                    PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
+                ),
+                NAMED_PIPE_MODE(
+                    PIPE_TYPE_BYTE.0
+                        | PIPE_READMODE_BYTE.0
+                        | PIPE_REJECT_REMOTE_CLIENTS.0,
+                ),
+                1,
+                PIPE_BUFFER,
+                PIPE_BUFFER,
+                0,
+                None,
+            )
+        };
+        assert!(
+            !pipe.is_invalid(),
+            "CreateNamedPipeW failed: {:?}",
+            std::io::Error::last_os_error()
+        );
+        let handle = PipeHandle(pipe);
+        std::thread::Builder::new()
+            .name("control-socket".into())
+            .spawn(move || serve(handle))
+            .expect("failed to spawn the serve thread");
+
+        // First exchange (like the e2e probe): connect, round-trip a frame,
+        // and drop the connection.
+        let mut first = connect_to(&name).expect("the first connect failed");
+        write_frame(&mut first, "SET-LOG-LEVEL info")
+            .expect("the first write failed");
+        let reply = read_frame(&mut first).expect("the first read failed");
+        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+        drop(first);
+
+        // Second exchange from the same process (like the e2e phase): this
+        // only succeeds if dropping the first connection closed its handle
+        // and the serve loop disconnected the instance.
+        let mut second =
+            connect_to(&name).expect("the pipe instance was not released");
+        write_frame(&mut second, "SET-LOG-LEVEL info")
+            .expect("the second write failed");
+        let reply = read_frame(&mut second).expect("the second read failed");
+        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
     }
 }
