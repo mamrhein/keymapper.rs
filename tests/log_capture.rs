@@ -98,8 +98,8 @@ enum Target {
 /// The file is re-opened on every read, and truncation or rotation is
 /// detected defensively: when the resolved file changed, or shrank below a
 /// mark's offset, all marks reset to the start of the (new) file.  A missing
-/// file yields no lines rather than an error, because the daemon may not
-/// have created it yet.
+/// file or log directory yields no lines rather than an error, because the
+/// daemon may not have created them yet.
 pub struct FileLogSource {
     /// Where the current log file lives.
     target: Target,
@@ -144,7 +144,16 @@ impl FileLogSource {
                 let base = format!("{stem}.log");
                 let prefix = format!("{stem}-");
                 let mut newest: Option<(PathBuf, SystemTime)> = None;
-                for entry in fs_err::read_dir(dir)? {
+                // The daemon creates the log directory itself at startup, so
+                // a missing one means "no log file yet", not an error.
+                let entries = match fs_err::read_dir(dir) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                for entry in entries {
                     let entry = entry?;
                     let name =
                         entry.file_name().to_string_lossy().into_owned();
@@ -487,6 +496,22 @@ mod tests {
         assert_eq!(source.read_new(mark).unwrap(), Vec::<String>::new());
 
         append(&path, b"first\n");
+        assert_eq!(source.read_new(mark).unwrap(), vec!["first"]);
+    }
+
+    #[test]
+    fn mark_before_log_dir_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        // Point the source at a directory that does not exist yet.
+        let missing = dir.path().join("logs");
+        let mut source = FileLogSource::rotated(&missing, "keymapperd");
+
+        let mark = source.mark().unwrap();
+        assert_eq!(source.read_new(mark).unwrap(), Vec::<String>::new());
+
+        // The daemon creates the directory and its log file.
+        std::fs::create_dir_all(&missing).unwrap();
+        append(&missing.join("keymapperd.log"), b"first\n");
         assert_eq!(source.read_new(mark).unwrap(), vec!["first"]);
     }
 
