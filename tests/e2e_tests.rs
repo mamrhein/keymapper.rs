@@ -504,7 +504,7 @@ impl DaemonChild {
         {
             let file = fs_err::File::create(&stderr_path)
                 .expect("failed to create the daemon's stderr file");
-            cmd.stderr(Stdio::from(file));
+            cmd.stderr(file.into_file());
         }
         #[cfg(not(target_os = "linux"))]
         {
