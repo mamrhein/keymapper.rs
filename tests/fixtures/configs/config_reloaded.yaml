@@ -6,6 +6,6 @@
 
 - name: "global mappings (reloaded)"
   mappings:
-    CapsLock: Escape
+    RightControl: Escape
     A: C
     Escape: Cmd+T

@@ -3,12 +3,12 @@
 # Global rules only: the e2e harness (first iteration) cannot control which
 # app is active, so app-scoped groups are not supported.  The rules exercise
 # single-key remaps, chord outputs (Escape -> Cmd+A), modifier triggers
-# (Ctrl+Semicolon -> C), and a modifier->modifier remap (CapsLock ->
+# (Ctrl+Semicolon -> C), and a modifier->modifier remap (RightOption ->
 # LeftControl, observed through the harness's chord probe key).
 
 - name: "global mappings"
   mappings:
-    CapsLock: LeftControl
+    RightOption: LeftControl
     A: B
     Escape: Cmd+A
     Ctrl+Semicolon: C
