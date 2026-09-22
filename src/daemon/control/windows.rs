@@ -29,11 +29,11 @@ use windows::{
             HANDLE,
         },
         Security::{
-            ACL, ACL_REVISION, AddAccessAllowedAce, FreeSid, GetLengthSid,
+            ACL, ACL_REVISION, AddAccessAllowedAce, GetLengthSid,
             GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
             PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-            SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_USER,
-            TokenUser,
+            SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_QUERY,
+            TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -46,7 +46,7 @@ use windows::{
                 NAMED_PIPE_MODE, PIPE_READMODE_BYTE,
                 PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
             },
-            Threading::{GetCurrentProcess, OpenProcessToken, TOKEN_QUERY},
+            Threading::{GetCurrentProcess, OpenProcessToken},
         },
     },
     core::PCWSTR,
@@ -77,13 +77,28 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 /// The `ERROR_PIPE_BUSY` code: the daemon exists but is serving a client.
 const ERROR_PIPE_BUSY: i32 = 231;
 
+/// A named-pipe handle owned by the control-socket thread.
+///
+/// `HANDLE` is a raw pointer and therefore neither `Send` nor `Sync`, but the
+/// pipe is created on the caller thread and served exclusively by the
+/// `control-socket` thread, so moving it across the thread boundary is safe.
+///
+/// Copying it only duplicates the pointer value (the same OS handle is reused
+/// for every connection), so it can be `Copy`.
+#[derive(Clone, Copy)]
+struct PipeHandle(HANDLE);
+
+// SAFETY: each `PipeHandle` is moved into the control-socket thread and never
+// shared between threads again.
+unsafe impl Send for PipeHandle {}
+
 /// A named-pipe handle as a `Read`/`Write` stream.
 ///
 /// `ReadFile`/`WriteFile` on a synchronous byte-mode pipe block until data is
 /// available, so a peer close surfaces as `ERROR_BROKEN_PIPE` (mapped to EOF)
 /// or an I/O error.
 struct Pipe {
-    handle: HANDLE,
+    handle: PipeHandle,
 }
 
 impl Read for Pipe {
@@ -94,7 +109,7 @@ impl Read for Pipe {
         let mut bytes_read = 0u32;
         match unsafe {
             ReadFile(
-                self.handle,
+                self.handle.0,
                 Some(buf),
                 Some(&mut bytes_read as *mut _),
                 None,
@@ -116,7 +131,7 @@ impl Write for Pipe {
         let mut bytes_written = 0u32;
         match unsafe {
             WriteFile(
-                self.handle,
+                self.handle.0,
                 Some(buf),
                 Some(&mut bytes_written as *mut _),
                 None,
@@ -139,11 +154,21 @@ impl Write for Pipe {
 struct OwnerOnlyDescriptor {
     attrs: SECURITY_ATTRIBUTES,
     sd: SECURITY_DESCRIPTOR,
+    /// Never read; the field only keeps the buffer alive because the
+    /// descriptor's DACL points into it.
+    #[allow(dead_code)]
     acl: Vec<u8>,
 }
 
-/// The caller's primary SID, from the current process token.
-fn current_user_sid() -> Option<PSID> {
+/// The caller's primary SID, from the current process token, owned by the
+/// caller as a byte buffer.
+///
+/// `GetTokenInformation` writes the SID *inside* the caller's buffer (the
+/// `TOKEN_USER` pointer lands just past its 8-byte header), so the bytes are
+/// copied out into a `Vec<u8>`. The SID must never be passed to `FreeSid`: it
+/// is not a system-allocated SID object, and freeing a mid-allocation pointer
+/// corrupts the heap.
+fn current_user_sid() -> Option<Vec<u8>> {
     unsafe {
         let process = GetCurrentProcess();
         let mut token = HANDLE::default();
@@ -179,25 +204,29 @@ fn current_user_sid() -> Option<PSID> {
             return None;
         }
 
-        // Copy the `TOKEN_USER` out of the scratch buffer; the `Sid` it holds
-        // is owned by the system and must be freed with `FreeSid` (by the
-        // caller, once the ACE has copied its bytes into the ACL).
+        // Copy the SID bytes out of the scratch buffer before it drops.
         let token_user: TOKEN_USER =
             core::ptr::read_unaligned(buffer.as_ptr() as *const TOKEN_USER);
-        let sid = token_user.User.Sid;
-        if sid.0.is_null() { None } else { Some(sid) }
+        let sid_ptr = token_user.User.Sid.0;
+        if sid_ptr.is_null() {
+            return None;
+        }
+        let sid_len = GetLengthSid(PSID(sid_ptr)) as usize;
+        Some(
+            std::slice::from_raw_parts(sid_ptr as *const u8, sid_len).to_vec(),
+        )
     }
 }
 
-/// Build an owner-only descriptor granting *sid* full control of the pipe.
+/// Build an owner-only descriptor granting the SID in *sid* full control of
+/// the pipe.
 ///
 /// Returns `None` when the ACL or descriptor cannot be built (in which case
 /// the pipe is not created, so it is never exposed with weaker-than-owner-only
 /// security).
-fn owner_only_descriptor(sid: PSID) -> Option<OwnerOnlyDescriptor> {
-    let sid_len = unsafe { GetLengthSid(sid) } as usize;
+fn owner_only_descriptor(sid: &[u8]) -> Option<OwnerOnlyDescriptor> {
     // Real layout: 10-byte ACL header + one 16-byte ACE + the SID bytes.
-    let acl_size = ACL_HEADER_BYTES + ACE_BYTES + sid_len;
+    let acl_size = ACL_HEADER_BYTES + ACE_BYTES + sid.len();
     let mut acl = vec![0u8; acl_size];
     let acl_ptr = acl.as_mut_ptr() as *mut ACL;
 
@@ -207,14 +236,21 @@ fn owner_only_descriptor(sid: PSID) -> Option<OwnerOnlyDescriptor> {
         return None;
     }
     if unsafe {
-        AddAccessAllowedAce(acl_ptr, ACL_REVISION, GENERIC_ALL.0, sid)
+        AddAccessAllowedAce(
+            acl_ptr,
+            ACL_REVISION,
+            GENERIC_ALL.0,
+            PSID(sid.as_ptr() as *mut _),
+        )
     }
     .is_err()
     {
         return None;
     }
 
-    let mut sd: SECURITY_DESCRIPTOR = core::mem::zeroed();
+    // `mem::zeroed` on a struct containing raw pointers is unsafe on Rust
+    // 2024; the descriptor is fully initialised by the calls below.
+    let sd: SECURITY_DESCRIPTOR = unsafe { core::mem::zeroed() };
     // Two-step cast: a reference may only become a raw pointer of its own type
     // in a single step, so route through `*mut SECURITY_DESCRIPTOR` first.
     let sd_ptr = PSECURITY_DESCRIPTOR(
@@ -266,22 +302,17 @@ pub fn start() {
         );
         return;
     };
-    let Some(desc) = owner_only_descriptor(sid) else {
+    let Some(desc) = owner_only_descriptor(&sid) else {
         warn!(
             "Could not build an owner-only pipe security descriptor; runtime \
              log-level control is disabled"
         );
-        unsafe {
-            FreeSid(sid);
-        }
         return;
     };
-    // The ACE copied the SID bytes into the ACL, so the token's SID can be
-    // freed now; `desc` (and its ACL) stay alive across the `CreateNamedPipeW`
-    // call, which copies the descriptor.
-    unsafe {
-        FreeSid(sid);
-    }
+    // The ACE copied the SID bytes into the ACL, so the owned buffer only
+    // needs to drop when this function returns (never `FreeSid`; see
+    // `current_user_sid`). `desc` (and its ACL) stays alive across the
+    // `CreateNamedPipeW` call, which copies the descriptor.
 
     let name = to_wide(PIPE_NAME);
     let pipe = unsafe {
@@ -315,30 +346,60 @@ pub fn start() {
     }
     info!("Control socket listening on {PIPE_NAME}");
 
+    let handle = PipeHandle(pipe);
     if let Err(e) = std::thread::Builder::new()
         .name("control-socket".into())
-        .spawn(move || serve(pipe))
+        .spawn(move || serve(handle))
     {
         warn!("Failed to spawn the control-socket thread: {e}");
     }
 }
 
 /// Serve connections on a single pipe instance: connect, handle one command,
-/// disconnect, repeat.
-fn serve(handle: HANDLE) {
+/// wait for the client to close, disconnect, repeat.
+fn serve(handle: PipeHandle) {
     loop {
         // With no default timeout, `ConnectNamedPipe` blocks until a client
         // connects; if one is already waiting it returns
         // `ERROR_PIPE_CONNECTED`, which we treat as a success.
         unsafe {
-            let _ = ConnectNamedPipe(handle, None);
+            let _ = ConnectNamedPipe(handle.0, None);
         }
         let mut conn = Pipe { handle };
         if let Err(e) = handle_connection(&mut conn) {
             debug!("control-socket connection ended: {e}");
+        } else {
+            // The response sits in the pipe buffer; the client reads it at
+            // its own pace and closes afterwards.  Wait for that close
+            // before disconnecting, because `DisconnectNamedPipe` resets
+            // the instance and discards any unread data — disconnecting
+            // first would make the client's read fail with
+            // `ERROR_PIPE_NOT_CONNECTED`.
+            wait_for_client_close(&mut conn);
         }
         unsafe {
-            let _ = DisconnectNamedPipe(handle);
+            let _ = DisconnectNamedPipe(conn.handle.0);
+        }
+    }
+}
+
+/// Block until the client closes its end of the pipe.
+///
+/// After a successful exchange the client writes nothing more; the read
+/// therefore stays pending until the peer goes away.  A peer close surfaces
+/// as `ERROR_BROKEN_PIPE`, which [`Pipe::read`] maps to `Ok(0)` (EOF), so a
+/// zero-length read is the close signal and ends the wait.
+fn wait_for_client_close(conn: &mut Pipe) {
+    let mut buf = [0u8; 64];
+    loop {
+        match conn.read(&mut buf) {
+            // The client closed; the response has been consumed.
+            Ok(0) => break,
+            // Ignore stray data; keep waiting for the close.
+            Ok(_) => {}
+            // Any error means the peer is gone (or the pipe is unusable);
+            // either way there is nothing more to wait for.
+            Err(_) => break,
         }
     }
 }
@@ -363,7 +424,9 @@ pub(super) fn connect() -> std::io::Result<Box<dyn IoStream>> {
             return Err(std::io::Error::from_raw_os_error(code.0 as i32));
         }
     };
-    Ok(Box::new(Pipe { handle }))
+    Ok(Box::new(Pipe {
+        handle: PipeHandle(handle),
+    }))
 }
 
 /// Convert a failed client connection into a friendly message for the CLI.

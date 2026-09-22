@@ -28,7 +28,10 @@ use udev::{Enumerator, MonitorBuilder};
 
 use super::{
     VIRTUAL_KEYBOARD_NAME,
-    device::{ManagedDevice, capture_held_keys, drain_pending_events},
+    device::{
+        ManagedDevice, capture_held_keys, drain_pending_events,
+        native_release_window,
+    },
     epoll::{epoll_add, epoll_del},
 };
 use crate::{
@@ -276,7 +279,7 @@ fn handle_device_add(
     // Same as at startup: grabbing does not flush the kernel's event ring,
     // so drop anything buffered before the grab to keep the adopted
     // device's stream clean.
-    drain_pending_events(&mut device, &kb.device);
+    let drained = drain_pending_events(&mut device, &kb.device);
 
     let fd = device.as_raw_fd();
     let mut managed = ManagedDevice {
@@ -293,7 +296,10 @@ fn handle_device_add(
     // Same as at startup: capture the held keys at the grab instant, so a
     // key released before the event loop starts does not leak its
     // auto-repeat tail into the virtual device.
-    capture_held_keys(&mut managed);
+    let held_at_grab = capture_held_keys(&mut managed);
+    // Same as at startup: let grab-time releases flow natively to the
+    // compositor before the device joins the event loop.
+    native_release_window(&mut managed, held_at_grab, drained > 0);
 
     // Register with managed devices.
     {
