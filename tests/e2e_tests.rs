@@ -812,7 +812,33 @@ fn kill_orphaned_daemons() {
     }
 }
 
-#[cfg(not(unix))]
+/// Terminate any `keymapperd` process left over from a previous, interrupted
+/// run.  Windows has no `pgrep`, so we reuse the cli's own process lookup
+/// (`daemon_cmd`), which enumerates and hard-stops every `keymapperd` by image
+/// name.  Unlike the unix path this also waits for the processes to actually
+/// exit: the daemon owns the single-instance control pipe, and a zombie whose
+/// pipe handle has not yet been released would prevent the daemon we spawn
+/// next from binding it.
+#[cfg(target_os = "windows")]
+fn kill_orphaned_daemons() {
+    if !daemon_cmd::is_running() {
+        return;
+    }
+    eprintln!("killing stale keymapperd from a previous run");
+    if let Err(e) = daemon_cmd::stop() {
+        eprintln!("warning: failed to kill stale keymapperd: {e}");
+    }
+    // Wait (up to 5 s) for the processes to exit and release the control
+    // pipe before we spawn our own daemon.
+    for _ in 0..50 {
+        if !daemon_cmd::is_running() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn kill_orphaned_daemons() {}
 
 // ---------------------------------------------------------------------------
@@ -940,6 +966,16 @@ fn run_e2e_ci(phases: &[Option<&Path>], label: &str) {
     let mut daemon = DaemonChild::spawn(&config_dir());
     let mut source = daemon.log_source();
     wait_for_readiness(&mut source, &mut daemon);
+    // The readiness wait returns as soon as the line is seen, without a final
+    // liveness probe, so a daemon that exits in the gap between logging
+    // readiness and its first control call would otherwise surface as a
+    // confusing "no daemon is running" error.  Fail fast with the real cause.
+    if daemon.poll_exit() {
+        panic!(
+            "the daemon exited right after logging readiness; inspect the \
+             daemon's log"
+        );
+    }
 
     // 4. For each phase: hot-reload the config first (later phases) and wait
     //    for the daemon's hot-swap line, raise the log level to debug, inject
