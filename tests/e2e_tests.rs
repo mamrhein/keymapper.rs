@@ -1224,11 +1224,9 @@ mod tests {
 
         assert_eq!(
             sequences.model.emits,
-            vec!["LeftControl", "B", "LeftCommand+A", "C"]
+            vec!["RightShift", "B", "LeftCommand+A", "C"]
         );
 
-        // LeftControl is both an emitted output (the chord) and a passthrough
-        // trigger modifier; the dedupe keeps it exactly once.
         assert_eq!(
             sequences
                 .model
@@ -1255,7 +1253,7 @@ mod tests {
                 .copied()
                 .collect::<HashSet<_>>(),
             HashSet::from([
-                HidUsage::RightAlt,
+                HidUsage::RightControl,
                 HidUsage::X,
                 HidUsage::A,
                 HidUsage::D,
