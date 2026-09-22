@@ -187,10 +187,15 @@ impl FileLogSource {
         }
     }
 
-    /// Adopt *path* as the current file, invalidating stored offsets.
+    /// Adopt *path* as the current file.  The stored offsets refer to the
+    /// previous file, so every mark resets to the start of the new one
+    /// rather than being dropped (live marks must stay valid across a
+    /// rotation or the file appearing for the first time).
     fn adopt(&mut self, path: Option<PathBuf>) {
         if path != self.current {
-            self.positions.clear();
+            for pos in self.positions.values_mut() {
+                *pos = 0;
+            }
             self.current = path;
         }
     }
@@ -233,8 +238,9 @@ impl LogSource for FileLogSource {
         };
         if size < pos {
             // Truncation or in-place rotation: every mark is stale.
-            self.positions.clear();
-            self.positions.insert(mark, 0);
+            for p in self.positions.values_mut() {
+                *p = 0;
+            }
             pos = 0;
         }
         if size == pos {
@@ -513,6 +519,49 @@ mod tests {
         std::fs::create_dir_all(&missing).unwrap();
         append(&missing.join("keymapperd.log"), b"first\n");
         assert_eq!(source.read_new(mark).unwrap(), vec!["first"]);
+    }
+
+    #[test]
+    fn mark_survives_file_appearing_with_partial_line() {
+        let dir = tempfile::tempdir().unwrap();
+        // Point the source at a directory that does not exist yet.
+        let missing = dir.path().join("logs");
+        let mut source = FileLogSource::rotated(&missing, "keymapperd");
+
+        let mark = source.mark().unwrap();
+        assert_eq!(source.read_new(mark).unwrap(), Vec::<String>::new());
+
+        // The daemon creates the log file and writes a line that is not
+        // terminated yet.
+        std::fs::create_dir_all(&missing).unwrap();
+        append(&missing.join("keymapperd.log"), b"partial");
+
+        assert_eq!(source.read_new(mark).unwrap(), Vec::<String>::new());
+        append(&missing.join("keymapperd.log"), b" line\n");
+        assert_eq!(source.read_new(mark).unwrap(), vec!["partial line"]);
+    }
+
+    #[test]
+    fn older_marks_survive_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = FileLogSource::rotated(dir.path(), "keymapperd");
+
+        let base = dir.path().join("keymapperd.log");
+        append(&base, b"old\n");
+        let mark1 = source.mark().unwrap();
+
+        // The daemon rotated to a dated sibling (created later, so its mtime
+        // is newer).
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let rotated = dir.path().join("keymapperd-20260921.log");
+        append(&rotated, b"new\n");
+
+        // A mark taken after the rotation must not invalidate the older one.
+        let mark2 = source.mark().unwrap();
+
+        // The pre-rotation mark reads from the start of the new file.
+        assert_eq!(source.read_new(mark1).unwrap(), vec!["new"]);
+        assert_eq!(source.read_new(mark2).unwrap(), Vec::<String>::new());
     }
 
     #[test]
