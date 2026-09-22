@@ -691,10 +691,14 @@ fn wait_for_readiness(
     .unwrap_or_else(|e| panic!("the daemon did not become ready: {e}"));
 }
 
-/// Collect the phase's log window: poll until at least *expected_emits* emit
-/// lines have appeared, then keep reading until the stream is quiescent (no
-/// new lines for 500 ms) so unexpected extras are captured in the window
-/// instead of leaking into the next phase.
+/// Collect the phase's log window: poll until the expected emits have
+/// appeared and at least one key event or emit has been flushed, then keep
+/// reading until the stream is quiescent (no new lines for 500 ms) so
+/// unexpected extras are captured in the window instead of leaking into the
+/// next phase.  The daemon logs through an async sink, so the file can lag
+/// the injection; waiting for the first key event (not just the emit count)
+/// keeps the window from being taken before the sink has written the phase's
+/// key events, which is the only sync point a phase with no emits has.
 ///
 /// *exited* reports whether the daemon has exited; it is probed only while
 /// the stream is silent, because it may be expensive (local mode shells out
@@ -707,6 +711,11 @@ fn collect_window(
 ) -> Result<Vec<String>, String> {
     let mut window: Vec<String> = Vec::new();
     let mut emit_count = 0usize;
+    // Whether a line the phase depends on (a key event or an emit) has been
+    // seen. The daemon logs through an async sink, so the file can lag the
+    // injection; without this the first loop breaks before the sink writes
+    // the key events, leaving the window empty for a phase with no emits.
+    let mut saw_key_activity = false;
 
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -714,10 +723,14 @@ fn collect_window(
         let silent = lines.is_empty();
         if !silent {
             let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-            emit_count += log_verify::parse_lines(&refs).emits.len();
+            let parsed = log_verify::parse_lines(&refs);
+            emit_count += parsed.emits.len();
+            if !parsed.key_events.is_empty() || !parsed.emits.is_empty() {
+                saw_key_activity = true;
+            }
             window.extend(lines);
         }
-        if emit_count >= expected_emits.len() {
+        if emit_count >= expected_emits.len() && saw_key_activity {
             break;
         }
         if silent && exited() {
@@ -729,9 +742,15 @@ fn collect_window(
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "timed out after 15 s waiting for {} emit lines; got {}",
+                "timed out after 15 s collecting the phase window: {} of {} \
+                 expected emit line(s) seen{}",
+                emit_count,
                 expected_emits.len(),
-                emit_count
+                if saw_key_activity {
+                    ""
+                } else {
+                    ", and the daemon logged no key events"
+                }
             ));
         }
         thread::sleep(Duration::from_millis(50));
