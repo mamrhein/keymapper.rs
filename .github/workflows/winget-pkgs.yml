@@ -101,32 +101,28 @@ jobs:
           $manifestDir = "manifests/a/adrhinum/keymapper/$env:VERSION"
           New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
 
-          # Verify the release tag is resolvable before fetching the templates.
-          # Retry a few times because the ref may not be visible to the API
-          # immediately after being pushed, or may be briefly absent if it was
-          # deleted and re-pushed while the release workflow was still running.
-          $refUrl = "repos/${{ github.repository }}/git/refs/tags/v$env:VERSION"
-          for ($attempt = 1; $attempt -le 5; $attempt++) {
-            gh api $refUrl | Out-Null
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -eq 5) {
-              throw "Tag v$env:VERSION was not found in ${{ github.repository }} after 5 attempts. The tag may have been deleted or not pushed yet."
-            }
-            Start-Sleep -Seconds 30
-          }
-
           # Fetch the templates from the keymapper repository at the release
           # tag (the repo is the source of truth, mirroring homebrew-tap),
           # then substitute the version and sha256 placeholders.
+          # Retry each fetch because a freshly pushed tag may not be
+          # resolvable by the contents API immediately, even after the ref
+          # itself is visible; a deleted and re-pushed tag can briefly expose
+          # the old tree as well.
+          function Get-ContentAtRef([string]$url) {
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              # On failure, `gh api --jq` prints the error JSON to stdout,
+              # so check the exit code before decoding to avoid a misleading
+              # base64 exception.
+              $content = gh api $url --jq '.content'
+              if ($LASTEXITCODE -eq 0) { return $content }
+              Start-Sleep -Seconds 30
+            }
+            throw "Failed to fetch $url after 5 attempts (gh exit code $LASTEXITCODE). The tag may be missing or the file may not exist at that ref."
+          }
+
           foreach ($name in @("adrhinum.keymapper.yaml", "adrhinum.keymapper.installer.yaml", "adrhinum.keymapper.locale.en-US.yaml")) {
             $path = Join-Path $manifestDir $name
-            # On failure, `gh api --jq` prints the error JSON to stdout, so
-            # check the exit code before decoding to avoid a misleading
-            # base64 exception.
-            $content = gh api "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION" --jq '.content'
-            if ($LASTEXITCODE -ne 0) {
-              throw "Failed to fetch winget/$name at v$env:VERSION (gh exit code $LASTEXITCODE)."
-            }
+            $content = Get-ContentAtRef "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION"
             [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content)) |
               Set-Content -Path $path -Encoding utf8 -NoNewline
             (Get-Content $path -Raw) `
