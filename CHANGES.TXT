@@ -1,17 +1,10 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
-   0.2.7  Route keymapperd's logging through the log facade with ftlog:
-          stderr on Linux (recorded by journald), a daily rotating file
-          on macOS (~/Library/Logs/keymapper/keymapperd-YYYYMMDD.log) and
-          Windows (%LOCALAPPDATA%\keymapperd\logs\keymapperd-YYYYMMDD.log),
-          with 7-day retention.
-          Fix macOS echo re-mapping: the DriverKit virtual keyboard's output
-          re-enters the CGEventTap, so a mapped key's echo was re-decided by
-          the engine (e.g. `Escape: Cmd+T` firing on the echo of an earlier
-          `RightControl: Escape`, and cyclic rules emitting forever). The tap
-          now predicts each emission's echo sequence and passes matching
-          events through without re-deciding them.
+   0.3.0  Added logging through the log facade with ftlog.
+          E2e tests: Replaced reader-based with log-based verification.
+          Fixed macOS echo re-mapping.
+          Fixed stale kernel events on device grab on Linux.
 
    0.2.3  Migrate winget manifests to multi-file format.
           Migrate Windows installer to Inno Setup 7.

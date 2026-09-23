@@ -1,6 +1,6 @@
 [package]
 name = "keymapper"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Cross-platform key-remapping daemon and cli utility for macOS, Linux, and Windows"
