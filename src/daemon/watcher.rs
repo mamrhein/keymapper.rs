@@ -8,15 +8,17 @@
 // $Revision$
 
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
-use log::{error, info};
+use log::{error, info, warn};
 use notify::{
     Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    event::ModifyKind,
 };
 use parking_lot::RwLock;
 
@@ -161,12 +163,93 @@ fn reload_from_str(
     ReloadResult::Ok
 }
 
+/// How the watcher should react to a filesystem event.
+#[derive(Debug, PartialEq, Eq)]
+enum Interest {
+    /// The config file was created or modified; schedule a (re)load.
+    Reload,
+    /// The config file was unlinked or renamed away; a later event must
+    /// recreate it before a reload can succeed.
+    ConfigRemoved,
+    /// The watched directory itself was removed or renamed, which kills the
+    /// underlying OS watch until the watcher is re-armed.
+    WatchDirRemoved,
+    /// Irrelevant for hot-reload (e.g., an event for a sibling file).
+    Ignore,
+}
+
+/// Classify a directory-watch event with respect to the watched config file.
+///
+/// `watch_dir` is the directory handed to [`Watcher::watch`], so event paths
+/// are either `watch_dir` itself or `watch_dir.join(name)` for a child.  The
+/// config file is identified by name because a rename onto the path carries
+/// the config name in at least one of its event paths.
+fn classify_event(
+    event: &Event,
+    watch_dir: &Path,
+    config_name: &OsStr,
+) -> Interest {
+    let mut watch_dir_gone = false;
+
+    for path in &event.paths {
+        if path == watch_dir {
+            // Removal or rename of the watched directory detaches the OS
+            // watch; other notifications about the directory are irrelevant.
+            if matches!(
+                event.kind,
+                EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+            ) {
+                watch_dir_gone = true;
+            }
+        } else if path.file_name() == Some(config_name) {
+            return match event.kind {
+                // Covers in-place writes (`Modify(Data)`), atomic saves
+                // renamed onto the path (`Modify(Name(To))` on Linux and
+                // Windows), and delete-then-write editors (`Create`).
+                EventKind::Modify(_) | EventKind::Create(_) => {
+                    Interest::Reload
+                }
+                EventKind::Remove(_) => Interest::ConfigRemoved,
+                _ => Interest::Ignore,
+            };
+        }
+    }
+
+    if watch_dir_gone {
+        Interest::WatchDirRemoved
+    } else {
+        Interest::Ignore
+    }
+}
+
 pub fn start_config_watcher<P: AsRef<Path>>(
     config_path: P,
     state: Arc<RwLock<dyn MutableLookup>>,
 ) -> Result<RecommendedWatcher, notify::Error> {
-    let path_to_watch = Arc::new(config_path.as_ref().to_owned());
+    let config_path = config_path.as_ref().to_owned();
+    let config_name = config_path
+        .file_name()
+        .map(OsStr::to_owned)
+        .ok_or_else(|| {
+            notify::Error::new(notify::ErrorKind::Generic(format!(
+                "config path {} has no file name",
+                config_path.display()
+            )))
+        })?;
+    // Watch the parent *directory* instead of the file itself: under inotify
+    // a file watch pins the file's inode, so an atomic save (write temp +
+    // rename) leaves the watch on the unlinked inode and every subsequent
+    // save goes unnoticed.  A non-recursive directory watch survives renames
+    // on all three backends; events for siblings are filtered out by name.
+    let watch_dir = match config_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.to_owned(),
+        // Bare relative path like "config.yaml" — watch the working directory.
+        _ => PathBuf::from("."),
+    };
+
+    let path_to_watch = Arc::new(config_path);
     let reload_tx = spawn_reload_thread(Arc::clone(&path_to_watch), state);
+    let closure_dir = watch_dir.clone();
 
     // Create a cross-platform watcher infrastructure.  The closure only
     // sends reload requests; the background thread performs debouncing
@@ -174,12 +257,24 @@ pub fn start_config_watcher<P: AsRef<Path>>(
     let mut watcher = RecommendedWatcher::new(
         move |result: Result<Event, notify::Error>| match result {
             Ok(event) => {
-                // We only care about file modifications (e.g., user hits save
-                // in text editor).
-                if let EventKind::Modify(_) = event.kind {
-                    // Notify the background thread.  If the channel is full or
-                    // disconnected, silently drop — the next event will retry.
-                    let _ = reload_tx.send(());
+                match classify_event(&event, &closure_dir, &config_name) {
+                    Interest::Reload => {
+                        // Notify the background thread.  If the channel is
+                        // full or disconnected, silently drop — the next
+                        // event will retry.
+                        let _ = reload_tx.send(());
+                    }
+                    Interest::ConfigRemoved => warn!(
+                        "Watched config file {} was removed; waiting for it \
+                         to be recreated.",
+                        path_to_watch.display()
+                    ),
+                    Interest::WatchDirRemoved => warn!(
+                        "Watched config directory {} was removed or renamed; \
+                         hot-reload is no longer active.",
+                        closure_dir.display()
+                    ),
+                    Interest::Ignore => {}
                 }
             }
             Err(e) => error!("File system watcher error: {e:?}"),
@@ -187,7 +282,150 @@ pub fn start_config_watcher<P: AsRef<Path>>(
         Config::default(),
     )?;
 
-    watcher.watch(config_path.as_ref(), RecursiveMode::NonRecursive)?;
+    watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
 
     Ok(watcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use notify::event::{
+        AccessKind, CreateKind, DataChange, RemoveKind, RenameMode,
+    };
+
+    use super::*;
+
+    fn dir() -> PathBuf {
+        PathBuf::from("/etc/keymapper")
+    }
+
+    fn config_path() -> PathBuf {
+        dir().join("config.yaml")
+    }
+
+    fn event(kind: EventKind, paths: &[&Path]) -> Event {
+        let mut event = Event::new(kind);
+        for path in paths {
+            event = event.add_path(path.to_path_buf());
+        }
+        event
+    }
+
+    #[test]
+    fn in_place_modify_triggers_reload() {
+        let ev = event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            &[config_path().as_path()],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::Reload
+        );
+    }
+
+    #[test]
+    fn rename_onto_path_triggers_reload() {
+        // What an atomic save emits on Linux (MOVED_TO) and Windows
+        // (FILE_ACTION_RENAMED_NEW_NAME) for the config path.
+        let ev = event(
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+            &[config_path().as_path()],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::Reload
+        );
+    }
+
+    #[test]
+    fn paired_rename_triggers_reload_via_dest_path() {
+        // A `RenameMode::Both` event carries source and destination; only
+        // the destination names the config file.
+        let ev = event(
+            EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+            &[
+                dir().join(".config.yaml.tmp").as_path(),
+                config_path().as_path(),
+            ],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::Reload
+        );
+    }
+
+    #[test]
+    fn create_triggers_reload() {
+        // Delete-then-write editors recreate the file in a second event.
+        let ev = event(
+            EventKind::Create(CreateKind::File),
+            &[config_path().as_path()],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::Reload
+        );
+    }
+
+    #[test]
+    fn remove_waits_for_recreation() {
+        let ev = event(
+            EventKind::Remove(RemoveKind::File),
+            &[config_path().as_path()],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::ConfigRemoved
+        );
+    }
+
+    #[test]
+    fn rename_away_of_other_file_is_ignored() {
+        // During an atomic save the temp file's MOVED_FROM / rename-from
+        // event carries only the temp name.
+        let ev = event(
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+            &[dir().join(".config.yaml.tmp").as_path()],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::Ignore
+        );
+    }
+
+    #[test]
+    fn sibling_modify_is_ignored() {
+        let ev = event(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            &[dir().join("other.yaml").as_path()],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::Ignore
+        );
+    }
+
+    #[test]
+    fn access_event_is_ignored() {
+        let ev = event(
+            EventKind::Access(AccessKind::Read),
+            &[config_path().as_path()],
+        );
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::Ignore
+        );
+    }
+
+    #[test]
+    fn watched_dir_removal_is_reported() {
+        let ev =
+            event(EventKind::Remove(RemoveKind::Folder), &[dir().as_path()]);
+        assert_eq!(
+            classify_event(&ev, &dir(), OsStr::new("config.yaml")),
+            Interest::WatchDirRemoved
+        );
+    }
 }
