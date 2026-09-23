@@ -9,15 +9,20 @@
 
 //! The Windows control endpoint: a byte-mode named pipe.
 //!
-//! The daemon creates `\\.\pipe\keymapperd` and serves one command per
-//! connection. The pipe is the auth mechanism: its security descriptor grants
-//! only the current user (a single `ACCESS_ALLOWED` ACE for the caller's SID)
-//! full control, so only that user can open it. This supersedes the
+//! The daemon creates `\\.\\pipe\\keymapperd` and serves one command per
+//! connection. The pipe is the auth mechanism: its DACL grants only the
+//! current user (a single `ACCESS_ALLOWED` ACE for the caller's SID) full
+//! control, so only that user can open it. This supersedes the
 //! `daemon_token` removed in Phase 2.
 //!
-//! The owner-only security descriptor is built on the stack (an `ACL` with one
-//! `ACCESS_ALLOWED_ACE` plus the SID) and freed right after the pipe is
-//! created, because `CreateNamedPipeW` copies it into the pipe object.
+//! The pipe is created *without* a security descriptor, and the owner-only
+//! DACL is applied right afterwards with `SetSecurityInfo`. Passing the
+//! descriptor to `CreateNamedPipeW` directly fails on recent Windows builds
+//! (the creation is rejected with `ERROR_LOCAL_DEVICE_NOT_FOUND` or
+//! `ERROR_INVALID_SECURITY_DESCRIPTOR`), while the two-step approach
+//! succeeds. The ACL itself is filled in byte by byte, because
+//! advapi32's `InitializeAcl`/`AddAccessAllowedAce` write an `AclSize` that
+//! does not match the ACE they add, which stricter validation rejects.
 
 use std::io::{Read, Write};
 
@@ -25,13 +30,11 @@ use log::{debug, info, warn};
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_BROKEN_PIPE, FALSE, GENERIC_ALL, GetLastError,
-            HANDLE,
+            CloseHandle, ERROR_BROKEN_PIPE, GENERIC_ALL, GetLastError, HANDLE,
         },
         Security::{
-            ACL, ACL_REVISION, AddAccessAllowedAce, GetLengthSid,
-            GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor,
-            PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+            ACL_REVISION, GetLengthSid, GetTokenInformation,
+            InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, PSID,
             SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_QUERY,
             TOKEN_USER, TokenUser,
         },
@@ -64,12 +67,20 @@ const PIPE_BUFFER: u32 = 4096;
 /// unrelated feature just for the named constant).
 const SD_REVISION: u32 = 1;
 
-/// Real size of the Windows `ACL` header (the Rust struct omits the trailing
-/// `sizeOfFirstAce` field that `InitializeAcl` fills in).
-const ACL_HEADER_BYTES: usize = 10;
+/// Size of the on-wire `ACL` header: revision, size, count, and two unused
+/// bytes.
+const ACL_HEADER_BYTES: usize = 8;
 
-/// Real size of one `ACCESS_ALLOWED_ACE`.
-const ACE_BYTES: usize = 16;
+/// Size of an `ACCESS_ALLOWED` ACE's fixed part (type, flags, size, mask);
+/// the SID bytes follow directly.
+const ACE_FIXED_BYTES: usize = 8;
+
+/// `SE_FILE_OBJECT`, the object type of a named pipe for `SetSecurityInfo`
+/// (not in the `windows` crate's surface, kept local like `SD_REVISION`).
+const SE_FILE_OBJECT: u32 = 1;
+
+/// `DACL_SECURITY_INFORMATION`: apply only the DACL.
+const DACL_SECURITY_INFORMATION: u32 = 4;
 
 /// The `ERROR_FILE_NOT_FOUND` code: no pipe to open means no daemon.
 const ERROR_FILE_NOT_FOUND: i32 = 2;
@@ -77,10 +88,12 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 /// The `ERROR_PIPE_BUSY` code: the daemon exists but is serving a client.
 const ERROR_PIPE_BUSY: i32 = 231;
 
-/// How long a client keeps waiting for the daemon's single pipe instance to
-/// be released. The serve loop disconnects within microseconds of the
-/// previous client's close, so this only matters under load or for a
-/// misbehaving peer that never closes; 2 s is a comfortable upper bound.
+/// How long to keep waiting for the daemon's single pipe instance to be
+/// released: on the client side when opening the pipe, and on the daemon side
+/// when creating it after a previous daemon was killed mid-connection. The
+/// serve loop disconnects within microseconds of the previous client's close,
+/// so this only matters under load or for a misbehaving peer that never
+/// closes; 2 s is a comfortable upper bound.
 const BUSY_RETRY_ATTEMPTS: u32 = 20;
 const BUSY_RETRY_WAIT_MS: u32 = 100;
 
@@ -191,15 +204,47 @@ impl Write for Pipe {
 }
 
 /// An owner-only security descriptor, keeping the backing `ACL` buffer and the
-/// `SECURITY_DESCRIPTOR` alive together. The `SECURITY_ATTRIBUTES` points at
-/// the embedded `SECURITY_DESCRIPTOR`, whose DACL points at `acl`.
+/// An owner-only security descriptor, keeping the backing `ACL` buffer and
+/// the `SECURITY_DESCRIPTOR` alive together. The descriptor's DACL points
+/// into `acl`.
 struct OwnerOnlyDescriptor {
-    attrs: SECURITY_ATTRIBUTES,
     sd: SECURITY_DESCRIPTOR,
-    /// Never read; the field only keeps the buffer alive because the
+    /// Never read by Rust; the field only keeps the buffer alive because the
     /// descriptor's DACL points into it.
     #[allow(dead_code)]
     acl: Vec<u8>,
+}
+
+/// `SetSecurityInfo` (advapi32), which the `windows` crate does not expose.
+mod ffi {
+    // SAFETY: FFI wrapper around the stable advapi32 `SetSecurityInfo`
+    // entry point; parameters are passed by value or pointer and the return
+    // value is a `BOOL`.
+    unsafe extern "system" {
+        pub fn SetSecurityInfo(
+            hobject: *mut core::ffi::c_void,
+            object_type: u32,
+            security_information: u32,
+            security_descriptor: *mut core::ffi::c_void,
+        ) -> i32;
+    }
+}
+
+/// Apply *sd* as the DACL of *handle*. Returns the Win32 error, or 0.
+fn set_dacl(handle: HANDLE, sd: &SECURITY_DESCRIPTOR) -> u32 {
+    let ok = unsafe {
+        ffi::SetSecurityInfo(
+            handle.0,
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            sd as *const _ as *mut core::ffi::c_void,
+        )
+    };
+    if ok != 0 {
+        0
+    } else {
+        unsafe { GetLastError().0 }
+    }
 }
 
 /// The caller's primary SID, from the current process token, owned by the
@@ -263,32 +308,28 @@ fn current_user_sid() -> Option<Vec<u8>> {
 /// Build an owner-only descriptor granting the SID in *sid* full control of
 /// the pipe.
 ///
-/// Returns `None` when the ACL or descriptor cannot be built (in which case
-/// the pipe is not created, so it is never exposed with weaker-than-owner-only
-/// security).
+/// The ACL is filled in byte by byte (8-byte header + one
+/// `ACCESS_ALLOWED` ACE + the SID): advapi32's `InitializeAcl`/
+/// `AddAccessAllowedAce` leave the `AclSize` field inconsistent with the
+/// ACE they append, and creation with such a descriptor is rejected on
+/// recent Windows builds.
+///
+/// Returns `None` when the descriptor cannot be built (in which case the
+/// pipe is not exposed at all, so it is never weaker than owner-only).
 fn owner_only_descriptor(sid: &[u8]) -> Option<OwnerOnlyDescriptor> {
-    // Real layout: 10-byte ACL header + one 16-byte ACE + the SID bytes.
-    let acl_size = ACL_HEADER_BYTES + ACE_BYTES + sid.len();
-    let mut acl = vec![0u8; acl_size];
-    let acl_ptr = acl.as_mut_ptr() as *mut ACL;
-
-    if unsafe { InitializeAcl(acl_ptr, acl_size as u32, ACL_REVISION) }
-        .is_err()
-    {
-        return None;
-    }
-    if unsafe {
-        AddAccessAllowedAce(
-            acl_ptr,
-            ACL_REVISION,
-            GENERIC_ALL.0,
-            PSID(sid.as_ptr() as *mut _),
-        )
-    }
-    .is_err()
-    {
-        return None;
-    }
+    let total = ACL_HEADER_BYTES + ACE_FIXED_BYTES + sid.len();
+    let mut acl = vec![0u8; total];
+    // Header: revision, total size, one ACE.
+    acl[0] = ACL_REVISION.0 as u8;
+    acl[2..4].copy_from_slice(&(total as u16).to_le_bytes());
+    acl[4..6].copy_from_slice(&1u16.to_le_bytes());
+    // ACE at offset 8: type 0 (`ACCESS_ALLOWED_ACE_TYPE`), no flags, its own
+    // size (fixed part + SID), the mask, then the SID bytes.
+    acl[8] = 0;
+    let ace_size = ACE_FIXED_BYTES + sid.len();
+    acl[10..12].copy_from_slice(&(ace_size as u16).to_le_bytes());
+    acl[12..16].copy_from_slice(&GENERIC_ALL.0.to_le_bytes());
+    acl[16..].copy_from_slice(sid);
 
     // `mem::zeroed` on a struct containing raw pointers is unsafe on Rust
     // 2024; the descriptor is fully initialised by the calls below.
@@ -314,20 +355,7 @@ fn owner_only_descriptor(sid: &[u8]) -> Option<OwnerOnlyDescriptor> {
         return None;
     }
 
-    // Build the struct, then point `attrs` at its own `sd` (which cannot be
-    // done while the struct is still being constructed).
-    let mut desc = OwnerOnlyDescriptor {
-        attrs: SECURITY_ATTRIBUTES {
-            nLength: core::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            bInheritHandle: FALSE,
-            lpSecurityDescriptor: core::ptr::null_mut(),
-        },
-        sd,
-        acl,
-    };
-    desc.attrs.lpSecurityDescriptor =
-        &desc.sd as *const _ as *mut core::ffi::c_void;
-    Some(desc)
+    Some(OwnerOnlyDescriptor { sd, acl })
 }
 
 /// The NUL-terminated UTF-16 form of *name*, for the `W` Win32 APIs.
@@ -358,36 +386,77 @@ fn start_with_name(name: &str) {
     };
     // The ACE copied the SID bytes into the ACL, so the owned buffer only
     // needs to drop when this function returns (never `FreeSid`; see
-    // `current_user_sid`). `desc` (and its ACL) stays alive across the
-    // `CreateNamedPipeW` call, which copies the descriptor.
+    // `current_user_sid`). `desc` stays alive across the `SetSecurityInfo`
+    // call below, which copies the DACL into the pipe object.
 
     let wide_name = to_wide(name);
-    let pipe = unsafe {
-        CreateNamedPipeW(
-            PCWSTR(wide_name.as_ptr()),
-            FILE_FLAGS_AND_ATTRIBUTES(
-                PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
-            ),
-            NAMED_PIPE_MODE(
-                PIPE_TYPE_BYTE.0
-                    | PIPE_READMODE_BYTE.0
-                    | PIPE_REJECT_REMOTE_CLIENTS.0,
-            ),
-            1, // one instance: one client at a time, matching the unix path
-            PIPE_BUFFER,
-            PIPE_BUFFER,
-            0,
-            Some(&desc.attrs as *const _),
-        )
+    // The pipe is created without a security descriptor; the owner-only DACL
+    // is applied right afterwards. Passing the descriptor to
+    // `CreateNamedPipeW` directly is rejected on recent Windows builds.
+    // With a single pipe instance, a daemon killed mid-connection (e.g. by
+    // the e2e harness's `TerminateProcess`) can leave the name briefly busy,
+    // so the creation is retried with `WaitNamedPipeW`, mirroring the
+    // client-side busy handling in `connect_to`.
+    let (pipe, code) = {
+        let mut attempts = 0;
+        loop {
+            let pipe = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(wide_name.as_ptr()),
+                    FILE_FLAGS_AND_ATTRIBUTES(
+                        PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
+                    ),
+                    NAMED_PIPE_MODE(
+                        PIPE_TYPE_BYTE.0
+                            | PIPE_READMODE_BYTE.0
+                            | PIPE_REJECT_REMOTE_CLIENTS.0,
+                    ),
+                    1, /* one instance: one client at a time, matching the
+                        * unix path */
+                    PIPE_BUFFER,
+                    PIPE_BUFFER,
+                    0,
+                    None,
+                )
+            };
+            let code = unsafe { GetLastError() };
+            if !pipe.is_invalid()
+                || code.0 != ERROR_PIPE_BUSY as u32
+                || attempts + 1 >= BUSY_RETRY_ATTEMPTS
+            {
+                break (pipe, code);
+            }
+            attempts += 1;
+            // Wait for the name to become openable again; the wait times out
+            // after each attempt, so the loop is bounded by
+            // `BUSY_RETRY_ATTEMPTS` (~2 s in total).
+            let _ = unsafe {
+                WaitNamedPipeW(PCWSTR(wide_name.as_ptr()), BUSY_RETRY_WAIT_MS)
+            };
+        }
     };
-    drop(desc);
 
     if pipe.is_invalid() {
-        let code = unsafe { GetLastError() };
         warn!(
             "Could not create the control pipe {name} (error {:#010x}); \
              runtime log-level control is disabled",
             code.0
+        );
+        return;
+    }
+
+    // Apply the owner-only DACL. Fail closed: a pipe that cannot be locked
+    // down to the owner is not exposed at all.
+    let dacl_error = set_dacl(pipe, &desc.sd);
+    drop(desc);
+    if dacl_error != 0 {
+        unsafe {
+            let _ = CloseHandle(pipe);
+        }
+        warn!(
+            "Could not apply the owner-only DACL to the control pipe {name} \
+             (error {dacl_error:#010x}); runtime log-level control is \
+             disabled"
         );
         return;
     }
@@ -536,6 +605,76 @@ mod tests {
         *,
     };
 
+    /// The hand-rolled ACL must be self-consistent: the header's `AclSize`
+    /// must equal the header plus exactly one ACE, and the ACE's size field
+    /// must equal its fixed part plus the SID.  Inconsistent sizes are
+    /// rejected by the kernel on recent Windows builds.
+    #[test]
+    fn owner_only_descriptor_builds_a_consistent_acl() {
+        // A 28-byte user SID (revision 1, NT authority, five subauthorities).
+        let mut sid = vec![0u8; 28];
+        sid[0] = 1;
+        sid[1] = 5;
+        let Some(desc) = owner_only_descriptor(&sid) else {
+            panic!("the descriptor could not be built");
+        };
+        let acl = &desc.acl;
+        assert_eq!(acl[0], ACL_REVISION.0 as u8, "wrong ACL revision");
+        let acl_size = u16::from_le_bytes([acl[2], acl[3]]) as usize;
+        let ace_count = u16::from_le_bytes([acl[4], acl[5]]);
+        assert_eq!(
+            acl_size,
+            ACL_HEADER_BYTES + ACE_FIXED_BYTES + sid.len(),
+            "AclSize does not cover exactly one ACE"
+        );
+        assert_eq!(acl_size, acl.len(), "AclSize must equal the buffer");
+        assert_eq!(ace_count, 1, "expected exactly one ACE");
+        assert_eq!(acl[8], 0, "expected an ACCESS_ALLOWED ACE");
+        assert_eq!(acl[9], 0, "unexpected ACE flags");
+        let ace_size = u16::from_le_bytes([acl[10], acl[11]]) as usize;
+        assert_eq!(
+            ace_size,
+            ACE_FIXED_BYTES + sid.len(),
+            "ACE size does not cover fixed part + SID"
+        );
+        assert_eq!(
+            &acl[12..16],
+            &GENERIC_ALL.0.to_le_bytes(),
+            "wrong ACE mask"
+        );
+        assert_eq!(&acl[16..], &sid[..], "SID was not copied into the ACE");
+        assert_eq!(
+            desc.sd.Revision, SD_REVISION as u8,
+            "wrong security descriptor revision"
+        );
+        assert_eq!(
+            desc.sd.Dacl as *const () as usize,
+            acl.as_ptr() as usize,
+            "the DACL must point at the owned buffer"
+        );
+    }
+
+    /// The production path end to end: create the pipe without a security
+    /// descriptor, apply the owner-only DACL, and serve.  A client of the
+    /// same user (like the CLI) must be able to connect and round-trip a
+    /// command.  Before the two-step approach, `CreateNamedPipeW` with the
+    /// descriptor failed on recent Windows builds and the pipe never came
+    /// up.
+    ///
+    /// The serve thread is intentionally left running; it dies with the test
+    /// process.
+    #[test]
+    fn start_with_name_serves_the_owner() {
+        let name =
+            format!("\\\\.\\pipe\\keymapperd_prod_{}", std::process::id());
+        start_with_name(&name);
+        let mut conn = connect_to(&name).expect("the owner could not connect");
+        write_frame(&mut conn, "SET-LOG-LEVEL info")
+            .expect("the write failed");
+        let reply = read_frame(&mut conn).expect("the read failed");
+        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+    }
+
     /// The client must close its handle on drop, so the daemon's single pipe
     /// instance is released for the next connection.  Before the fix the
     /// handle leaked until process exit: a long-lived client (the e2e
@@ -550,9 +689,9 @@ mod tests {
     fn client_drop_frees_the_pipe_instance() {
         let name =
             format!("\\\\.\\pipe\\keymapperd_repro_{}", std::process::id());
-        // No security descriptor: the owner-only DACL only decides who may
-        // connect and is orthogonal to the close-on-drop behaviour pinned
-        // here, while it fails to create in the test process context.
+        // No security descriptor: this test pins the close-on-drop behaviour
+        // only; the full production path (creation plus the owner-only DACL)
+        // is covered by `start_with_name_serves_the_owner`.
         let wide_name = to_wide(&name);
         let pipe = unsafe {
             CreateNamedPipeW(
