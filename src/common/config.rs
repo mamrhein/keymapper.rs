@@ -52,6 +52,12 @@ pub enum KeyEventParseError {
     /// A key name is not a known `HidUsage`.
     #[error(transparent)]
     UnknownKey(#[from] HidUsageParseError),
+
+    /// More than 8 modifier tokens were provided in a chord.
+    /// No real-world shortcut requires more than 4 modifiers; the cap
+    /// prevents exponential expansion in `expand_modifier_bits`.
+    #[error("too many modifier tokens ({0}, max 8)")]
+    TooManyModifiers(usize),
 }
 
 impl<'de> Deserialize<'de> for KeyEvent {
@@ -104,6 +110,15 @@ impl KeyEvent {
         if parts.is_empty() || (parts.len() == 1 && parts[0].trim().is_empty())
         {
             return Err(KeyEventParseError::Empty);
+        }
+
+        // Cap modifier tokens to prevent exponential expansion in
+        // expand_modifier_bits.  With n generic modifiers the Cartesian
+        // product produces 2^n variants; without this cap a config line
+        // with ~26 repeated Ctrl tokens (well under the 1 MB file limit)
+        // would expand to ~67M CompiledRules.
+        if parts.len() > 9 {
+            return Err(KeyEventParseError::TooManyModifiers(parts.len() - 1));
         }
 
         if parts.len() == 1 {
@@ -891,6 +906,20 @@ mod tests {
 "#;
         let result = AppConfig::load_from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn too_many_modifier_tokens_rejected() {
+        // 9 modifiers + base key = 10 tokens; the cap is 8 modifiers.
+        let s = "Ctrl+Shift+Alt+Cmd+Ctrl+Shift+Alt+Cmd+Ctrl+A";
+        assert!(matches!(
+            KeyEvent::parse(s),
+            Err(KeyEventParseError::TooManyModifiers(9))
+        ));
+
+        // Exactly 8 modifiers (the cap) should parse fine.
+        let ok = "Ctrl+Shift+Alt+Cmd+Ctrl+Shift+Alt+Cmd+A";
+        assert!(KeyEvent::parse(ok).is_ok());
     }
 
     #[test]

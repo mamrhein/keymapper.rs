@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use indexmap::IndexMap;
 use thiserror::Error;
@@ -245,19 +245,25 @@ fn expand_modifier_bits(modifiers: &[HidUsage]) -> Vec<u8> {
         })
         .collect();
 
-    // Generate the Cartesian product of bit combinations.
-    let mut results: Vec<u8> = vec![0];
-    for choice in choices {
-        let mut next: Vec<u8> = Vec::new();
+    // Generate the Cartesian product of bit combinations, deduplicated at
+    // each step.  Since modifiers are u8, there can be at most 256 distinct
+    // masks, making the expansion O(1) regardless of chord length.
+    let mut results: HashSet<u8> = HashSet::new();
+    results.insert(0u8);
+    for choice in &choices {
+        let mut next: HashSet<u8> = HashSet::new();
         for &acc in &results {
-            for &bit in &choice {
-                next.push(acc | (1 << bit));
+            for &bit in choice {
+                next.insert(acc | (1 << bit));
             }
         }
         results = next;
     }
 
-    results
+    let mut result: Vec<u8> = results.into_iter().collect();
+    // Sort so callers get a deterministic order; at most 256 elements.
+    result.sort_unstable();
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -303,8 +309,8 @@ mod tests {
             result,
             vec![
                 (1 << 0) | (1 << 1), // left ctrl + left shift
-                (1 << 0) | (1 << 5), // left ctrl + right shift
                 (1 << 4) | (1 << 1), // right ctrl + left shift
+                (1 << 0) | (1 << 5), // left ctrl + right shift
                 (1 << 4) | (1 << 5), // right ctrl + right shift
             ]
         );
@@ -330,9 +336,29 @@ mod tests {
         assert_eq!(result, vec![1 << 0]);
     }
 
-    // -----------------------------------------------------------------------
-    // compile_modifier_bits (output side — specific single bit)
-    // -----------------------------------------------------------------------
+    #[test]
+    fn expand_many_repeated_modifiers_bounded() {
+        // 20 repeated LeftControl tokens would produce 2^20 = ~1M entries
+        // with a naive Cartesian product.  The HashSet deduplication keeps
+        // the result to at most 3 distinct masks: {bit 0, bit 4, both}.
+        let mods = vec![HidUsage::LeftControl; 20];
+        let result = expand_modifier_bits(&mods);
+        assert_eq!(result, vec![1 << 0, 1 << 4, (1 << 0) | (1 << 4)]);
+    }
+
+    #[test]
+    fn expand_all_four_generic_modifiers() {
+        // Ctrl+Shift+Alt+Cmd → 2^4 = 16 distinct masks (all bits are
+        // different so no collisions).
+        let mods = vec![
+            HidUsage::LeftControl,
+            HidUsage::LeftShift,
+            HidUsage::LeftAlt,
+            HidUsage::LeftCommand,
+        ];
+        let result = expand_modifier_bits(&mods);
+        assert_eq!(result.len(), 16);
+    }
 
     #[test]
     fn compile_modifier_bits_empty() {
