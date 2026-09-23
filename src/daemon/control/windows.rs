@@ -77,10 +77,12 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 /// The `ERROR_PIPE_BUSY` code: the daemon exists but is serving a client.
 const ERROR_PIPE_BUSY: i32 = 231;
 
-/// How long a client keeps waiting for the daemon's single pipe instance to
-/// be released. The serve loop disconnects within microseconds of the
-/// previous client's close, so this only matters under load or for a
-/// misbehaving peer that never closes; 2 s is a comfortable upper bound.
+/// How long to keep waiting for the daemon's single pipe instance to be
+/// released: on the client side when opening the pipe, and on the daemon side
+/// when creating it after a previous daemon was killed mid-connection. The
+/// serve loop disconnects within microseconds of the previous client's close,
+/// so this only matters under load or for a misbehaving peer that never
+/// closes; 2 s is a comfortable upper bound.
 const BUSY_RETRY_ATTEMPTS: u32 = 20;
 const BUSY_RETRY_WAIT_MS: u32 = 100;
 
@@ -359,31 +361,54 @@ fn start_with_name(name: &str) {
     // The ACE copied the SID bytes into the ACL, so the owned buffer only
     // needs to drop when this function returns (never `FreeSid`; see
     // `current_user_sid`). `desc` (and its ACL) stays alive across the
-    // `CreateNamedPipeW` call, which copies the descriptor.
+    // `CreateNamedPipeW` call(s), which copy the descriptor.
 
     let wide_name = to_wide(name);
-    let pipe = unsafe {
-        CreateNamedPipeW(
-            PCWSTR(wide_name.as_ptr()),
-            FILE_FLAGS_AND_ATTRIBUTES(
-                PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
-            ),
-            NAMED_PIPE_MODE(
-                PIPE_TYPE_BYTE.0
-                    | PIPE_READMODE_BYTE.0
-                    | PIPE_REJECT_REMOTE_CLIENTS.0,
-            ),
-            1, // one instance: one client at a time, matching the unix path
-            PIPE_BUFFER,
-            PIPE_BUFFER,
-            0,
-            Some(&desc.attrs as *const _),
-        )
+    // With a single pipe instance, a daemon killed mid-connection (e.g. by the
+    // e2e harness's `TerminateProcess`) can leave the name briefly busy, so
+    // the creation is retried with `WaitNamedPipeW`, mirroring the
+    // client-side busy handling in `connect_to`.
+    let (pipe, code) = {
+        let mut attempts = 0;
+        loop {
+            let pipe = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(wide_name.as_ptr()),
+                    FILE_FLAGS_AND_ATTRIBUTES(
+                        PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
+                    ),
+                    NAMED_PIPE_MODE(
+                        PIPE_TYPE_BYTE.0
+                            | PIPE_READMODE_BYTE.0
+                            | PIPE_REJECT_REMOTE_CLIENTS.0,
+                    ),
+                    1, /* one instance: one client at a time, matching the
+                        * unix path */
+                    PIPE_BUFFER,
+                    PIPE_BUFFER,
+                    0,
+                    Some(&desc.attrs as *const _),
+                )
+            };
+            let code = unsafe { GetLastError() };
+            if !pipe.is_invalid()
+                || code.0 != ERROR_PIPE_BUSY as u32
+                || attempts + 1 >= BUSY_RETRY_ATTEMPTS
+            {
+                break (pipe, code);
+            }
+            attempts += 1;
+            // Wait for the name to become openable again; the wait times out
+            // after each attempt, so the loop is bounded by
+            // `BUSY_RETRY_ATTEMPTS` (~2 s in total).
+            let _ = unsafe {
+                WaitNamedPipeW(PCWSTR(wide_name.as_ptr()), BUSY_RETRY_WAIT_MS)
+            };
+        }
     };
     drop(desc);
 
     if pipe.is_invalid() {
-        let code = unsafe { GetLastError() };
         warn!(
             "Could not create the control pipe {name} (error {:#010x}); \
              runtime log-level control is disabled",

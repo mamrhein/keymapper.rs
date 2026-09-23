@@ -640,6 +640,11 @@ const READINESS_LINE: &str =
 /// compiled and swapped in.
 const HOT_SWAP_LINE: &str = "Configuration hot-swapped successfully!";
 
+/// The daemon's control-socket line (INFO): emitted once the control
+/// endpoint is up; when it fails to start, the daemon logs a WARN instead
+/// and the endpoint is disabled.
+const CONTROL_SOCKET_LINE: &str = "Control socket listening on";
+
 /// Poll *source* for a line containing *needle* until one appears or the
 /// timeout elapses.  Fails fast when the daemon exits, but only after
 /// draining what it wrote, so a line flushed just before exit is not missed.
@@ -649,18 +654,34 @@ const HOT_SWAP_LINE: &str = "Configuration hot-swapped successfully!";
 /// to `systemctl`).
 fn wait_for_line(
     source: &mut Box<dyn LogSource>,
-    mut exited: impl FnMut() -> bool,
+    exited: impl FnMut() -> bool,
     mark: Mark,
     needle: &str,
     timeout: Duration,
 ) -> Result<(), String> {
+    wait_for_line_collecting(source, exited, mark, needle, timeout).map(|_| ())
+}
+
+/// Like [`wait_for_line`], but also returns every line read up to and
+/// including the match, so a failure can be diagnosed from the stream.
+fn wait_for_line_collecting(
+    source: &mut Box<dyn LogSource>,
+    mut exited: impl FnMut() -> bool,
+    mark: Mark,
+    needle: &str,
+    timeout: Duration,
+) -> Result<Vec<String>, String> {
     let deadline = Instant::now() + timeout;
+    let mut collected: Vec<String> = Vec::new();
     loop {
         let lines = source.read_new(mark).map_err(|e| e.to_string())?;
-        if lines.iter().any(|line| line.contains(needle)) {
-            return Ok(());
+        let found = lines.iter().any(|line| line.contains(needle));
+        let quiet = lines.is_empty();
+        collected.extend(lines);
+        if found {
+            return Ok(collected);
         }
-        if lines.is_empty() && exited() {
+        if quiet && exited() {
             return Err("the daemon exited before the expected log line \
                         appeared"
                 .to_string());
@@ -675,20 +696,21 @@ fn wait_for_line(
     }
 }
 
-/// Wait for the daemon's readiness line in its log stream.
+/// Wait for the daemon's readiness line in its log stream, returning every
+/// startup line read up to and including the readiness line.
 fn wait_for_readiness(
     source: &mut Box<dyn LogSource>,
     daemon: &mut DaemonChild,
-) {
+) -> Vec<String> {
     let mark = source.mark().expect("failed to mark the log stream");
-    wait_for_line(
+    wait_for_line_collecting(
         source,
         || daemon.poll_exit(),
         mark,
         READINESS_LINE,
         Duration::from_secs(30),
     )
-    .unwrap_or_else(|e| panic!("the daemon did not become ready: {e}"));
+    .unwrap_or_else(|e| panic!("the daemon did not become ready: {e}"))
 }
 
 /// Collect the phase's log window: poll until the expected emits have
@@ -965,7 +987,7 @@ fn run_e2e_ci(phases: &[Option<&Path>], label: &str) {
     // 3. Start the daemon and wait for its readiness line in the log stream.
     let mut daemon = DaemonChild::spawn(&config_dir());
     let mut source = daemon.log_source();
-    wait_for_readiness(&mut source, &mut daemon);
+    let startup_lines = wait_for_readiness(&mut source, &mut daemon);
     // The readiness wait returns as soon as the line is seen, without a final
     // liveness probe, so a daemon that exits in the gap between logging
     // readiness and its first control call would otherwise surface as a
@@ -974,6 +996,22 @@ fn run_e2e_ci(phases: &[Option<&Path>], label: &str) {
         panic!(
             "the daemon exited right after logging readiness; inspect the \
              daemon's log"
+        );
+    }
+    // The daemon disables its control endpoint on startup failure and logs a
+    // WARN instead of the control-socket line; without this check the first
+    // phase's `set_debug` would fail with a misleading "no daemon is running"
+    // error while the real cause stays hidden in the daemon's log.
+    if !startup_lines
+        .iter()
+        .any(|line| line.contains(CONTROL_SOCKET_LINE))
+    {
+        let tail = &startup_lines[startup_lines.len().saturating_sub(30)..];
+        panic!(
+            "the daemon became ready but never opened its control socket; \
+             the last {} startup log lines:\n{}",
+            tail.len(),
+            tail.join("\n"),
         );
     }
 
