@@ -21,6 +21,7 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use log::{debug, info, warn};
@@ -32,6 +33,15 @@ const APP_NAME: &str = "keymapperd";
 
 /// The control socket file name.
 const SOCKET_NAME: &str = "keymapperd.sock";
+
+/// Read and write timeout for an accepted control connection.
+///
+/// The server handles one connection at a time, so a peer that connects
+/// and stalls (sending nothing, or never reading the reply) would
+/// otherwise block the accept loop until it exits. The timeout turns a
+/// stuck peer into a closed connection; a well-behaved local CLI
+/// completes the exchange in milliseconds.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The control endpoint path.
 ///
@@ -90,12 +100,28 @@ pub fn start() {
     }
 }
 
-/// Accept connections and serve one command per connection.
+/// Accept connections and serve one command per connection, applying the
+/// default [`IO_TIMEOUT`] to each accepted stream.
 fn serve(listener: UnixListener) {
+    serve_with_timeout(listener, IO_TIMEOUT);
+}
+
+/// Accept connections and serve one command per connection, applying
+/// *io_timeout* to each accepted stream.
+fn serve_with_timeout(listener: UnixListener, io_timeout: Duration) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
         };
+        // Bound the I/O before touching the stream so a stalled peer
+        // cannot wedge this single-threaded loop; a timeout surfaces as
+        // an I/O error and closes the connection.
+        let timeout = Some(io_timeout);
+        if stream.set_read_timeout(timeout).is_err()
+            || stream.set_write_timeout(timeout).is_err()
+        {
+            continue;
+        }
         if let Err(e) = handle_connection(&mut stream) {
             // The peer is a well-behaved CLI; a failure is almost always the
             // peer closing early, so a debug note is enough.
@@ -195,6 +221,48 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
 
+        write_frame(&mut stream, "SET-LOG-LEVEL debug").unwrap();
+        let reply = read_frame(&mut stream).unwrap();
+        assert_eq!(reply, "OK debug");
+
+        // Restore the default level so other tests observe it.
+        logging::set_level(log::LevelFilter::Info);
+    }
+
+    /// A peer that connects and sends nothing must not wedge the
+    /// single-threaded accept loop: once its read times out the server
+    /// closes the connection and serves the next client.
+    #[test]
+    fn idle_peer_does_not_wedge_the_server() {
+        use super::super::{logging, read_frame, write_frame};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+
+        let listener = match bind_at(&path) {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!(
+                    "skipping idle_peer_does_not_wedge_the_server: cannot \
+                     bind ({e})"
+                );
+                return;
+            }
+        };
+        // A short timeout so the recycling is observed quickly.
+        std::thread::spawn(move || {
+            serve_with_timeout(listener, Duration::from_millis(200))
+        });
+
+        // A silent peer occupies the loop until its read times out.
+        let _idle = wait_for_socket(&path, Duration::from_secs(2)).unwrap();
+
+        // A second client is served once the first has been dropped.
+        let mut stream =
+            wait_for_socket(&path, Duration::from_secs(2)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         write_frame(&mut stream, "SET-LOG-LEVEL debug").unwrap();
         let reply = read_frame(&mut stream).unwrap();
         assert_eq!(reply, "OK debug");

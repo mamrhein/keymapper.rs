@@ -12,11 +12,14 @@
 //! virtkbdd runs as root and owns the DriverKit virtual keyboard.  It listens
 //! on a UNIX stream socket, verifies each peer with `getpeereid(2)` (rejecting
 //! any uid that is not the console user), and emits each decoded batch through
-//! the virtual keyboard.  One connection at a time: one console user maps to
-//! one keymapperd, so a second connection waits.
+//! the virtual keyboard.  The console-user check is re-applied for the life of
+//! each connection, so a connection that outlives a fast user switch cannot
+//! inject keystrokes into the new console user's session.  One connection at a
+//! time: one console user maps to one keymapperd, so a second connection
+//! waits.
 
 use std::{
-    io::BufReader,
+    io::{BufReader, ErrorKind},
     os::unix::{
         io::AsRawFd,
         net::{UnixListener, UnixStream},
@@ -26,6 +29,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 use log::{error, info, warn};
@@ -34,6 +38,7 @@ use super::{
     config_dir::console_uid, emit::emit_native_key, ipc_frame,
     karabiner_client::KarabinerClient,
 };
+use crate::daemon::mapping_cache::NativeKey;
 
 /// Directory holding the virtkbdd IPC socket.
 const SOCKET_DIR: &str = "/var/run/virtkbdd";
@@ -44,12 +49,23 @@ const SOCKET_NAME: &str = "keymapperd.sock";
 /// Poll timeout for the listener, so shutdown signals are observed promptly.
 const POLL_TIMEOUT_MS: i32 = 500;
 
+/// Read timeout for an accepted keymapperd connection.
+///
+/// Bounds how long one peer can occupy the single-connection accept loop,
+/// so a stalled peer cannot wedge the server indefinitely.  The timeout
+/// is not an error: an idle connection whose console user is still
+/// current keeps waiting.  Its purpose is to wake the connection loop
+/// periodically so it can re-check the console user when no frames are
+/// arriving.
+const READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Run the virtkbdd IPC server until a shutdown signal is received.
 ///
 /// Creates the socket and keeps it owned by the current console user, then
 /// loops: poll the listener (so signals are observed), accept, verify the
-/// peer, and emit each decoded batch.  On a connection close it returns to
-/// accept (keymapperd reconnects on its own).
+/// peer, and emit each decoded batch while re-verifying that the peer is
+/// still the console user.  On a connection close it returns to accept
+/// (keymapperd reconnects on its own).
 ///
 /// virtkbdd starts at boot, before any user logs in, so the console user —
 /// and thus the socket's owner — changes over the daemon's lifetime.  The
@@ -105,7 +121,24 @@ pub fn run_server(
         match (peer_uid(&stream), console_uid()) {
             (Some(peer), Some(console)) if peer == console => {
                 info!("Service keymapperd connected (uid {peer})");
-                handle_connection(stream, conn);
+                // Bound every read so a stalled peer cannot wedge the
+                // accept loop, and so `handle_connection` wakes
+                // periodically to re-check the console user even while
+                // idle.
+                if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
+                    warn!(
+                        "Failed to set the IPC read timeout on {}: {}; \
+                         rejecting connection",
+                        socket_path.display(),
+                        std::io::Error::last_os_error()
+                    );
+                    continue;
+                }
+                handle_connection(stream, peer, &|keys| {
+                    for key in keys {
+                        emit_native_key(conn, key);
+                    }
+                });
             }
             (Some(peer), Some(console)) => {
                 warn!(
@@ -172,18 +205,50 @@ fn peer_uid(stream: &UnixStream) -> Option<libc::uid_t> {
 }
 
 /// Read frames from a keymapperd connection and emit each batch in order.
-fn handle_connection(stream: UnixStream, conn: &KarabinerClient) {
+///
+/// The peer's uid was verified at accept; a fast user switch can change
+/// the console user while the connection stays open, so the check is
+/// repeated with every arriving frame (a cheap `fstat`, see
+/// [`console_uid`]) and on every read timeout while the connection is
+/// idle.  When the console user is no longer the peer the connection is
+/// dropped, so root never emits the previous user's keystrokes into the
+/// new user's session; keymapperd reconnects on its own and is
+/// re-verified at accept.
+fn handle_connection(
+    stream: UnixStream,
+    peer_uid: libc::uid_t,
+    emit: &impl Fn(&[NativeKey]),
+) {
     let mut reader = BufReader::new(stream);
     loop {
         match ipc_frame::decode_stream(&mut reader) {
             Ok(keys) => {
-                for key in &keys {
-                    emit_native_key(conn, key);
+                if console_uid() != Some(peer_uid) {
+                    info!(
+                        "Console user changed while uid {peer_uid} was \
+                         connected; dropping the connection"
+                    );
+                    break;
                 }
+                emit(&keys);
             }
             // A clean close (or a mid-frame close) ends the connection;
             // keymapperd reconnects on its own.
             Err(ipc_frame::IpcFrameError::Eof) => break,
+            // A read timeout only means no frame arrived in time.
+            // Re-check the console user (it may have changed while the
+            // connection was idle) and keep waiting if it did not.
+            Err(ipc_frame::IpcFrameError::Io(ref e))
+                if e.kind() == ErrorKind::WouldBlock =>
+            {
+                if console_uid() != Some(peer_uid) {
+                    info!(
+                        "Console user changed while uid {peer_uid} was idle; \
+                         dropping the connection"
+                    );
+                    break;
+                }
+            }
             Err(e) => {
                 error!("IPC frame error: {e}; closing connection");
                 break;
@@ -241,5 +306,109 @@ fn set_mode(path: &Path, mode: libc::mode_t) {
             path.display(),
             std::io::Error::last_os_error()
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read as _, Write as _},
+        os::unix::net::UnixStream,
+        sync::{Arc, Mutex, mpsc},
+    };
+
+    use super::*;
+    use crate::common::hid_usage::HidUsage;
+
+    fn key() -> NativeKey {
+        NativeKey {
+            modifiers: 0,
+            usage: HidUsage::A,
+        }
+    }
+
+    /// Drain the client end until the server closes the connection, so a
+    /// test never hangs if the server keeps the socket open.
+    fn read_until_eof(client: &mut UnixStream) {
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut buf = [0u8; 64];
+        loop {
+            match client.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(e) => panic!("client read failed: {e}"),
+            }
+        }
+    }
+
+    /// A frame from the current console user is emitted, and the loop
+    /// exits cleanly on the peer close.
+    #[test]
+    fn emits_frames_from_the_console_user() {
+        let Some(console) = console_uid() else {
+            eprintln!("skipping: no console user on this host");
+            return;
+        };
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&ipc_frame::encode(&[key()])).unwrap();
+
+        let emitted = Arc::new(Mutex::new(0usize));
+        let emitted_thread = Arc::clone(&emitted);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            server
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            handle_connection(server, console, &|keys| {
+                *emitted_thread.lock().unwrap() += keys.len();
+            });
+            let _ = done_tx.send(());
+        });
+
+        // The frame is consumed, then dropping the client yields EOF and
+        // the connection loop returns.
+        std::thread::sleep(Duration::from_millis(100));
+        drop(client);
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(*emitted.lock().unwrap(), 1);
+    }
+
+    /// A frame from a peer that is no longer (or was never) the console
+    /// user is not emitted, and the connection is dropped.
+    #[test]
+    fn drops_connection_when_console_user_changed() {
+        let Some(console) = console_uid() else {
+            eprintln!("skipping: no console user on this host");
+            return;
+        };
+        // A uid that cannot be the console user.
+        let stale_uid = console.wrapping_add(1_000);
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.write_all(&ipc_frame::encode(&[key()])).unwrap();
+
+        let emitted = Arc::new(Mutex::new(0usize));
+        let emitted_thread = Arc::clone(&emitted);
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            server
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            handle_connection(server, stale_uid, &|keys| {
+                *emitted_thread.lock().unwrap() += keys.len();
+            });
+            let _ = done_tx.send(());
+        });
+
+        // The server must close the connection instead of emitting.
+        read_until_eof(&mut client);
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(*emitted.lock().unwrap(), 0);
     }
 }

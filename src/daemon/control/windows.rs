@@ -24,13 +24,18 @@
 //! advapi32's `InitializeAcl`/`AddAccessAllowedAce` write an `AclSize` that
 //! does not match the ACE they add, which stricter validation rejects.
 
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    time::Duration,
+};
 
 use log::{debug, info, warn};
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_BROKEN_PIPE, GENERIC_ALL, GetLastError, HANDLE,
+            CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
+            ERROR_PIPE_CONNECTED, GENERIC_ALL, GetLastError, HANDLE,
+            WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             ACL_REVISION, GetLengthSid, GetTokenInformation,
@@ -39,17 +44,21 @@ use windows::{
             TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE,
+            CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
             FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING,
             PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
         },
         System::{
+            IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Pipes::{
                 ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
                 NAMED_PIPE_MODE, PIPE_READMODE_BYTE,
                 PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, WaitNamedPipeW,
             },
-            Threading::{GetCurrentProcess, OpenProcessToken},
+            Threading::{
+                CreateEventW, GetCurrentProcess, OpenProcessToken, ResetEvent,
+                WaitForSingleObject,
+            },
         },
     },
     core::PCWSTR,
@@ -97,6 +106,17 @@ const ERROR_PIPE_BUSY: i32 = 231;
 const BUSY_RETRY_ATTEMPTS: u32 = 20;
 const BUSY_RETRY_WAIT_MS: u32 = 100;
 
+/// Upper bound on every blocking wait in the serve loop: waiting for a
+/// client to connect, reading the request, writing the reply, and waiting
+/// for the client to close after an exchange.
+///
+/// Without it, a peer that connects and sends nothing — or reads the
+/// reply but never closes its handle — holds the single pipe instance
+/// until it exits, wedging the control endpoint. Generous for a local
+/// CLI, which completes an exchange in milliseconds, while keeping the
+/// wedge time bounded.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A named-pipe handle owned by the control-socket thread.
 ///
 /// `HANDLE` is a raw pointer and therefore neither `Send` nor `Sync`, but the
@@ -114,49 +134,35 @@ unsafe impl Send for PipeHandle {}
 
 /// A named-pipe handle as a `Read`/`Write` stream (server side).
 ///
-/// `ReadFile`/`WriteFile` on a synchronous byte-mode pipe block until data is
-/// available, so a peer close surfaces as `ERROR_BROKEN_PIPE` (mapped to EOF)
-/// or an I/O error.
+/// The server pipe is created with `FILE_FLAG_OVERLAPPED`, so
+/// `ReadFile`/`WriteFile` are issued asynchronously and awaited with a
+/// bounded wait (see [`wait_overlapped`]); a peer close still surfaces as
+/// `ERROR_BROKEN_PIPE` (mapped to EOF) or an I/O error. The *event* is
+/// shared with the accept wait and reset before each request, since the
+/// serve loop runs one operation at a time.
 struct Pipe {
     handle: PipeHandle,
+    event: HANDLE,
 }
 
 /// A client-side pipe connection.
 ///
+/// The client opens the pipe synchronously (no `FILE_FLAG_OVERLAPPED`),
+/// so its reads and blocks on the exchange itself are bounded by the
+/// daemon's own [`IO_TIMEOUT`]: the daemon always answers or closes the
+/// instance within one timeout.
+///
 /// Closes its handle on drop. The daemon serves one connection at a time on a
 /// single pipe instance and releases the instance only after the client end
-/// closes (see `wait_for_client_close`), so a handle that outlived the
+/// closes (or the daemon's close-wait times out, see
+/// `wait_for_client_close`), so a handle that outlived the
 /// exchange would keep the instance connected and every later `CreateFileW`
 /// would fail with `ERROR_PIPE_BUSY` until the client process exits.
 struct ClientPipe {
-    inner: Pipe,
+    handle: PipeHandle,
 }
 
 impl Read for ClientPipe {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.inner.read(buf)
-    }
-}
-
-impl Write for ClientPipe {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
-}
-
-impl Drop for ClientPipe {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.inner.handle.0);
-        }
-    }
-}
-
-impl Read for Pipe {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -178,7 +184,7 @@ impl Read for Pipe {
     }
 }
 
-impl Write for Pipe {
+impl Write for ClientPipe {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -200,6 +206,112 @@ impl Write for Pipe {
     fn flush(&mut self) -> std::io::Result<()> {
         // Byte-mode pipe writes are synchronous; there is nothing to flush.
         Ok(())
+    }
+}
+
+impl Drop for ClientPipe {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle.0);
+        }
+    }
+}
+
+impl Read for Pipe {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut ov = OVERLAPPED {
+            hEvent: self.event,
+            ..Default::default()
+        };
+        // The event is reused across operations; a stale signal from a
+        // previous completion would make the wait below return too early.
+        let _ = unsafe { ResetEvent(self.event) };
+        match unsafe {
+            ReadFile(self.handle.0, Some(buf), None, Some(&raw mut ov))
+        } {
+            Ok(()) => {}
+            // The request was queued; the wait picks up the result.
+            Err(_) if unsafe { GetLastError() } == ERROR_IO_PENDING => {}
+            // The peer closed the pipe; report EOF as a clean connection end.
+            Err(_) if unsafe { GetLastError() } == ERROR_BROKEN_PIPE => {
+                return Ok(0);
+            }
+            Err(_) => return Err(std::io::Error::last_os_error()),
+        }
+        match wait_overlapped(self.handle.0, &ov) {
+            Ok(bytes) => Ok(bytes as usize),
+            // A peer close while the read was pending surfaces here.
+            Err(_) if unsafe { GetLastError() } == ERROR_BROKEN_PIPE => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl Write for Pipe {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let mut ov = OVERLAPPED {
+            hEvent: self.event,
+            ..Default::default()
+        };
+        let _ = unsafe { ResetEvent(self.event) };
+        match unsafe {
+            WriteFile(self.handle.0, Some(buf), None, Some(&raw mut ov))
+        } {
+            Ok(()) => {}
+            Err(_) if unsafe { GetLastError() } == ERROR_IO_PENDING => {}
+            Err(_) => return Err(std::io::Error::last_os_error()),
+        }
+        wait_overlapped(self.handle.0, &ov).map(|bytes| bytes as usize)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Byte-mode pipe writes complete in full; there is nothing to flush.
+        Ok(())
+    }
+}
+
+/// Wait for a pending overlapped request on *handle* to complete and
+/// return the number of bytes transferred.
+///
+/// The wait is bounded by [`IO_TIMEOUT`]. On timeout the request is
+/// cancelled and the cancellation is reaped, so the kernel does not
+/// touch *ov* or its event after this function returns. A timeout is
+/// reported as [`std::io::ErrorKind::TimedOut`], which callers treat as
+/// a connection end.
+fn wait_overlapped(handle: HANDLE, ov: &OVERLAPPED) -> std::io::Result<u32> {
+    let timeout_ms = u32::try_from(IO_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
+    match unsafe { WaitForSingleObject(ov.hEvent, timeout_ms) } {
+        WAIT_OBJECT_0 => {
+            let mut transferred = 0u32;
+            // On failure the last error carries the operation's real
+            // failure code (e.g. a broken pipe from a peer close), which
+            // callers inspect.
+            unsafe {
+                GetOverlappedResult(handle, ov, &mut transferred, false)
+            }
+            .map_err(|_| std::io::Error::last_os_error())?;
+            Ok(transferred)
+        }
+        WAIT_TIMEOUT => {
+            unsafe {
+                let _ = CancelIoEx(handle, Some(ov as *const OVERLAPPED));
+                // Reap the cancelled request so `ov` and its event are
+                // released by the kernel before this function returns.
+                let mut transferred = 0u32;
+                let _ =
+                    GetOverlappedResult(handle, ov, &mut transferred, true);
+            }
+            Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+        }
+        // The wait itself failed (e.g. an invalid event handle); surface
+        // the OS error so the caller tears the connection down.
+        _ => Err(std::io::Error::last_os_error()),
     }
 }
 
@@ -404,7 +516,9 @@ fn start_with_name(name: &str) {
                 CreateNamedPipeW(
                     PCWSTR(wide_name.as_ptr()),
                     FILE_FLAGS_AND_ATTRIBUTES(
-                        PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
+                        PIPE_ACCESS_DUPLEX.0
+                            | FILE_FLAG_FIRST_PIPE_INSTANCE.0
+                            | FILE_FLAG_OVERLAPPED.0,
                     ),
                     NAMED_PIPE_MODE(
                         PIPE_TYPE_BYTE.0
@@ -472,16 +586,28 @@ fn start_with_name(name: &str) {
 }
 
 /// Serve connections on a single pipe instance: connect, handle one command,
-/// wait for the client to close, disconnect, repeat.
+/// wait for a client to close, disconnect, repeat.
 fn serve(handle: PipeHandle) {
+    // One manual-reset event reused by every overlapped operation on this
+    // instance (accept, read, write, close-wait); the serve loop runs one
+    // operation at a time, so a single event suffices. The event lives as
+    // long as the serve loop, which never exits.
+    let event =
+        match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+            Ok(event) => event,
+            Err(_) => {
+                warn!(
+                    "Could not create the control-pipe wait event; runtime \
+                     log-level control is disabled"
+                );
+                return;
+            }
+        };
     loop {
-        // With no default timeout, `ConnectNamedPipe` blocks until a client
-        // connects; if one is already waiting it returns
-        // `ERROR_PIPE_CONNECTED`, which we treat as a success.
-        unsafe {
-            let _ = ConnectNamedPipe(handle.0, None);
+        if !accept_client(handle, event) {
+            continue;
         }
-        let mut conn = Pipe { handle };
+        let mut conn = Pipe { handle, event };
         if let Err(e) = handle_connection(&mut conn) {
             debug!("control-socket connection ended: {e}");
         } else {
@@ -499,12 +625,53 @@ fn serve(handle: PipeHandle) {
     }
 }
 
+/// Wait (bounded by [`IO_TIMEOUT`]) for a client to connect.
+///
+/// On an overlapped pipe instance `ConnectNamedPipe` returns immediately:
+/// either the connection already completed (`ERROR_PIPE_CONNECTED`) or the
+/// request was queued (`ERROR_IO_PENDING`) and its event signals once a
+/// client connects. A peer that never shows up is abandoned after one
+/// timeout; the instance stays listening, so the caller simply retries.
+fn accept_client(handle: PipeHandle, event: HANDLE) -> bool {
+    let mut ov = OVERLAPPED {
+        hEvent: event,
+        ..Default::default()
+    };
+    // A stale signal from a previous completion would make the wait return
+    // before a client has connected.
+    let _ = unsafe { ResetEvent(event) };
+    match unsafe { ConnectNamedPipe(handle.0, Some(&raw mut ov)) } {
+        Ok(()) => true,
+        Err(_) => {
+            let code = unsafe { GetLastError() };
+            if code == ERROR_PIPE_CONNECTED {
+                // A client connected before the call was issued.
+                return true;
+            }
+            if code == ERROR_IO_PENDING
+                && wait_overlapped(handle.0, &ov).is_ok()
+            {
+                return true;
+            }
+            debug!("control-pipe accept ended (error {:#010x})", code.0);
+            // Reset the instance so the next accept attempt can connect.
+            unsafe {
+                let _ = DisconnectNamedPipe(handle.0);
+            }
+            false
+        }
+    }
+}
+
 /// Block until the client closes its end of the pipe.
 ///
 /// After a successful exchange the client writes nothing more; the read
 /// therefore stays pending until the peer goes away.  A peer close surfaces
 /// as `ERROR_BROKEN_PIPE`, which [`Pipe::read`] maps to `Ok(0)` (EOF), so a
-/// zero-length read is the close signal and ends the wait.
+/// zero-length read is the close signal and ends the wait. Each read is
+/// bounded by [`IO_TIMEOUT`], so a client that keeps its handle open
+/// without closing is abandoned after one timeout instead of wedging the
+/// single pipe instance.
 fn wait_for_client_close(conn: &mut Pipe) {
     let mut buf = [0u8; 64];
     loop {
@@ -539,9 +706,7 @@ fn connect_to(name: &str) -> std::io::Result<Box<dyn IoStream>> {
         match open_pipe(&name) {
             Ok(handle) => {
                 return Ok(Box::new(ClientPipe {
-                    inner: Pipe {
-                        handle: PipeHandle(handle),
-                    },
+                    handle: PipeHandle(handle),
                 }));
             }
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
@@ -697,7 +862,9 @@ mod tests {
             CreateNamedPipeW(
                 PCWSTR(wide_name.as_ptr()),
                 FILE_FLAGS_AND_ATTRIBUTES(
-                    PIPE_ACCESS_DUPLEX.0 | FILE_FLAG_FIRST_PIPE_INSTANCE.0,
+                    PIPE_ACCESS_DUPLEX.0
+                        | FILE_FLAG_FIRST_PIPE_INSTANCE.0
+                        | FILE_FLAG_OVERLAPPED.0,
                 ),
                 NAMED_PIPE_MODE(
                     PIPE_TYPE_BYTE.0
