@@ -6,8 +6,10 @@
 #
 #   virtkbdd   — root LaunchDaemon (system domain).  Owns the Karabiner
 #                DriverKit virtual-HID socket and emits mapped keys.  The
-#                binary is installed to /usr/local/bin/virtkbdd and the plist
-#                to /Library/LaunchDaemons/.
+#                binary is installed to /Library/Application Support/keymapper/
+#                (a root-only directory; never /usr/local/bin, which is
+#                admin-writable on Intel Macs) and the plist to
+#                /Library/LaunchDaemons/.
 #
 #   keymapperd — user LaunchAgent (gui/<UID> domain).  Captures keyboard
 #                events with a CGEventTap and decides which keys are mapped.
@@ -35,8 +37,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KEYMAPPERD_LABEL="de.adrhinum.keymapperd"
 VIRTKBDD_LABEL="de.adrhinum.virtkbdd"
 
-# Canonical install locations.
-VIRTKBDD_BIN="/usr/local/bin/virtkbdd"
+# Canonical install locations.  The root daemon binary deliberately does not
+# live in /usr/local/bin: that directory (and /usr/local itself) is admin-
+# writable on Intel Macs — and stays admin-writable under Homebrew on Apple
+# Silicon — so a daemon binary there could be replaced by any process of an
+# admin user and would then be run as root by launchd.
+VIRTKBDD_BIN_DIR="/Library/Application Support/keymapper"
+VIRTKBDD_BIN="${VIRTKBDD_BIN_DIR}/virtkbdd"
+# Legacy location of the daemon binary (removed on upgrade).
+LEGACY_VIRTKBDD_BIN="/usr/local/bin/virtkbdd"
 LAUNCH_DAEMONS_DIR="/Library/LaunchDaemons"
 VIRTKBDD_LOG_DIR="/var/log/virtkbdd"
 
@@ -116,6 +125,32 @@ dequarantine() {
     xattr -d com.apple.quarantine "$1" 2>/dev/null || true
 }
 
+# Assert that the given directory and every one of its parent directories are
+# writable only by their owner (no group or world write bit anywhere in the
+# chain).  A binary that launchd runs as root must not live below a directory
+# that non-root users can write into: any such user could delete and replace
+# the binary, which means arbitrary code execution as root at the next load.
+# Fails closed — the install aborts instead of writing into an insecure path.
+assert_secure_path() {
+    local path="$1"
+    local mode
+    while true; do
+        mode="$(stat -f '%OLp' "$path")"
+        # The two lowest octal digits are the group and world permission
+        # bits; the write bit (2) in either lets non-owner users replace the
+        # directory's contents.  A symlinked component reports mode 777 and
+        # is rejected as well.
+        if [ $(( (8#$mode / 8) % 8 & 2 )) -ne 0 ] || [ $(( 8#$mode % 8 & 2 )) -ne 0 ]; then
+            echo "Error: refusing to install into '${1}': '${path}' is group-" >&2
+            echo "or world-writable (mode ${mode}).  A root-run daemon binary must" >&2
+            echo "not live below a directory that non-root users can write into."
+            exit 1
+        fi
+        [ "$path" = "/" ] && break
+        path="$(dirname "$path")"
+    done
+}
+
 # Copy a binary to its canonical location (skipping the copy when source and
 # destination are the same file), then fix ownership.
 install_binary() {
@@ -134,9 +169,25 @@ install_binary() {
 
 echo "Installing virtkbdd (LaunchDaemon)..."
 
-install_binary "$VIRTKBDD_SRC" "$VIRTKBDD_BIN" root:wheel
+# Remove a virtkbdd binary left over from older releases (the daemon used to
+# live in admin-writable /usr/local/bin — see the note on the canonical
+# install locations above).  A dangling root-executable copy there would
+# survive this script, so drop it once the daemon has a secure home.
+if [ -f "$LEGACY_VIRTKBDD_BIN" ]; then
+    rm "$LEGACY_VIRTKBDD_BIN"
+    echo "Removed the legacy ${LEGACY_VIRTKBDD_BIN}."
+fi
+
+mkdir -p "$VIRTKBDD_BIN_DIR"
 mkdir -p "$LAUNCH_DAEMONS_DIR"
 mkdir -p "$VIRTKBDD_LOG_DIR"
+
+# Install the root daemon and its plist only into root-only-writable
+# directory chains; abort otherwise (SEC-04).
+assert_secure_path "$VIRTKBDD_BIN_DIR"
+assert_secure_path "$LAUNCH_DAEMONS_DIR"
+
+install_binary "$VIRTKBDD_SRC" "$VIRTKBDD_BIN" root:wheel
 
 # If the service is already loaded, unload it first so we can replace the plist.
 if launchctl print system/"$VIRTKBDD_LABEL" >/dev/null 2>&1; then

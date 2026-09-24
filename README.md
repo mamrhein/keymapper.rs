@@ -57,7 +57,7 @@ cargo install --path .
 sudo scripts/install-macos.sh
 ```
 
-The script installs `virtkbdd` to `/usr/local/bin/virtkbdd` (LaunchDaemon) and `keymapperd` to `~/.local/bin/keymapperd` (LaunchAgent), and installs the Karabiner DriverKit driver.
+The script installs `virtkbdd` to `/Library/Application Support/keymapper/virtkbdd` (LaunchDaemon; deliberately outside admin-writable `/usr/local/bin`, so no non-root user can replace the root daemon binary) and `keymapperd` to `~/.local/bin/keymapperd` (LaunchAgent), and installs the Karabiner DriverKit driver.
 
 After installing, grant keymapperd the required privacy permissions in System Settings > Privacy & Security: **Input Monitoring** (to see keyboard events) and **Accessibility** (to swallow mapped keys), then run `keymapper daemon restart`.
 

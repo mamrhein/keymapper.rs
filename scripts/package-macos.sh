@@ -86,8 +86,9 @@ cat > "${VOLUME_DIR}/install.sh" << 'INSTALL'
 # Installs keymapper on macOS.
 #
 # Copies the CLI to /usr/local/bin (default) or a custom path, then installs
-# the two daemons — virtkbdd as a root LaunchDaemon (/usr/local/bin/virtkbdd)
-# and keymapperd as a user LaunchAgent (~/.local/bin/keymapperd) — and
+# the two daemons — virtkbdd as a root LaunchDaemon (/Library/Application
+# Support/keymapper/virtkbdd, a root-only directory) and keymapperd as a user
+# LaunchAgent (~/.local/bin/keymapperd) — and
 # installs the Karabiner DriverKit VirtualHIDDevice driver (the device through
 # which virtkbdd emits mapped keys).
 #
@@ -150,8 +151,8 @@ Quick install (requires sudo):
   sudo ./install.sh
 
 This installs the CLI to /usr/local/bin, virtkbdd as a root LaunchDaemon
-(/usr/local/bin/virtkbdd), and keymapperd as a user LaunchAgent
-(~/.local/bin/keymapperd).
+(/Library/Application Support/keymapper/virtkbdd), and keymapperd as a user
+LaunchAgent (~/.local/bin/keymapperd).
 
 Manual install:
   sudo cp bin/keymapper /usr/local/bin/

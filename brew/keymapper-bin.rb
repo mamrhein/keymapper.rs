@@ -42,9 +42,10 @@ cask "keymapper-bin" do
     sudo:       true,
   }
   # Only the CLI is linked into Homebrew's bin — the daemons are installed by
-  # the script to their canonical locations (/usr/local/bin/virtkbdd and
-  # ~/.local/bin/keymapperd), which would conflict with a bin link on Intel
-  # Macs.
+  # the script to their canonical locations (/Library/Application Support/
+  # keymapper/virtkbdd and ~/.local/bin/keymapperd).  In particular, virtkbdd
+  # is kept out of /usr/local/bin, which is admin-writable on Intel Macs and
+  # would allow replacing the root-run daemon binary.
   binary "dist/keymapper/v#{version}/keymapper"
 
   # Runs before the staged files are removed, so the script (and its sibling

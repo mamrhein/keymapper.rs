@@ -116,7 +116,7 @@ cargo install --path .
 sudo scripts/install-macos.sh
 ```
 
-The install script registers the virtkbdd LaunchDaemon (`/usr/local/bin/virtkbdd`), registers the keymapperd LaunchAgent (`~/.local/bin/keymapperd`) for the console user, then installs the pinned Karabiner DriverKit package (downloading it from the pqrs GitHub releases if no local copy is available), activates the DriverKit extension, and registers the Karabiner daemon LaunchDaemon. It is idempotent — safe to run multiple times.
+The install script registers the virtkbdd LaunchDaemon (`/Library/Application Support/keymapper/virtkbdd`, a root-only directory — the daemon no longer lives in admin-writable `/usr/local/bin`), registers the keymapperd LaunchAgent (`~/.local/bin/keymapperd`) for the console user, then installs the pinned Karabiner DriverKit package (downloading it from the pqrs GitHub releases if no local copy is available), activates the DriverKit extension, and registers the Karabiner daemon LaunchDaemon. It is idempotent — safe to run multiple times.
 
 The script also accepts explicit paths: `sudo scripts/install-macos.sh [keymapperd_path] [virtkbdd_path] [karabiner_pkg_path]`.
 
@@ -128,7 +128,7 @@ The release DMG includes the pinned Karabiner DriverKit package and all installa
 sudo ./install.sh
 ```
 
-This copies the CLI to `/usr/local/bin/`, installs virtkbdd to `/usr/local/bin/virtkbdd` and keymapperd to `~/.local/bin/keymapperd`, installs the driver, and registers both launchd services.
+This copies the CLI to `/usr/local/bin/`, installs virtkbdd to `/Library/Application Support/keymapper/virtkbdd` and keymapperd to `~/.local/bin/keymapperd`, installs the driver, and registers both launchd services.
 
 After installing by any method, grant keymapperd the required privacy permissions (see [first-run approval](#first-run-approval)) and run `keymapper daemon restart`.
 
@@ -256,7 +256,7 @@ Mappings resume as soon as keymapperd reconnects — there is no need to restart
 
 **Fix:**
 1. Check that the binary path in the plist is correct: `cat ~/Library/LaunchAgents/de.adrhinum.keymapperd.plist` and `sudo cat /Library/LaunchDaemons/de.adrhinum.virtkbdd.plist`.
-2. Verify the binaries are executable: `ls -la ~/.local/bin/keymapperd /usr/local/bin/virtkbdd`.
+2. Verify the binaries are executable: `ls -la ~/.local/bin/keymapperd "/Library/Application Support/keymapper/virtkbdd"`.
 3. Check the logs: `tail ~/Library/Logs/keymapper/keymapperd-$(date +%Y%m%d).log` and `sudo cat /var/log/virtkbdd/virtkbdd-err.log`.
 4. Reinstall: `sudo scripts/install-macos.sh`.
 
@@ -274,7 +274,7 @@ Mappings resume as soon as keymapperd reconnects — there is no need to restart
 
 ```bash
 sudo ./uninstall-macos.sh
-sudo rm /usr/local/bin/keymapper ~/.local/bin/keymapperd /usr/local/bin/virtkbdd
+sudo rm /usr/local/bin/keymapper ~/.local/bin/keymapperd "/Library/Application Support/keymapper/virtkbdd"
 ```
 
 `uninstall-macos.sh` stops and removes the keymapperd LaunchAgent and the virtkbdd LaunchDaemon (including a legacy keymapperd LaunchDaemon left over from older releases), deactivates the Karabiner DriverKit extension, and removes the Karabiner package files (including its daemon LaunchDaemon). It does not delete log files. After removing both services, all keyboards return to normal operation.
