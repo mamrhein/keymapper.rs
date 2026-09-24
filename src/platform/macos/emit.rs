@@ -30,17 +30,43 @@ use crate::{
 /// modifier and the base key would let IOKit deliver the two values in an
 /// unspecified order.
 ///
+/// A key is emitted only when its whole report sequence fits into the bounded
+/// command channel (SEC-03): a half-emitted key could leave stuck modifiers
+/// on the virtual keyboard, so an oversized key is dropped whole and
+/// counted via [`KarabinerClient::note_dropped`].  The channel has exactly
+/// one producer (this function runs on the single-threaded IPC serve loop)
+/// and the background thread only removes commands, so checking the room
+/// first cannot race with another producer.
+///
 /// Dispatches on the output usage's page:
 /// - Keyboard page (0x07): a 67-byte `keyboard_input` report per transition.
 /// - Consumer page (0x0C): a `consumer_input` report, then an all-clear.
 pub fn emit_native_key(conn: &KarabinerClient, native_key: &NativeKey) {
     if native_key.usage.page() == PAGE_KEYBOARD {
-        for (modifiers, usages) in keyboard_report_sequence(native_key) {
-            let _ = conn.send_keyboard_report(modifiers, &usages);
+        let sequence = keyboard_report_sequence(native_key);
+        if !conn.has_room(sequence.len()) {
+            conn.note_dropped(sequence.len());
+            return;
+        }
+        for (modifiers, usages) in sequence {
+            // With the room checked up front, an enqueue can only fail if
+            // the background thread has died; abort rather than enqueue a
+            // half sequence whose stuck modifiers nobody would clear.
+            if conn.send_keyboard_report(modifiers, &usages).is_err() {
+                return;
+            }
         }
     } else {
-        // Consumer page: post the usage, then an all-clear report to release.
-        let _ = conn.send_consumer_report(native_key.usage.id());
+        // Consumer page: post the usage, then an all-clear report to
+        // release.  Both reports belong to one key and are dropped together
+        // if they do not fit.
+        if !conn.has_room(2) {
+            conn.note_dropped(2);
+            return;
+        }
+        if conn.send_consumer_report(native_key.usage.id()).is_err() {
+            return;
+        }
         let _ = conn.send_consumer_release();
     }
 }

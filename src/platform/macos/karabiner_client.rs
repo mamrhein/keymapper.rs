@@ -40,13 +40,13 @@ use std::{
     os::unix::net::UnixStream,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
 
+use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
 use log::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -94,6 +94,25 @@ const RECONNECT_INTERVAL: Duration = Duration::from_millis(1000);
 /// reports are written to the socket promptly instead of waiting for the
 /// next daemon frame or heartbeat.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Capacity of the command channel between the keystroke emitter and the
+/// background client thread (SEC-03).
+///
+/// The emitter must never block, so it drains into this bounded queue
+/// instead of writing straight to the socket: while the Karabiner daemon
+/// stalls (a stalled daemon blocks the socket write for up to
+/// `WRITE_TIMEOUT`, and while disconnected nothing drains the queue at
+/// all), a flooding peer could otherwise push an unbounded number of
+/// report commands into the root daemon's memory. 4096 slots bound the
+/// queue at roughly a quarter megabyte — far more than typing can
+/// produce between drains; keys that do not fit are dropped whole
+/// (see `emit::emit_native_key`).
+const COMMAND_CHANNEL_CAPACITY: usize = 4096;
+
+/// Warning interval for the command-channel saturation warning, in
+/// dropped report commands, so a flooding peer cannot use the daemon's
+/// log as a flooding amplifier either.
+const DROPPED_LOG_EVERY: usize = 4096;
 
 /// Upper bound for a single frame.  Legitimate frames are at most a few
 /// hundred bytes; the bound guards against corrupt length fields.
@@ -170,6 +189,9 @@ pub enum KarabinerClientError {
     /// The background client thread has exited; commands can no longer be
     /// enqueued.
     ClientDisconnected,
+    /// The bounded command channel is full; further commands are dropped
+    /// until the background client thread drains the queue.
+    ChannelFull,
 }
 
 impl fmt::Display for KarabinerClientError {
@@ -180,6 +202,9 @@ impl fmt::Display for KarabinerClientError {
             }
             Self::ClientDisconnected => {
                 write!(f, "the Karabiner client thread is no longer running")
+            }
+            Self::ChannelFull => {
+                write!(f, "the Karabiner command channel is full")
             }
         }
     }
@@ -322,6 +347,7 @@ fn build_consumer_release_report() -> [u8; CONSUMER_REPORT_SIZE] {
 // ---------------------------------------------------------------------------
 
 /// Commands enqueued for the background client thread.
+#[derive(Clone)]
 enum ClientCommand {
     /// Post a `keyboard_input` report.
     KeyboardReport { modifiers: u8, usages: Vec<u16> },
@@ -339,9 +365,16 @@ enum ClientCommand {
 /// 3 seconds, drops the connection if no frame arrives within 30 seconds,
 /// and answers the daemon's state-update requests.  Reports are enqueued
 /// through [`KarabinerClient::send_keyboard_report`] and
-/// [`KarabinerClient::send_consumer_report`].
+/// [`KarabinerClient::send_consumer_report`].  Enqueuing never blocks: the
+/// command channel is bounded (SEC-03), and a report sequence that does not
+/// fit is dropped whole — a partially emitted key would leave stuck
+/// modifiers on the virtual keyboard.
 pub struct KarabinerClient {
-    tx: mpsc::Sender<ClientCommand>,
+    tx: Sender<ClientCommand>,
+    /// Number of report commands dropped because the command channel was
+    /// full (SEC-03).  Drives the throttled saturation warning in
+    /// [`Self::note_dropped`].
+    dropped: AtomicUsize,
     ready: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
 }
@@ -368,7 +401,7 @@ impl KarabinerClient {
     pub fn connect(
         identity: KeyboardIdentity,
     ) -> Result<Self, KarabinerClientError> {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = bounded(COMMAND_CHANNEL_CAPACITY);
         let ready = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -385,6 +418,7 @@ impl KarabinerClient {
 
         Ok(Self {
             tx,
+            dropped: AtomicUsize::new(0),
             ready,
             shutdown,
         })
@@ -419,12 +453,10 @@ impl KarabinerClient {
         modifiers: u8,
         usages: &[u16],
     ) -> Result<(), KarabinerClientError> {
-        self.tx
-            .send(ClientCommand::KeyboardReport {
-                modifiers,
-                usages: usages.to_vec(),
-            })
-            .map_err(|_| KarabinerClientError::ClientDisconnected)
+        self.enqueue(ClientCommand::KeyboardReport {
+            modifiers,
+            usages: usages.to_vec(),
+        })
     }
 
     /// Enqueue a `consumer_input` report that presses the given Consumer
@@ -433,17 +465,63 @@ impl KarabinerClient {
         &self,
         usage: u16,
     ) -> Result<(), KarabinerClientError> {
-        self.tx
-            .send(ClientCommand::ConsumerPress { usage })
-            .map_err(|_| KarabinerClientError::ClientDisconnected)
+        self.enqueue(ClientCommand::ConsumerPress { usage })
     }
 
     /// Enqueue an all-clear `consumer_input` report that releases any held
     /// consumer key.
     pub fn send_consumer_release(&self) -> Result<(), KarabinerClientError> {
+        self.enqueue(ClientCommand::ConsumerRelease)
+    }
+
+    /// Whether the bounded command channel can accept `n` more reports
+    /// right now.
+    ///
+    /// The keystroke emitter consults this to drop a *whole* key when the
+    /// queue saturates: a half-emitted key could leave stuck modifiers on
+    /// the virtual keyboard, and the check also keeps the queue bounded
+    /// while the background thread is stalled or reconnecting (SEC-03).
+    /// A `None` capacity would mean an unbounded channel, which always has
+    /// room.  The occupancy snapshot can only underestimate the free space
+    /// (the drain thread only removes commands), never overshoot it.
+    pub(super) fn has_room(&self, n: usize) -> bool {
         self.tx
-            .send(ClientCommand::ConsumerRelease)
-            .map_err(|_| KarabinerClientError::ClientDisconnected)
+            .capacity()
+            .is_none_or(|capacity| capacity - self.tx.len() >= n)
+    }
+
+    /// Count `n` reports dropped because the command channel was full.
+    ///
+    /// Warns on the first saturation and then at most once per
+    /// `DROPPED_LOG_EVERY` dropped reports, so a flooding peer cannot use
+    /// the daemon's log as a flooding amplifier either.
+    pub(super) fn note_dropped(&self, n: usize) {
+        let total = self.dropped.fetch_add(n, Ordering::Relaxed) + n;
+        if total == n
+            || (total - n) / DROPPED_LOG_EVERY < total / DROPPED_LOG_EVERY
+        {
+            warn!(
+                "Karabiner command channel full; dropped {total} report \
+                 commands so far"
+            );
+        }
+    }
+
+    /// Enqueue one command without blocking.
+    ///
+    /// Fails with [`KarabinerClientError::ChannelFull`] when the bounded
+    /// command channel is saturated and with `ClientDisconnected` after
+    /// the background client thread has exited.
+    fn enqueue(&self, cmd: ClientCommand) -> Result<(), KarabinerClientError> {
+        match self.tx.try_send(cmd) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => {
+                Err(KarabinerClientError::ChannelFull)
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                Err(KarabinerClientError::ClientDisconnected)
+            }
+        }
     }
 }
 
@@ -462,7 +540,7 @@ impl Drop for KarabinerClient {
 /// The background thread's main loop: connect, run the connection, and retry
 /// until shutdown is requested.
 fn client_loop(
-    rx: mpsc::Receiver<ClientCommand>,
+    rx: Receiver<ClientCommand>,
     ready: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     identity: KeyboardIdentity,
@@ -505,7 +583,7 @@ fn client_loop(
 /// frames until the connection is lost or shutdown is requested.
 fn run_connection(
     mut stream: UnixStream,
-    rx: &mpsc::Receiver<ClientCommand>,
+    rx: &Receiver<ClientCommand>,
     ready: &Arc<AtomicBool>,
     shutdown: &Arc<AtomicBool>,
     identity: KeyboardIdentity,
@@ -686,6 +764,9 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::{
+        common::hid_usage::HidUsage, daemon::mapping_cache::NativeKey,
+    };
 
     /// The expected `virtual_hid_keyboard_initialize` frame.  The Phase-0
     /// wire capture omitted the 24-byte `virtual_hid_keyboard_parameters`
@@ -896,7 +977,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
 
-        let (tx, rx) = mpsc::channel::<ClientCommand>();
+        let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         let ready = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -984,5 +1065,65 @@ mod tests {
         drop(daemon_stream);
         let result = client.join().unwrap();
         assert!(result.is_err()); // EOF from the closed daemon end
+    }
+
+    /// Saturate `client`'s bounded command channel.
+    ///
+    /// Returns `false` when saturation cannot be observed in this
+    /// environment: a background thread that is connected to a live daemon
+    /// drains (or, while the keyboard is not ready, discards) enqueued
+    /// commands as fast as the fill loop fills them, and a channel whose
+    /// receiver is gone rejects enqueues without ever being full.
+    fn saturate_channel(client: &KarabinerClient) -> bool {
+        for _ in 0..2 * COMMAND_CHANNEL_CAPACITY {
+            let cmd = ClientCommand::KeyboardReport {
+                modifiers: 0,
+                usages: vec![0x04],
+            };
+            if client.tx.try_send(cmd).is_err() {
+                break;
+            }
+        }
+        !client.has_room(1)
+    }
+
+    /// A saturated channel makes `send_keyboard_report` fail with
+    /// `ChannelFull` instead of blocking or growing the queue, and a
+    /// rejected enqueue does not count as a dropped key (SEC-03).
+    #[test]
+    fn test_saturated_channel_rejects_reports() {
+        let client =
+            KarabinerClient::connect(OUTPUT_KEYBOARD_IDENTITY).unwrap();
+        if !saturate_channel(&client) {
+            return; // A draining or dead transport never fills the queue.
+        }
+        assert!(matches!(
+            client.send_keyboard_report(0x02, &[0x0E]),
+            Err(KarabinerClientError::ChannelFull)
+        ));
+        // Only the emitter's whole-key drop gate counts dropped keys, not
+        // failed enqueues (see `emit::emit_native_key`).
+        assert_eq!(client.dropped.load(Ordering::Relaxed), 0);
+    }
+
+    /// A key that does not fit into the saturated channel is dropped whole
+    /// and counted, so a half-emitted key that could leave stuck modifiers
+    /// on the virtual keyboard can never reach it (SEC-03).
+    #[test]
+    fn test_saturated_channel_drops_whole_keys() {
+        let client =
+            KarabinerClient::connect(OUTPUT_KEYBOARD_IDENTITY).unwrap();
+        if !saturate_channel(&client) {
+            return; // A draining or dead transport never fills the queue.
+        }
+        let key = NativeKey {
+            modifiers: 0x02, // left shift: the sequence is four reports
+            usage: HidUsage::E,
+        };
+        super::super::emit::emit_native_key(&client, &key);
+        // The whole key was dropped and counted while the queue stayed
+        // full, so no half sequence can sit in the queue.
+        assert_eq!(client.dropped.load(Ordering::Relaxed), 4);
+        assert_eq!(client.tx.len(), COMMAND_CHANNEL_CAPACITY);
     }
 }
