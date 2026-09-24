@@ -138,8 +138,8 @@ assert_secure_path() {
         mode="$(stat -f '%OLp' "$path")"
         # The two lowest octal digits are the group and world permission
         # bits; the write bit (2) in either lets non-owner users replace the
-        # directory's contents.  A symlinked component reports mode 777 and
-        # is rejected as well.
+        # directory's contents.  Symlinked path components are resolved by
+        # stat, so the chain is checked against their final targets.
         if [ $(( (8#$mode / 8) % 8 & 2 )) -ne 0 ] || [ $(( 8#$mode % 8 & 2 )) -ne 0 ]; then
             echo "Error: refusing to install into '${1}': '${path}' is group-" >&2
             echo "or world-writable (mode ${mode}).  A root-run daemon binary must" >&2
