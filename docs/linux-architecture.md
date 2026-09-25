@@ -80,7 +80,7 @@ These are accepted trade-offs of the architecture:
 - **Auto-repeat is not preserved.** Repeats are forwarded as press+release pairs (see [Mapping and emission](#mapping-and-emission)).
 - **Keys without a resolvable HID identity cannot be mapped** (see [Key identity](#key-identity)).
 - **Application scoping depends on compositor support.** If the active application cannot be determined, only global rules apply.
-- **Application scoping needs the session environment.** The daemon detects the display server from `$XDG_SESSION_TYPE`, `$WAYLAND_DISPLAY`, `$DISPLAY` and `$DBUS_SESSION_BUS_ADDRESS`, read from its own (immutable) environment. The unit binds to `graphical-session.target` so those variables are inherited at startup; a compositor without systemd session integration must `systemctl --user import-environment` them before the daemon starts.
+- **Application scoping needs the session environment.** The daemon detects the display server from `$XDG_SESSION_TYPE`, `$WAYLAND_DISPLAY`, `$DISPLAY` and `$DBUS_SESSION_BUS_ADDRESS`, read from its own (immutable) environment. The unit binds to `graphical-session.target` so those variables are inherited at startup. As a fallback for a compositor that doesn't propagate its environment, the Wayland backends discover the `wayland-<N>` socket under `$XDG_RUNTIME_DIR` when `$WAYLAND_DISPLAY` is unset; the X11 and D-Bus backends still rely on `$DISPLAY` (defaulting to `:0`) and the session bus at `$XDG_RUNTIME_DIR/bus`, so a compositor without systemd session integration may still need `systemctl --user import-environment`.
 
 ## Running under systemd
 
