@@ -181,18 +181,18 @@ The daemon exits with an error if no configuration file is found in any search l
 # Macro — emit a sequence of key events
 - mappings:
     F1: [Cmd+C, T]
-````
+```
 
 ### Structure
 
 The document is a YAML sequence of rule groups. Each group has:
 
-| Field       | Required | Description                                                                        |
-| ----------- | -------- | ---------------------------------------------------------------------------------- |
-| `name`      | No       | Human-readable label (ignored at runtime)                                          |
+| Field       | Required | Description                                                                                                             |
+| ----------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `name`      | No       | Human-readable label (ignored at runtime)                                                                               |
 | `apps`      | No       | List of application names (as printed by `keymapper appnames`) to scope the group. Omit or leave empty for global rules |
-| `keyboards` | No       | List of keyboard filters to scope the group. Omit or leave empty for all keyboards |
-| `mappings`  | Yes      | Key-value pairs mapping triggers to outputs                                        |
+| `keyboards` | No       | List of keyboard filters to scope the group. Omit or leave empty for all keyboards                                      |
+| `mappings`  | Yes      | Key-value pairs mapping triggers to outputs                                                                             |
 
 Groups are evaluated in definition order. Within each group, mappings are evaluated top-to-bottom; the first matching trigger wins.
 
@@ -295,12 +295,12 @@ Matching is case-insensitive. On Windows, the names are the main executable file
 
 Manage the configuration file.
 
-| Subcommand           | Description                                                                                                                                                                                         |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `list`               | Print the configuration file to stdout                                                                                                                                                              |
-| `check [path]`       | Validate and diagnose the configuration. Detects no-op rules, duplicate triggers, empty groups, and circular pairs. Accepts an optional path to a config file or directory containing `config.yaml` |
-| `create [dir]`       | Create an empty configuration file at the given directory or the default platform-specific location                                                                                                 |
-| `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names), `--keyboard SPEC` and `--keyboards-global SPEC` (keyboard filters, key=value pairs)                                                                        |
+| Subcommand           | Description                                                                                                                                                                                                       |
+| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`               | Print the configuration file to stdout                                                                                                                                                                            |
+| `check [path]`       | Validate and diagnose the configuration. Detects no-op rules, duplicate triggers, empty groups, and circular pairs. Accepts an optional path to a config file or directory containing `config.yaml`               |
+| `create [dir]`       | Create an empty configuration file at the given directory or the default platform-specific location                                                                                                               |
+| `add TRIGGER OUTPUT` | Add a key-mapping rule. Options: `-g/--group NAME` (default: `"default"`), `-a/--apps APP1,APP2` (comma-separated app names), `--keyboard SPEC` and `--keyboards-global SPEC` (keyboard filters, key=value pairs) |
 
 ### `keymapper keyboards`
 
@@ -348,14 +348,16 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 sudo usermod -aG input $USER
 ```
 
+**Linux — focused app not recognized until keymapperd is restarted:** the daemon reads `WAYLAND_DISPLAY`, `DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` and `XDG_SESSION_TYPE` to detect the foreground app, and a process's environment is fixed when it starts. The service is bound to `graphical-session.target` so it starts only after your compositor has exported those variables. If they are still missing (the compositor doesn't use systemd session integration), import them and restart the daemon: `systemctl --user import-environment WAYLAND_DISPLAY DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE; systemctl --user restart keymapperd`.
+
 **Rules don't take effect:** check that the `apps` value matches the actual application name. Run `keymapper appnames` to find the correct value. Omit `apps` for global rules.
 
 **Config file not found:** the daemon searches the platform-specific application config directory. Use `keymapper config create` to generate a default configuration. Note that symbolic links are not followed.
 
 ## How it works
 
-| Platform | Mechanism                                                                                                                                                                       |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                                                 |
-| macOS    | `CGEventTap` for input capture (keymapperd), Karabiner DriverKit virtual HID driver for event emission (virtkbdd) |
-| Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (see [windows-architecture.md](docs/windows-architecture.md))                                  |
+| Platform | Mechanism                                                                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                |
+| macOS    | `CGEventTap` for input capture (keymapperd), Karabiner DriverKit virtual HID driver for event emission (virtkbdd)                              |
+| Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (see [windows-architecture.md](docs/windows-architecture.md)) |

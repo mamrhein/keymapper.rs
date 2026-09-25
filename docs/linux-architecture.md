@@ -63,7 +63,7 @@ A background thread listens for udev add/remove events on the input subsystem:
 
 ### Application scoping
 
-The active application is queried per key event through a 100 ms TTL cache. The backend is selected by `$XDG_SESSION_TYPE`:
+The active application is queried per key event through a 100 ms TTL cache. The backend is selected by `$XDG_SESSION_TYPE` (falling back to trying X11 then Wayland when it is unset). Because the query reads these display variables from the process environment on every call, and that environment is fixed at `exec`, the daemon must be started after the compositor has exported `WAYLAND_DISPLAY`, `DISPLAY` and `DBUS_SESSION_BUS_ADDRESS`; the systemd unit is therefore bound to `graphical-session.target` rather than `default.target` (see [Running under systemd](#running-under-systemd)).
 
 - **X11:** read `_NET_ACTIVE_WINDOW` from the root window, then `_NET_WM_PID` from that window.
 - **Wayland:** probe compositors in order — KWin (D-Bus `Workspace3.activeWindow`), GNOME Shell (D-Bus `Eval`), COSMIC (the `cosmic-toplevel-info` protocol extension), then wlroots-based and Hyprland compositors (foreign toplevel list).
@@ -80,6 +80,17 @@ These are accepted trade-offs of the architecture:
 - **Auto-repeat is not preserved.** Repeats are forwarded as press+release pairs (see [Mapping and emission](#mapping-and-emission)).
 - **Keys without a resolvable HID identity cannot be mapped** (see [Key identity](#key-identity)).
 - **Application scoping depends on compositor support.** If the active application cannot be determined, only global rules apply.
+- **Application scoping needs the session environment.** The daemon detects the display server from `$XDG_SESSION_TYPE`, `$WAYLAND_DISPLAY`, `$DISPLAY` and `$DBUS_SESSION_BUS_ADDRESS`, read from its own (immutable) environment. The unit binds to `graphical-session.target` so those variables are inherited at startup; a compositor without systemd session integration must `systemctl --user import-environment` them before the daemon starts.
+
+## Running under systemd
+
+`keymapperd` runs as a systemd **user** service installed by `scripts/install-linux.sh`. The unit uses `PartOf=graphical-session.target`, `After=graphical-session.target` and `WantedBy=graphical-session.target`:
+
+- `WantedBy` autostarts the daemon as part of the graphical session transaction.
+- `After` orders it behind the target, which compositors (GNOME, KDE Plasma, Sway, wlroots, Hyprland) start only after importing the display/session variables — so the daemon inherits a usable environment instead of a bare one.
+- `PartOf` stops the daemon when the session goes down.
+
+If focus detection only works after `systemctl --user restart keymapperd`, the compositor started the daemon before exporting its environment; see the Troubleshooting note in the README.
 
 ## Logs
 
