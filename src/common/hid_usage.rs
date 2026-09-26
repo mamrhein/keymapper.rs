@@ -559,7 +559,7 @@ mod tests {
         assert!(!consumer_keys.is_empty(), "expected consumer page keys");
 
         for usage in consumer_keys {
-            let yaml = serde_yaml::to_string(&usage).unwrap_or_else(|e| {
+            let yaml = serde_saphyr::to_string(&usage).unwrap_or_else(|e| {
                 panic!("serialize {} failed: {e}", usage.as_str())
             });
             // The serialized form is the canonical name as a plain scalar.
@@ -570,7 +570,7 @@ mod tests {
                 usage.as_str(),
             );
             let back: HidUsage =
-                serde_yaml::from_str(&yaml).unwrap_or_else(|e| {
+                serde_saphyr::from_str(&yaml).unwrap_or_else(|e| {
                     panic!("deserialize {yaml:?} failed: {e}")
                 });
             assert_eq!(

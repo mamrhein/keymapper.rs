@@ -289,9 +289,9 @@ mod tests {
             port: Some("Bluetooth".to_string()),
         };
 
-        let yaml = serde_yaml::to_string(&spec).unwrap();
+        let yaml = serde_saphyr::to_string(&spec).unwrap();
         let deserialized: KeyboardSpecifier =
-            serde_yaml::from_str(&yaml).unwrap();
+            serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(spec, deserialized);
     }
 

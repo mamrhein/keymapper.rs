@@ -373,7 +373,7 @@ fn cmd_config_create(
 
     // Write an empty config.
     let config = AppConfig::default();
-    let yaml = serde_yaml::to_string(&config)?;
+    let yaml = serde_saphyr::to_string(&config)?;
     fs_err::write(&path, &yaml)?;
 
     println!("Created empty configuration at {}", path.display());
@@ -541,7 +541,7 @@ fn cmd_config_add(
     }
 
     // Write back.
-    let yaml = serde_yaml::to_string(&config)?;
+    let yaml = serde_saphyr::to_string(&config)?;
     fs_err::write(&path, &yaml)?;
 
     println!(

@@ -99,7 +99,7 @@ pub enum CompileError {
 
     /// The config content could not be parsed as an `AppConfig`.
     #[error(transparent)]
-    Parse(#[from] serde_yaml::Error),
+    Parse(#[from] serde_saphyr::DeserializeError),
 }
 
 impl RuntimeLookupCache {

@@ -211,40 +211,71 @@ impl<'de> de::Visitor<'de> for MappingTableVisitor {
     {
         let mut map = IndexMap::new();
 
-        while let Some((key_str, value)) =
-            access.next_entry::<String, serde_yaml::Value>()?
+        while let Some((key_str, outputs)) =
+            access.next_entry::<String, OutputEvents>()?
         {
             let trigger =
                 KeyEvent::parse(&key_str).map_err(de::Error::custom)?;
 
-            let outputs = match value {
-                serde_yaml::Value::String(s) => {
-                    let event =
-                        KeyEvent::parse(&s).map_err(de::Error::custom)?;
-                    vec![event]
-                }
-                serde_yaml::Value::Sequence(seq) => seq
-                    .into_iter()
-                    .map(|v| match v {
-                        serde_yaml::Value::String(s) => {
-                            KeyEvent::parse(&s).map_err(de::Error::custom)
-                        }
-                        _ => Err(de::Error::custom(
-                            "expected an event string in output sequence",
-                        )),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                _ => {
-                    return Err(de::Error::custom(
-                        "expected an event string or list of event strings",
-                    ));
-                }
-            };
-
-            map.insert(trigger, outputs);
+            map.insert(trigger, outputs.0);
         }
 
         Ok(MappingTable(map))
+    }
+}
+
+/// A mapping-table value as written in the YAML document: either a single key
+/// event string or a sequence of event strings.
+///
+/// Deserialized via `deserialize_any` so a sequence is streamed element by
+/// element instead of being materialized as an intermediate `Value` tree.
+/// A malformed event fails as soon as its scalar is read, and YAML alias
+/// (`*ref`) expansions are streamed and capped by the parser's alias budget
+/// (see `AppConfig::load_from_str`), so no document can expand exponentially
+/// during parse.
+struct OutputEvents(Vec<KeyEvent>);
+
+impl<'de> Deserialize<'de> for OutputEvents {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OutputEventsVisitor;
+
+        impl<'de> de::Visitor<'de> for OutputEventsVisitor {
+            type Value = Vec<KeyEvent>;
+
+            fn expecting(
+                &self,
+                formatter: &mut std::fmt::Formatter,
+            ) -> std::fmt::Result {
+                formatter
+                    .write_str("an event string or a list of event strings")
+            }
+
+            fn visit_str<E: de::Error>(
+                self,
+                v: &str,
+            ) -> Result<Self::Value, E> {
+                Ok(vec![KeyEvent::parse(v).map_err(de::Error::custom)?])
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut events = Vec::new();
+                while let Some(s) = seq.next_element::<String>()? {
+                    events
+                        .push(KeyEvent::parse(&s).map_err(de::Error::custom)?);
+                }
+                Ok(events)
+            }
+        }
+
+        deserializer
+            .deserialize_any(OutputEventsVisitor)
+            .map(OutputEvents)
     }
 }
 
@@ -463,8 +494,28 @@ pub enum ConfigDiagnostic {
 }
 
 impl AppConfig {
-    pub fn load_from_str(yaml_str: &str) -> Result<Self, serde_yaml::Error> {
-        serde_yaml::from_str(yaml_str)
+    /// Parse a YAML config document.
+    ///
+    /// Parsing runs through `serde-saphyr` with tightened budgets: YAML
+    /// alias (`*ref`) replay is capped per anchor, by replay stack depth, and
+    /// by the total number of replayed events, and the overall parser event
+    /// count is capped as well.  A crafted alias-expansion bomb therefore
+    /// fails with a parse error instead of ballooning memory during parse
+    /// (SEC-08).
+    pub fn load_from_str(
+        yaml_str: &str,
+    ) -> Result<Self, serde_saphyr::DeserializeError> {
+        let options = serde_saphyr::options! {
+            budget: serde_saphyr::budget! {
+                max_events: 100_000,
+            },
+            alias_limits: serde_saphyr::alias_limits! {
+                max_total_replayed_events: 10_000,
+                max_replay_stack_depth: 32,
+                max_alias_expansions_per_anchor: 64,
+            },
+        };
+        serde_saphyr::from_str_with_options(yaml_str, options)
     }
 
     /// Analyse the parsed configuration and return a list of diagnostic
@@ -648,14 +699,80 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // SEC-08: alias-expansion budgets
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn alias_below_budget_still_resolves() {
+        // Two groups share one aliased mapping table.  The alias replay is
+        // far below the alias budget, so it must still resolve: the
+        // tightened budgets must not reject legitimate aliased configs.
+        let yaml = r#"
+- name: "g1"
+  mappings: &m
+    CapsLock: LeftControl
+- name: "g2"
+  mappings: *m
+"#;
+        let config = AppConfig::load_from_str(yaml).unwrap();
+        assert_eq!(config.groups.len(), 2);
+        let g1: Vec<_> = config.groups[0].mappings.iter().collect();
+        let g2: Vec<_> = config.groups[1].mappings.iter().collect();
+        assert_eq!(
+            g1, g2,
+            "the aliased mapping table in group 2 must resolve to the \
+             anchored one from group 1"
+        );
+    }
+
+    #[test]
+    fn alias_expansion_bomb_is_rejected() {
+        // Each chain level references the previous anchor eight times, so
+        // the fully expanded event count grows exponentially (8^23 events
+        // for the full chain).  A parser that materializes aliases into an
+        // intermediate `Value` tree would balloon to gigabytes here; the
+        // streaming parser must stop at the replay budget and fail fast
+        // instead (SEC-08).
+        use std::time::{Duration, Instant};
+
+        let mut yaml = String::from(
+            "- mappings:\n    CapsLock: &a0 [LeftControl, LeftShift]\n",
+        );
+        for (idx, letter) in ('B'..='X').enumerate() {
+            let level = idx + 1;
+            yaml.push_str(&format!("    {letter}: &a{level} ["));
+            for i in 0..8 {
+                if i > 0 {
+                    yaml.push_str(", ");
+                }
+                yaml.push_str(&format!("*a{}", level - 1));
+            }
+            yaml.push_str("]\n");
+        }
+
+        let start = Instant::now();
+        let result = AppConfig::load_from_str(&yaml);
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_err(),
+            "the alias-expansion bomb must not parse into a config"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "parsing the bomb took {elapsed:?}; the alias budget did not cap \
+             the expansion"
+        );
+    }
+
     #[test]
     fn display_serializes_bare_and_chord_events() {
         let bare = KeyEvent::parse("CapsLock").unwrap();
-        assert_eq!(serde_yaml::to_string(&bare).unwrap().trim(), "CapsLock");
+        assert_eq!(serde_saphyr::to_string(&bare).unwrap().trim(), "CapsLock");
 
         let chord = KeyEvent::parse("LeftCommand+LeftShift+T").unwrap();
         assert_eq!(
-            serde_yaml::to_string(&chord).unwrap().trim(),
+            serde_saphyr::to_string(&chord).unwrap().trim(),
             "LeftCommand+LeftShift+T"
         );
     }
@@ -1304,7 +1421,7 @@ groups:
       CapsLock: LeftControl
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
-        let serialized = serde_yaml::to_string(&config).unwrap();
+        let serialized = serde_saphyr::to_string(&config).unwrap();
         let config2 = AppConfig::load_from_str(&serialized).unwrap();
         assert_eq!(config.keyboards, config2.keyboards);
     }
@@ -1321,7 +1438,7 @@ groups:
       CapsLock: LeftControl
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
-        let serialized = serde_yaml::to_string(&config).unwrap();
+        let serialized = serde_saphyr::to_string(&config).unwrap();
         let config2 = AppConfig::load_from_str(&serialized).unwrap();
         assert_eq!(config.groups[0].keyboards, config2.groups[0].keyboards);
     }
@@ -1335,7 +1452,7 @@ groups:
     CapsLock: LeftControl
 "#;
         let config = AppConfig::load_from_str(yaml).unwrap();
-        let serialized = serde_yaml::to_string(&config).unwrap();
+        let serialized = serde_saphyr::to_string(&config).unwrap();
         assert!(!serialized.contains("keyboards"));
     }
 
