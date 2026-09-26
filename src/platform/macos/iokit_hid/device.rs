@@ -456,6 +456,9 @@ impl HidDeviceManager {
 
         // Build a custom matching dictionary for keyboards.  We match on
         // primary usage page (0x01) and primary usage (0x06 = keyboard).
+        // The CF factories below return null only under memory pressure,
+        // but a null passed to `CFDictionarySetValue` would be UB, so each
+        // factory result is checked and a null aborts the construction.
         let dict = unsafe {
             CFDictionaryCreateMutable(
                 kCFAllocatorDefault,
@@ -465,6 +468,17 @@ impl HidDeviceManager {
             )
         };
 
+        if dict.is_null() {
+            // Release the manager before bailing so a retried construction
+            // does not leak this reference.
+            unsafe { CFRelease(manager as *const _) };
+
+            return Err(IoKitError::IoReturn(
+                0xfffffff0,
+                "CFDictionaryCreateMutable returned null".into(),
+            ));
+        }
+
         // kHIDPrimaryUsagePage = 0x01.
         let usage_page_number = unsafe {
             CFNumberCreate(
@@ -473,17 +487,9 @@ impl HidDeviceManager {
                 &0x01u32 as *const _ as *const _,
             )
         };
-        // "Primary Usage Page" key.
-        let usage_page_key = create_cf_string("Primary Usage Page");
-        unsafe {
-            CFDictionarySetValue(
-                dict,
-                usage_page_key as *const _,
-                usage_page_number as *const _,
-            );
-        }
-
-        // kHIDPrimaryUsage = 0x06 (keyboard).
+        // kHIDPrimaryUsage = 0x06 (keyboard).  Both numbers are created
+        // before either is inserted so the release-on-error path below can
+        // never face a dictionary holding a null entry.
         let usage_number = unsafe {
             CFNumberCreate(
                 kCFAllocatorDefault,
@@ -491,8 +497,39 @@ impl HidDeviceManager {
                 &0x06u32 as *const _ as *const _,
             )
         };
+
+        if usage_page_number.is_null() || usage_number.is_null() {
+            unsafe {
+                CFRelease(dict as *const _);
+
+                if !usage_page_number.is_null() {
+                    CFRelease(usage_page_number as *const _);
+                }
+
+                if !usage_number.is_null() {
+                    CFRelease(usage_number as *const _);
+                }
+
+                CFRelease(manager as *const _);
+            }
+
+            return Err(IoKitError::IoReturn(
+                0xfffffff0,
+                "CFNumberCreate returned null".into(),
+            ));
+        }
+
+        // "Primary Usage Page" and "Primary Usage" keys.  These can never
+        // be null: `create_cf_string` transfers a live, retained NSString.
+        let usage_page_key = create_cf_string("Primary Usage Page");
         let usage_key = create_cf_string("Primary Usage");
+
         unsafe {
+            CFDictionarySetValue(
+                dict,
+                usage_page_key as *const _,
+                usage_page_number as *const _,
+            );
             CFDictionarySetValue(
                 dict,
                 usage_key as *const _,
@@ -507,7 +544,9 @@ impl HidDeviceManager {
             IOHIDManagerSetDeviceMatching(manager, dict);
         }
 
-        // Release CF objects.
+        // Release CF objects (the manager copied the dictionary when it was
+        // applied, and the dictionary was created with null key/value
+        // callbacks, so the keys and numbers are not retained by it).
         unsafe {
             CFRelease(dict as *const _);
             CFRelease(usage_page_key as *const _);
@@ -645,6 +684,11 @@ impl Drop for HidDeviceManager {
         if !self.manager.is_null() {
             unsafe {
                 IOHIDManagerClose(self.manager, kIOHIDOptionsTypeNone);
+
+                // `IOHIDManagerCreate` follows the Create Rule; release the
+                // reference we own, otherwise every constructed manager
+                // leaks one CF object.
+                CFRelease(self.manager as *const _);
             }
         }
     }
