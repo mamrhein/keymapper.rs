@@ -42,7 +42,7 @@ use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
 use hotplug::start_hotplug_monitor;
 use libc::epoll_event;
-use log::{error, info};
+use log::{error, info, warn};
 use parking_lot::{Mutex, RwLock};
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
@@ -175,13 +175,22 @@ pub fn start_mapping(
     // emissions run outside the lock (SEC-14).
     let managed_devices = Arc::new(Mutex::new(managed_devices));
 
-    // Start hot-plug monitor for dynamic device add/remove.
-    start_hotplug_monitor(
+    // Start hot-plug monitor for dynamic device add/remove.  A thread
+    // spawn failure (e.g. fd or thread exhaustion) is non-fatal, matching
+    // the control socket: the daemon keeps serving the devices grabbed at
+    // startup, only dynamic add/remove is lost until a restart.
+    if let Err(e) = start_hotplug_monitor(
         Arc::clone(&lookup),
         Arc::clone(&managed_devices),
         epoll_fd.as_raw_fd(),
         keyboard_filter,
-    );
+        Arc::clone(&shutdown),
+    ) {
+        warn!(
+            "Failed to start hot-plug monitor ({e}); hot-plug handling is \
+             disabled until the daemon is restarted."
+        );
+    }
 
     let mut events = vec![epoll_event { events: 0, u64: 0 }; 64];
 

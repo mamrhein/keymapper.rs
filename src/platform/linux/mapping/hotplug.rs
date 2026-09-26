@@ -17,8 +17,12 @@
 
 use std::{
     os::unix::io::{AsRawFd, RawFd},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
+    time::{Duration, Instant},
 };
 
 use libc::c_int;
@@ -40,11 +44,36 @@ use crate::{
     platform::linux::keyboard::build_keyboard_from_udev,
 };
 
-/// Spawn a background thread that listens for keyboard device add/remove
-/// events via udev and dynamically updates the managed device set.
+/// Minimum delay before the supervisor restarts a monitor that exited
+/// unexpectedly.
+const RESTART_DELAY_MIN: Duration = Duration::from_secs(1);
+/// Cap for the exponentially growing restart delay: a permanently broken
+/// udev (or an exhausted fd budget) costs one retry per cap, not a spin.
+const RESTART_DELAY_MAX: Duration = Duration::from_secs(30);
+/// A monitor run at least this long is considered healthy, so the restart
+/// delay resets to its minimum for the next failure.
+const HEALTHY_RUN: Duration = Duration::from_secs(60);
+/// Granularity of the interruptible sleep between monitor restarts.
+const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Spawn a supervised background thread that listens for keyboard device
+/// add/remove events via udev and dynamically updates the managed device
+/// set.
 ///
 /// New devices are only grabbed if they match the global keyboard filter.
 /// Removed devices are ungrabbed and removed from the epoll set.
+///
+/// The monitor is supervised: when it exits unexpectedly (poll failure,
+/// or the socket reporting `POLLERR`/`POLLHUP`/`POLLNVAL`), the thread
+/// rebuilds it and keeps listening, with capped exponential backoff so a
+/// permanently broken udev cannot spin.  Every (re)start re-syncs the
+/// device set, so keyboards that appeared while the monitor was down are
+/// adopted anyway.
+///
+/// Returns an error if the monitor thread cannot be spawned (e.g. thread
+/// or fd exhaustion).  The caller treats that as non-fatal — matching the
+/// control socket — and the daemon keeps serving the devices grabbed at
+/// startup.
 ///
 /// **Limitation:** changes to the global `keyboards:` filter at runtime do
 /// not affect the grab list. The user must restart the daemon for
@@ -54,131 +83,194 @@ pub(super) fn start_hotplug_monitor(
     managed_devices: Arc<Mutex<Vec<ManagedDevice>>>,
     epoll_fd: RawFd,
     global_filter: Option<Vec<KeyboardSpecifier>>,
-) {
-    use udev::EventType;
-
+    shutdown: Arc<AtomicBool>,
+) -> Result<(), std::io::Error> {
     thread::Builder::new()
         .name("keymapper-hotplug".into())
         .spawn(move || {
-            // Set up the udev monitor.
-            let socket = match MonitorBuilder::new() {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!("Failed to create udev monitor: {e}");
-                    return;
-                }
-            };
-
-            let socket = match socket.match_subsystem("input") {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!("Failed to match input subsystem: {e}");
-                    return;
-                }
-            };
-
-            let socket = match socket.listen() {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Failed to start udev monitor: {e}");
-                    return;
-                }
-            };
-
-            info!("Hot-plug monitor started.");
-
-            // Resync: the startup udev snapshot in `start_mapping` and this
-            // monitor's `listen()` call are not atomic.  A keyboard added in
-            // between (e.g. a test injector created moments before daemon
-            // start, or a device whose udev tagging finished after the
-            // snapshot) never emits a fresh "add" event to this monitor and
-            // would otherwise never be grabbed.  Rescan and adopt any
-            // missing keyboards to close that window.
-            resync_devices(
-                &lookup,
-                &managed_devices,
+            supervise_hotplug(
+                lookup,
+                managed_devices,
                 epoll_fd,
-                &global_filter,
+                global_filter,
+                shutdown,
             );
-
-            // The monitor socket is non-blocking:
-            // `udev_monitor_receive_device` (what `socket.iter()`
-            // calls) returns NULL as soon as no event is pending,
-            // so a bare iteration loop would end immediately and
-            // the monitor would die on startup.  Block in `poll` until udev
-            // has an event, then receive it.
-            let mut pollfd = libc::pollfd {
-                fd: socket.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            let mut iter = socket.iter();
-
-            loop {
-                let ret = unsafe { libc::poll(&mut pollfd, 1, -1) };
-                if ret < 0 {
-                    if std::io::Error::last_os_error().raw_os_error()
-                        == Some(libc::EINTR)
-                    {
-                        continue;
-                    }
-                    warn!(
-                        "Udev monitor poll failed: {}",
-                        std::io::Error::last_os_error()
-                    );
-                    break;
-                }
-                if pollfd.revents
-                    & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
-                    != 0
-                {
-                    warn!(
-                        "Udev monitor socket closed, hot-plug monitoring \
-                         stopped"
-                    );
-                    break;
-                }
-
-                // `poll` reported data, but the receive can still find
-                // nothing (spurious wake-up) — keep polling in that case.
-                let Some(event) = iter.next() else {
-                    continue;
-                };
-
-                let udev_device = event.device();
-
-                // Filter for keyboards manually, since the netlink monitor
-                // doesn't support property-based filtering.
-                let is_keyboard = udev_device
-                    .property_value("ID_INPUT_KEYBOARD")
-                    .map(|s| s.to_string_lossy() == "1")
-                    .unwrap_or(false);
-                if !is_keyboard {
-                    continue;
-                }
-
-                match event.event_type() {
-                    EventType::Add => {
-                        handle_device_add(
-                            &lookup,
-                            &udev_device,
-                            &managed_devices,
-                            epoll_fd,
-                            &global_filter,
-                        );
-                    }
-                    EventType::Remove => {
-                        handle_device_remove(
-                            &udev_device,
-                            &managed_devices,
-                            epoll_fd,
-                        );
-                    }
-                    _ => {}
-                }
-            }
         })
-        .expect("failed to spawn hot-plug monitor thread");
+        .map(drop)
+}
+
+/// Keep [`run_hotplug_monitor`] running for the lifetime of the daemon.
+///
+/// Restarts the monitor when it exits unexpectedly, backing off
+/// exponentially (capped) between restarts, and stops when `shutdown` is
+/// set.
+fn supervise_hotplug(
+    lookup: Arc<RwLock<dyn Lookup>>,
+    managed_devices: Arc<Mutex<Vec<ManagedDevice>>>,
+    epoll_fd: RawFd,
+    global_filter: Option<Vec<KeyboardSpecifier>>,
+    shutdown: Arc<AtomicBool>,
+) {
+    let mut delay = RESTART_DELAY_MIN;
+    while !shutdown.load(Ordering::Acquire) {
+        let started = Instant::now();
+        run_hotplug_monitor(
+            &lookup,
+            &managed_devices,
+            epoll_fd,
+            &global_filter,
+        );
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+        info!(
+            "Hot-plug monitor exited; restarting it in {} s.",
+            delay.as_secs()
+        );
+        sleep_or_shutdown(delay, &shutdown);
+        delay = next_restart_delay(delay, started.elapsed() >= HEALTHY_RUN);
+    }
+}
+
+/// Next restart delay for the monitor: reset to the minimum after a
+/// healthy run, otherwise double the current delay, capped at
+/// [`RESTART_DELAY_MAX`].
+fn next_restart_delay(current: Duration, run_was_healthy: bool) -> Duration {
+    if run_was_healthy {
+        RESTART_DELAY_MIN
+    } else {
+        (current * 2).min(RESTART_DELAY_MAX)
+    }
+}
+
+/// Sleep up to *delay*, returning early once *shutdown* is set.
+fn sleep_or_shutdown(delay: Duration, shutdown: &AtomicBool) {
+    let deadline = Instant::now() + delay;
+    while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
+        thread::sleep(SHUTDOWN_CHECK_INTERVAL);
+    }
+}
+
+/// Run the udev monitor event loop until it becomes unusable.
+///
+/// Returns when the monitor cannot be (re)created, when `poll` fails, or
+/// when the monitor socket reports `POLLERR`/`POLLHUP`/`POLLNVAL` (e.g.
+/// after a udevd restart or under fd exhaustion).  [`supervise_hotplug`]
+/// restarts this function when it returns.
+fn run_hotplug_monitor(
+    lookup: &Arc<RwLock<dyn Lookup>>,
+    managed_devices: &Arc<Mutex<Vec<ManagedDevice>>>,
+    epoll_fd: RawFd,
+    global_filter: &Option<Vec<KeyboardSpecifier>>,
+) {
+    use udev::EventType;
+
+    // Set up the udev monitor.
+    let socket = match MonitorBuilder::new() {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to create udev monitor: {e}");
+            return;
+        }
+    };
+
+    let socket = match socket.match_subsystem("input") {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to match input subsystem: {e}");
+            return;
+        }
+    };
+
+    let socket = match socket.listen() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to start udev monitor: {e}");
+            return;
+        }
+    };
+
+    info!("Hot-plug monitor started.");
+
+    // Resync: the startup udev snapshot in `start_mapping` and this
+    // monitor's `listen()` call are not atomic.  A keyboard added in
+    // between (e.g. a test injector created moments before daemon
+    // start, or a device whose udev tagging finished after the
+    // snapshot) never emits a fresh "add" event to this monitor and
+    // would otherwise never be grabbed.  Rescan and adopt any
+    // missing keyboards to close that window.  The same holds across a
+    // monitor restart: devices that appeared while the previous monitor
+    // socket was dead emitted no event this socket will ever see.
+    resync_devices(lookup, managed_devices, epoll_fd, global_filter);
+
+    // The monitor socket is non-blocking:
+    // `udev_monitor_receive_device` (what `socket.iter()`
+    // calls) returns NULL as soon as no event is pending,
+    // so a bare iteration loop would end immediately and
+    // the monitor would die on startup.  Block in `poll` until udev
+    // has an event, then receive it.
+    let mut pollfd = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let mut iter = socket.iter();
+
+    loop {
+        let ret = unsafe { libc::poll(&mut pollfd, 1, -1) };
+        if ret < 0 {
+            if std::io::Error::last_os_error().raw_os_error()
+                == Some(libc::EINTR)
+            {
+                continue;
+            }
+            warn!(
+                "Udev monitor poll failed: {}",
+                std::io::Error::last_os_error()
+            );
+            break;
+        }
+        if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)
+            != 0
+        {
+            warn!("Udev monitor socket closed.");
+            break;
+        }
+
+        // `poll` reported data, but the receive can still find
+        // nothing (spurious wake-up) — keep polling in that case.
+        let Some(event) = iter.next() else {
+            continue;
+        };
+
+        let udev_device = event.device();
+
+        // Filter for keyboards manually, since the netlink monitor
+        // doesn't support property-based filtering.
+        let is_keyboard = udev_device
+            .property_value("ID_INPUT_KEYBOARD")
+            .map(|s| s.to_string_lossy() == "1")
+            .unwrap_or(false);
+        if !is_keyboard {
+            continue;
+        }
+
+        match event.event_type() {
+            EventType::Add => {
+                handle_device_add(
+                    lookup,
+                    &udev_device,
+                    managed_devices,
+                    epoll_fd,
+                    global_filter,
+                );
+            }
+            EventType::Remove => {
+                handle_device_remove(&udev_device, managed_devices, epoll_fd);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Rescan udev for keyboards that are not yet managed and adopt them.
@@ -552,5 +644,43 @@ mod tests {
             Some(&specs),
         );
         assert!(filtered_usb.is_empty(), "USB device should NOT match");
+    }
+
+    // -----------------------------------------------------------------------
+    // Restart-backoff tests
+    // -----------------------------------------------------------------------
+    //
+    // The supervisor restarts the udev monitor when it exits unexpectedly.
+    // The backoff must grow on consecutive failures (so a permanently
+    // broken udev cannot spin) and reset after a healthy run.
+
+    #[test]
+    fn restart_delay_doubles_on_failure() {
+        assert_eq!(
+            next_restart_delay(RESTART_DELAY_MIN, false),
+            RESTART_DELAY_MIN * 2
+        );
+    }
+
+    #[test]
+    fn restart_delay_caps_at_max() {
+        // Doubling past the cap clamps to the cap and stays there.
+        assert_eq!(
+            next_restart_delay(RESTART_DELAY_MAX, false),
+            RESTART_DELAY_MAX
+        );
+        let mut delay = RESTART_DELAY_MIN;
+        for _ in 0..10 {
+            delay = next_restart_delay(delay, false);
+        }
+        assert_eq!(delay, RESTART_DELAY_MAX);
+    }
+
+    #[test]
+    fn restart_delay_resets_after_healthy_run() {
+        assert_eq!(
+            next_restart_delay(RESTART_DELAY_MAX, true),
+            RESTART_DELAY_MIN
+        );
     }
 }
