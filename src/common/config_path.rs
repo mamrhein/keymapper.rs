@@ -34,7 +34,10 @@ pub fn default_config_path() -> Option<PathBuf> {
 /// then the process's own platform-specific application config directory.
 ///
 /// Symbolic links are rejected; `config.yaml` must be a regular file.
-/// Returns `None` when no configuration file exists in any search location.
+/// The returned path is only a candidate: it is read through the hardened
+/// reader, which additionally verifies the parent-directory chain on every
+/// read.  Returns `None` when no configuration file exists in any search
+/// location.
 pub fn find_config_path() -> Option<PathBuf> {
     for dir in search_dirs() {
         let path = dir.join(CONFIG_FILE);
@@ -47,7 +50,9 @@ pub fn find_config_path() -> Option<PathBuf> {
 
 /// Search for the configuration file, returning a clear error if the found
 /// file is a symbolic link.  This is the variant used by the daemon and CLI
-/// to provide actionable feedback.
+/// to provide actionable feedback.  The returned path is only a candidate:
+/// it is read through the hardened reader, which additionally verifies the
+/// parent-directory chain on every read.
 ///
 /// Returns:
 /// - `Ok(path)` when a valid config file is found.

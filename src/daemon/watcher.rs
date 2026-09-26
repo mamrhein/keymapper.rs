@@ -104,7 +104,11 @@ fn spawn_reload_thread(
                     };
 
                     if should_log {
-                        error!("Failed to hot-reload configuration: {msg}");
+                        // `{:?}` escapes control characters: the error text
+                        // can quote raw config fragments (unknown key names,
+                        // parser snippets), which would otherwise forge log
+                        // lines in the daemon log.
+                        error!("Failed to hot-reload configuration: {msg:?}");
                         if consecutive_errors > ERROR_THROTTLE_LIMIT {
                             error!(
                                 "(Throttling further error output until a \
@@ -124,7 +128,9 @@ fn spawn_reload_thread(
 /// Attempt a single reload of the configuration file.  The file is read via
 /// [`read_config_content`], which applies the same security checks as the
 /// initial load (symlink, regular-file, size, ownership, world-writable) on a
-/// single open descriptor.  On success the compiled cache is swapped in.
+/// single open descriptor and re-inspects the parent-directory chain, so a
+/// symlink swapped into a parent directory after startup aborts this reload.
+/// On success the compiled cache is swapped in.
 fn attempt_reload(
     config_path: &Path,
     state: &Arc<RwLock<dyn MutableLookup>>,
