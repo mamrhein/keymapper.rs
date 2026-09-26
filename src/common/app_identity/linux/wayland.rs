@@ -22,7 +22,11 @@
 //! through the `cosmic-toplevel-info` Wayland protocol extension instead
 //! (bound at protocol version 1 — see `query_cosmic`).
 
-use std::time::Duration;
+use std::{
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use cosmic_protocols::toplevel_info::v1::client::{
     zcosmic_toplevel_handle_v1, zcosmic_toplevel_info_v1,
@@ -53,6 +57,66 @@ pub fn get_active_app_name() -> String {
     }
 
     "unknown".to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Wayland connection (with session-environment fallback)
+// ---------------------------------------------------------------------------
+
+/// Connect to the Wayland compositor, falling back to discovering the socket
+/// under `$XDG_RUNTIME_DIR` when the usual environment is unavailable.
+///
+/// The standard path (`WAYLAND_DISPLAY`, or an inherited `WAYLAND_SOCKET`) is
+/// tried first.  A daemon started by systemd before the compositor exported
+/// `WAYLAND_DISPLAY` has neither, so we then scan `$XDG_RUNTIME_DIR` for
+/// `wayland-<N>` sockets and use the lowest display number (the compositor's
+/// default display is `wayland-0`).  This is defense-in-depth for a
+/// compositor that does not propagate its environment into a systemd user
+/// service; the unit normally orders the daemon behind
+/// `graphical-session.target` so `WAYLAND_DISPLAY` is already set.
+fn connect_wayland() -> Option<Connection> {
+    if let Ok(conn) = Connection::connect_to_env() {
+        return Some(conn);
+    }
+    let stream = discover_wayland_stream()?;
+    Connection::from_socket(stream).ok()
+}
+
+/// Open a [`UnixStream`] to the first reachable compositor socket found under
+/// `$XDG_RUNTIME_DIR`.  Returns `None` when the runtime directory is missing
+/// or no `wayland-<N>` socket can be reached.
+fn discover_wayland_stream() -> Option<UnixStream> {
+    let runtime_dir =
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
+    if !runtime_dir.is_absolute() {
+        return None;
+    }
+    let socket = find_wayland_socket(&runtime_dir)?;
+    UnixStream::connect(socket).ok()
+}
+
+/// Find the `wayland-<N>` socket with the smallest display number in `dir`.
+///
+/// Only entries whose name is exactly `wayland-` followed by a number qualify,
+/// so related files such as `wayland-0.lock` are ignored.
+fn find_wayland_socket(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(u32, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let os_name = entry.file_name();
+        let name = os_name.to_string_lossy();
+        let Some(suffix) = name.strip_prefix("wayland-") else {
+            continue;
+        };
+        let Ok(display) = suffix.parse::<u32>() else {
+            continue;
+        };
+        // `as_ref` keeps ownership of `best`; only the borrowed display number
+        // is inspected before we (possibly) overwrite it.
+        if best.as_ref().is_none_or(|(lowest, _)| display < *lowest) {
+            best = Some((display, entry.path()));
+        }
+    }
+    best.map(|(_, path)| path)
 }
 
 // ---------------------------------------------------------------------------
@@ -150,9 +214,8 @@ fn query_gnome() -> String {
 /// events, so the active toplevel can never be determined.  Version 1,
 /// which sends all toplevels and their states eagerly, is fully supported.
 fn query_cosmic() -> String {
-    let conn = match Connection::connect_to_env() {
-        Ok(conn) => conn,
-        Err(_) => return String::new(),
+    let Some(conn) = connect_wayland() else {
+        return String::new();
     };
 
     let mut event_queue = conn.new_event_queue();
@@ -507,7 +570,9 @@ fn extract_json_string(json: &str, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::query_cosmic;
+    use std::fs;
+
+    use super::{find_wayland_socket, query_cosmic};
 
     /// The probe must fail gracefully instead of panicking, whether or
     /// not a Wayland compositor is reachable.
@@ -518,5 +583,38 @@ mod tests {
         // `get_active_app_name`).
         let result = query_cosmic();
         assert_ne!(result, "unknown");
+    }
+
+    #[test]
+    fn finds_lowest_display_number() {
+        let dir = tempfile::tempdir().unwrap();
+        // Numeric ordering, not lexicographic: `wayland-1` beats `wayland-2`
+        // and `wayland-10`.
+        for name in [
+            "wayland-2",
+            "wayland-10",
+            "wayland-1",
+            "bus",
+            "wayland-0.lock",
+        ] {
+            fs::write(dir.path().join(name), b"").unwrap();
+        }
+        let found = find_wayland_socket(dir.path()).unwrap();
+        assert_eq!(found.file_name().unwrap(), "wayland-1");
+    }
+
+    #[test]
+    fn ignores_non_socket_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["bus", "pipewire-0", "wayland-0.lock", "wayland-"] {
+            fs::write(dir.path().join(name), b"").unwrap();
+        }
+        assert!(find_wayland_socket(dir.path()).is_none());
+    }
+
+    #[test]
+    fn missing_dir_returns_none() {
+        let dir = std::path::Path::new("/nonexistent-keymapper-runtime-dir");
+        assert!(find_wayland_socket(dir).is_none());
     }
 }
