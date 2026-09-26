@@ -124,7 +124,9 @@ fn spawn_reload_thread(
 /// Attempt a single reload of the configuration file.  The file is read via
 /// [`read_config_content`], which applies the same security checks as the
 /// initial load (symlink, regular-file, size, ownership, world-writable) on a
-/// single open descriptor.  On success the compiled cache is swapped in.
+/// single open descriptor and re-inspects the parent-directory chain, so a
+/// symlink swapped into a parent directory after startup aborts this reload.
+/// On success the compiled cache is swapped in.
 fn attempt_reload(
     config_path: &Path,
     state: &Arc<RwLock<dyn MutableLookup>>,

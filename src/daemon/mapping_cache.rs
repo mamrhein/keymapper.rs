@@ -92,8 +92,8 @@ impl RuntimeLookupCache {
 #[derive(Debug, Error)]
 pub enum CompileError {
     /// The config file could not be read safely.  Wraps the hardened-read
-    /// error: missing file, symlink, or a size/ownership/world-writable
-    /// violation.
+    /// error: missing file, symlink, untrusted parent directory, or a
+    /// size/ownership/world-writable violation.
     #[error(transparent)]
     Read(#[from] ConfigReadError),
 
@@ -106,7 +106,8 @@ impl RuntimeLookupCache {
     /// Load a YAML config file, parse it, and compile the lookup cache
     /// in one step.  Used by initialisation.  The file is read through the
     /// same hardened path as hot-reload (see [`read_config_content`]), so a
-    /// symlink, oversized, or world-writable config is rejected here too.
+    /// symlink, an untrusted parent-directory chain, or an oversized,
+    /// unowned, or world-writable config is rejected here too.
     pub fn compile_from_path<P: AsRef<Path>>(
         path: P,
     ) -> Result<Self, CompileError> {

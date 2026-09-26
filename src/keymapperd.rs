@@ -41,9 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     // Resolve to an absolute path so the watcher and cache compiler have
-    // a stable reference regardless of later CWD changes.  Symlinks in
-    // parent directory components are resolved here; the config file itself
-    // was already verified to not be a symlink.
+    // a stable reference regardless of later CWD changes.  This resolves
+    // symlinks in parent directory components, but resolution is not
+    // trust: every later read re-inspects the whole parent chain, so a
+    // symlink swapped into a parent directory after startup aborts the
+    // next read instead of being followed.
     let config_path = config_path.canonicalize().unwrap_or(config_path);
 
     let initial_cache = RuntimeLookupCache::compile_from_path(&config_path)?;
