@@ -9,13 +9,14 @@
 
 //! Hardened reading of the configuration file.
 //!
-//! Both the initial load at daemon startup and the hot-reload path must read
-//! the same file under identical security constraints.  This module provides
-//! a single [`read_config_content`] helper that both call, so the two paths
-//! can never drift apart.  On Unix the file is opened with `O_NOFOLLOW` and
-//! every check (regular file, size, ownership, world-writable) is performed on
-//! that same descriptor, eliminating TOCTOU races between metadata inspection
-//! and the content read.
+//! The daemon's initial load at startup, its hot-reload path, and the CLI
+//! `config list/check/add` subcommands all read the same file under
+//! identical security constraints.  This module provides a single
+//! [`read_config_content`] helper that every path calls, so they can never
+//! drift apart.  On Unix the file is opened with `O_NOFOLLOW` and every
+//! check (regular file, size, ownership, world-writable) is performed on
+//! that same descriptor, eliminating TOCTOU races between metadata
+//! inspection and the content read.
 
 use std::{io::Read, path::Path};
 
@@ -25,7 +26,7 @@ use thiserror::Error;
 /// Maximum config file size in bytes (1 MB).  A key-mapping configuration
 /// should never approach this limit; a larger file indicates either a write
 /// gone wrong or an adversarial payload.
-pub(crate) const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
+pub const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
 
 /// Error returned when the config file cannot be read safely.
 #[derive(Debug, Error)]
@@ -67,15 +68,16 @@ pub enum ConfigReadError {
 
 /// Open the config file with hardening and read its full content.
 ///
+/// Shared by the daemon (initial load and hot-reload) and the CLI so both
+/// sides enforce identical constraints on the same trust boundary.
+///
 /// The checks, in order: the path is not a symlink; the file opens without
 /// following symlinks (`O_NOFOLLOW` on Unix); it is a regular file; its size
 /// is within [`MAX_CONFIG_SIZE`]; on Unix it is owned by the current user
 /// (unless running as root) and is not world-writable.  All checks run on the
 /// single open descriptor, so there is no window in which the file can be
 /// swapped between inspection and read.
-pub(crate) fn read_config_content(
-    path: &Path,
-) -> Result<String, ConfigReadError> {
+pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
     // Security check: verify the file is not a symlink.  This is an extra
     // guard beyond O_NOFOLLOW below, covering edge cases such as parent
     // directory components being replaced with symlinks.

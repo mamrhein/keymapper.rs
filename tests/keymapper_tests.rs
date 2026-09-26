@@ -149,6 +149,19 @@ fn check_invalid_yaml() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn check_oversized_config() {
+    // A config file beyond the 1 MiB read limit must be rejected by the
+    // hardened reader before it is parsed (SEC-21).
+    let content = format!("groups: []\n# {}", "x".repeat(1024 * 1024 + 64));
+    let dir = write_config_dir("oversized", &content);
+
+    let stderr = run_check_fails_in_dir(&dir);
+    assert!(stderr.contains("too large"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 // ---------------------------------------------------------------------------
 // No-op detection
 // ---------------------------------------------------------------------------
