@@ -1,11 +1,11 @@
 [Unit]
 Description=keymapperd - keyboard remapping daemon
-# Run inside the graphical session, not just after default.target.  The
+# Run inside the graphical session, not just after default.target. The
 # compositor imports WAYLAND_DISPLAY, DISPLAY, DBUS_SESSION_BUS_ADDRESS and
 # XDG_SESSION_TYPE into the systemd user manager environment only once the
 # session is up; a process's environment is captured at exec, so starting
 # earlier leaves active-app detection blind until a manual restart re-execs
-# with the populated environment.  PartOf ties our lifecycle to the session
+# with the populated environment. PartOf ties our lifecycle to the session
 # (we stop when it goes down) and After orders us behind it, so the session
 # variables are already in place when the daemon starts.
 PartOf=graphical-session.target
@@ -20,7 +20,7 @@ RestartSec=3
 
 [Install]
 # WantedBy (not just PartOf) pulls the daemon into the session transaction so
-# it autostarts at login.  Requires a compositor with systemd session
+# it autostarts at login. Requires a compositor with systemd session
 # integration (GNOME, KDE Plasma, Sway, wlroots, Hyprland); see the Linux
 # troubleshooting docs.
 WantedBy=graphical-session.target

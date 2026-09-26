@@ -80,7 +80,7 @@ unsafe extern "system" {
 
 /// Collect the process IDs of all processes whose image name matches the
 /// given name.  Uses the native ToolHelp32 API instead of spawning `tasklist`,
-/// avoiding shell injection and string-matching fragility.  Returns an empty
+/// avoiding shell injection and string-matching fragility. Returns an empty
 /// vec when no process matches.
 fn find_pids(name: &str) -> Vec<u32> {
     // Normalise the image name — always compare against the `.exe` form.
@@ -135,9 +135,9 @@ pub fn start() -> Result<(), String> {
     verify_start(spawn_daemon())
 }
 
-/// Stop the keymapperd process.  Windows has no SIGTERM, so we enumerate the
+/// Stop the keymapperd process. Windows has no SIGTERM, so we enumerate the
 /// matching processes and terminate each one with `TerminateProcess`, which is
-/// a hard stop (there is no graceful shutdown hook).  A missing process is
+/// a hard stop (there is no graceful shutdown hook). A missing process is
 /// treated as success so that stop is idempotent.
 pub fn stop() -> Result<(), String> {
     let pids = find_pids(DAEMON_NAME);
@@ -223,7 +223,7 @@ fn spawn_daemon() -> Result<(), String> {
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
     // CREATE_NO_WINDOW ensures no console window is created for console
-    // applications.  The lpApplicationName parameter is null so the full
+    // applications. The lpApplicationName parameter is null so the full
     // executable name (including path lookup) is parsed from lpCommandLine.
     let result = unsafe {
         CreateProcessW(

@@ -152,7 +152,7 @@ fn check_invalid_yaml() {
 #[test]
 fn check_oversized_config() {
     // A config file beyond the 1 MiB read limit must be rejected by the
-    // hardened reader before it is parsed (SEC-21).
+    // hardened reader before it is parsed.
     let content = format!("groups: []\n# {}", "x".repeat(1024 * 1024 + 64));
     let dir = write_config_dir("oversized", &content);
 

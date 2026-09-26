@@ -104,7 +104,7 @@ unsafe extern "C-unwind" fn probe_callback(
             return event.as_ptr();
         }
 
-        // Print the key information for non-modifier keys.  Modifier keyDown
+        // Print the key information for non-modifier keys. Modifier keyDown
         // events may fire alongside flagsChanged; when both arrive we let
         // flagsChanged handle it (it fires first and carries the keycode too).
         if !is_modifier_keycode(keycode) {
@@ -120,7 +120,7 @@ unsafe extern "C-unwind" fn probe_callback(
     event.as_ptr()
 }
 
-/// CGKeyCode for Escape (0x35).  Used to detect Control+Escape exit.
+/// CGKeyCode for Escape (0x35). Used to detect Control+Escape exit.
 const ESCAPE_KEYCODE: u16 = 53;
 
 /// Check whether a keycode corresponds to a modifier key.
@@ -142,7 +142,7 @@ fn is_modifier_keycode(code: u16) -> bool {
 
 /// Convert a CGKeyCode to a human-readable (name, code) pair.
 ///
-/// Uses HID usage codes as the primary display format.  Falls back to
+/// Uses HID usage codes as the primary display format. Falls back to
 /// raw CGKeyCode for unrecognized keys.
 fn cg_keycode_to_description(code: u16) -> (String, String) {
     // Try to convert CGKeyCode to a HID usage.
@@ -153,7 +153,7 @@ fn cg_keycode_to_description(code: u16) -> (String, String) {
     (format!("Unknown({code})"), format!("{code}"))
 }
 
-/// Handle flags-changed events.  The event carries the native keycode of the
+/// Handle flags-changed events. The event carries the native keycode of the
 /// modifier that changed, allowing left/right distinction even though event
 /// flags alone cannot differentiate them.
 ///

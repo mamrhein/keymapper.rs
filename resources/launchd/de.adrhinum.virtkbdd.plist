@@ -19,7 +19,7 @@
     <!--
         The daemon runs as root (a LaunchDaemon in the system domain) because
         it owns the Karabiner DriverKit virtual-HID socket, which is
-        root-only.  It emits the mapped keys that the user-domain keymapperd
+        root-only. It emits the mapped keys that the user-domain keymapperd
         daemon decides on.
     -->
 </dict>

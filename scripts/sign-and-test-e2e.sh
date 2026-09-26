@@ -10,7 +10,7 @@
 # Root is required twice over: the key injector talks to the Karabiner
 # DriverKit daemon's service socket, which only root may open, and running
 # as root bypasses the TCC Accessibility permission checks required for
-# the daemon's CGEventTap creation.  Ad-hoc signing (codesign --sign -) is
+# the daemon's CGEventTap creation. Ad-hoc signing (codesign --sign -) is
 # sufficient for the test binary; no certificate needed.
 # On other platforms this script skips signing and just runs the tests.
 # ---------------------------------------------------------------------------
@@ -19,11 +19,11 @@ set -e
 
 # Install the Karabiner DriverKit VirtualHIDDevice package (the driver
 # through which keymapperd emits remapped keys) and verify the extension
-# is enabled.  The e2e tests need a live driver: without it the daemon
+# is enabled. The e2e tests need a live driver: without it the daemon
 # waits for the Karabiner socket and produces no output.
 sudo scripts/install-karabiner-macos.sh
 
-# Fail early if the extension is not enabled.  ("disabled" does not
+# Fail early if the extension is not enabled. ("disabled" does not
 # contain "enabled", so the substring check is unambiguous.)
 if ! systemextensionsctl list 2>/dev/null \
         | grep -F "org.pqrs.Karabiner-DriverKit-VirtualHIDDevice" \
@@ -35,7 +35,7 @@ if ! systemextensionsctl list 2>/dev/null \
 fi
 
 # Build the daemon binary the harness spawns as a subprocess, resolving it
-# relative to its own location in target/debug/.  The daemon is a plain
+# relative to its own location in target/debug/. The daemon is a plain
 # production build; the harness drives it and verifies its decisions from
 # its own debug log.
 cargo build --bin keymapperd

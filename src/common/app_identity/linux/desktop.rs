@@ -25,12 +25,12 @@ const DESKTOP_DIRS: &[&str] =
     &["~/.local/share/applications", "/usr/share/applications"];
 
 /// Cached map from executable name (e.g., `"firefox"`) to app id
-/// (e.g., `"org.mozilla.firefox"`).  Populated on first access.
+/// (e.g., `"org.mozilla.firefox"`). Populated on first access.
 static DESKTOP_CACHE: LazyLock<HashMap<String, String>> =
     LazyLock::new(build_cache);
 
 /// Cached map from app installation root directory (e.g.,
-/// `"/home/ma/.local/zed.app/"`) to app id.  Used to match process command
+/// `"/home/ma/.local/zed.app/"`) to app id. Used to match process command
 /// lines against .desktop files when the actual binary name differs from the
 /// Exec key (e.g., sandboxed apps like Zed).
 static APP_ROOT_CACHE: LazyLock<Vec<(String, String)>> =
@@ -134,11 +134,11 @@ fn expanded_dirs() -> Vec<PathBuf> {
 }
 
 /// Parse a `.desktop` file and return the (app_root_directory, app_id) pair
-/// for non-standard installations.  The app root is the directory that
+/// for non-standard installations. The app root is the directory that
 /// contains the application's binaries (e.g., "bin/", "libexec/").
 ///
 /// For system apps under `/usr/bin/`, `/usr/local/bin/`, etc., this returns
-/// `None` — those are handled by the simple exe-name cache.  For bundled
+/// `None` — those are handled by the simple exe-name cache. For bundled
 /// apps (e.g., `/opt/google/chrome/chrome`,
 /// `/home/user/.local/zed.app/bin/zed`), the app root is the parent directory
 /// that contains all the application's files.

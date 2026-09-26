@@ -94,7 +94,7 @@ pub(crate) fn resolve_process_app_id(pid: u32) -> Option<String> {
     }
 
     // Fall back to matching the process cmdline against the full Exec path
-    // from .desktop files.  This handles apps whose actual binary name
+    // from .desktop files. This handles apps whose actual binary name
     // differs from the Exec key (e.g., sandboxed apps like Zed where the
     // running binary is "zed-editor" but Exec is "zed").
     let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {

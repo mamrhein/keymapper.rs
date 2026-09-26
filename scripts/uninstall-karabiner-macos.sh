@@ -4,7 +4,7 @@
 #
 # Boots out the Karabiner daemon LaunchDaemon, deactivates the DriverKit
 # extension, and removes the package files (via the remove_files.sh script
-# shipped with the package).  Requires sudo privileges.
+# shipped with the package). Requires sudo privileges.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -66,7 +66,7 @@ fi
 # The package's remove_files.sh is stale with respect to its own current
 # layout: it removes previous-version file names but not the current socket
 # (karabiner_virtual_hid_device_service.sock) or the console-user sockets,
-# so the tmp directory survives.  Finish the job.  The socket paths are
+# so the tmp directory survives. Finish the job. The socket paths are
 # shared with Karabiner-Elements, so leave them alone if it is running.
 if pgrep -f "Karabiner-Elements" >/dev/null 2>&1; then
     echo "Karabiner-Elements is running; leaving /Library/Application Support/org.pqrs/tmp in place."

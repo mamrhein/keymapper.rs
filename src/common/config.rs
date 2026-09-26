@@ -500,8 +500,7 @@ impl AppConfig {
     /// alias (`*ref`) replay is capped per anchor, by replay stack depth, and
     /// by the total number of replayed events, and the overall parser event
     /// count is capped as well.  A crafted alias-expansion bomb therefore
-    /// fails with a parse error instead of ballooning memory during parse
-    /// (SEC-08).
+    /// fails with a parse error instead of ballooning memory during parse.
     pub fn load_from_str(
         yaml_str: &str,
     ) -> Result<Self, serde_saphyr::DeserializeError> {
@@ -700,7 +699,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // SEC-08: alias-expansion budgets
+    // Alias-expansion budgets
     // -----------------------------------------------------------------------
 
     #[test]
@@ -733,7 +732,7 @@ mod tests {
         // for the full chain).  A parser that materializes aliases into an
         // intermediate `Value` tree would balloon to gigabytes here; the
         // streaming parser must stop at the replay budget and fail fast
-        // instead (SEC-08).
+        // instead.
         use std::time::{Duration, Instant};
 
         let mut yaml = String::from(

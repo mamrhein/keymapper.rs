@@ -10,7 +10,7 @@
 //! Integration tests for the config hot-reload watcher against the real
 //! platform backend (inotify, FSEvents, ReadDirectoryChangesW).
 //!
-//! The regression these tests guard (SEC-07): an inode-pinned file watch
+//! The regression these tests guard: an inode-pinned file watch
 //! silently stopped firing after the first atomic save (write temp + rename),
 //! so hot-reload died unnoticed.  The watcher now observes the parent
 //! directory and filters events by file name.

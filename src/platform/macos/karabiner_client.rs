@@ -96,7 +96,7 @@ const RECONNECT_INTERVAL: Duration = Duration::from_millis(1000);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Capacity of the command channel between the keystroke emitter and the
-/// background client thread (SEC-03).
+/// background client thread.
 ///
 /// The emitter must never block, so it drains into this bounded queue
 /// instead of writing straight to the socket: while the Karabiner daemon
@@ -365,14 +365,14 @@ enum ClientCommand {
 /// 3 seconds, drops the connection if no frame arrives within 30 seconds,
 /// and answers the daemon's state-update requests.  Reports are enqueued
 /// through [`KarabinerClient::send_keyboard_report`] and
-/// [`KarabinerClient::send_consumer_report`].  Enqueuing never blocks: the
-/// command channel is bounded (SEC-03), and a report sequence that does not
+/// [`KarabinerClient::send_consumer_report`]. Enqueuing never blocks: the
+/// command channel is bounded, and a report sequence that does not
 /// fit is dropped whole — a partially emitted key would leave stuck
 /// modifiers on the virtual keyboard.
 pub struct KarabinerClient {
     tx: Sender<ClientCommand>,
     /// Number of report commands dropped because the command channel was
-    /// full (SEC-03).  Drives the throttled saturation warning in
+    /// full. Drives the throttled saturation warning in
     /// [`Self::note_dropped`].
     dropped: AtomicUsize,
     ready: Arc<AtomicBool>,
@@ -480,7 +480,7 @@ impl KarabinerClient {
     /// The keystroke emitter consults this to drop a *whole* key when the
     /// queue saturates: a half-emitted key could leave stuck modifiers on
     /// the virtual keyboard, and the check also keeps the queue bounded
-    /// while the background thread is stalled or reconnecting (SEC-03).
+    /// while the background thread is stalled or reconnecting.
     /// A `None` capacity would mean an unbounded channel, which always has
     /// room.  The occupancy snapshot can only underestimate the free space
     /// (the drain thread only removes commands), never overshoot it.
@@ -1089,7 +1089,7 @@ mod tests {
 
     /// A saturated channel makes `send_keyboard_report` fail with
     /// `ChannelFull` instead of blocking or growing the queue, and a
-    /// rejected enqueue does not count as a dropped key (SEC-03).
+    /// rejected enqueue does not count as a dropped key.
     #[test]
     fn test_saturated_channel_rejects_reports() {
         let client =
@@ -1108,7 +1108,7 @@ mod tests {
 
     /// A key that does not fit into the saturated channel is dropped whole
     /// and counted, so a half-emitted key that could leave stuck modifiers
-    /// on the virtual keyboard can never reach it (SEC-03).
+    /// on the virtual keyboard can never reach it.
     #[test]
     fn test_saturated_channel_drops_whole_keys() {
         let client =

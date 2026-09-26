@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-//! Key introspection commands.  `list` prints all recognised key names;
+//! Key introspection commands. `list` prints all recognised key names;
 //! `probe` waits for physical key presses and reports their canonical names.
 
 #[cfg(target_os = "linux")]
@@ -249,7 +249,7 @@ fn print_group(name: &str, keys: &[HidUsage]) {
 }
 
 /// Wait for key presses and print the canonical name and native code for
-/// each pressed key.  Exits when Control+Escape is pressed.
+/// each pressed key. Exits when Control+Escape is pressed.
 #[cfg(target_os = "macos")]
 pub fn probe() {
     macos::probe()

@@ -25,8 +25,8 @@ use windows::Win32::{
 
 use crate::platform::keycode_to_hid_usage;
 
-// `HHOOK` wraps a raw `*mut c_void` which is not `Send`.  We store it as
-// a raw pointer in a usize, which is `Send` and `Sync`.  This is safe
+// `HHOOK` wraps a raw `*mut c_void` which is not `Send`. We store it as
+// a raw pointer in a usize, which is `Send` and `Sync`. This is safe
 // because the hook handle is only ever read/written through the mutex.
 type RawHookHandle = usize;
 

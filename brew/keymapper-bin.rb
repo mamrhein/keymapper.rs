@@ -28,11 +28,11 @@ cask "keymapper-bin" do
   homepage "https://github.com/mamrhein/keymapper.rs"
 
   # The release archive extracts to dist/keymapper/v<version>/ in the staging
-  # directory; all paths below are relative to it.  The installer runs before
+  # directory; all paths below are relative to it. The installer runs before
   # the binaries are linked, so it takes the staged daemon paths as arguments.
   # It registers the virtkbdd LaunchDaemon and the keymapperd LaunchAgent,
   # installs the Karabiner DriverKit package, activates the extension, and
-  # registers the Karabiner daemon LaunchDaemon.  Requires sudo.  The script
+  # registers the Karabiner daemon LaunchDaemon. Requires sudo. The script
   # runs from the staging directory so it can find its sibling scripts and
   # the launchd plist templates.
   installer script: {
@@ -43,13 +43,13 @@ cask "keymapper-bin" do
   }
   # Only the CLI is linked into Homebrew's bin — the daemons are installed by
   # the script to their canonical locations (/Library/Application Support/
-  # keymapper/virtkbdd and ~/.local/bin/keymapperd).  In particular, virtkbdd
+  # keymapper/virtkbdd and ~/.local/bin/keymapperd). In particular, virtkbdd
   # is kept out of /usr/local/bin, which is admin-writable on Intel Macs and
   # would allow replacing the root-run daemon binary.
   binary "dist/keymapper/v#{version}/keymapper"
 
   # Runs before the staged files are removed, so the script (and its sibling
-  # uninstall-karabiner-macos.sh) is still available.  Requires sudo.
+  # uninstall-karabiner-macos.sh) is still available. Requires sudo.
   uninstall script: {
     executable: "dist/keymapper/v#{version}/uninstall-macos.sh",
     sudo:       true,

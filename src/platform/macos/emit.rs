@@ -31,9 +31,9 @@ use crate::{
 /// unspecified order.
 ///
 /// A key is emitted only when its whole report sequence fits into the bounded
-/// command channel (SEC-03): a half-emitted key could leave stuck modifiers
-/// on the virtual keyboard, so an oversized key is dropped whole and
-/// counted via [`KarabinerClient::note_dropped`].  The channel has exactly
+/// command channel: a half-emitted key could leave stuck modifiers on the
+/// virtual keyboard, so an oversized key is dropped whole and counted via
+/// [`KarabinerClient::note_dropped`].  The channel has exactly
 /// one producer (this function runs on the single-threaded IPC serve loop)
 /// and the background thread only removes commands, so checking the room
 /// first cannot race with another producer.

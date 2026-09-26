@@ -19,7 +19,7 @@
 
         The daemon runs as the logged-in user (a LaunchAgent in gui/<UID>).
         Keyboard events are captured with a CGEventTap, which requires the
-        Input Monitoring and Accessibility privacy permissions (TCC).  Mapped
+        Input Monitoring and Accessibility privacy permissions (TCC). Mapped
         keys are emitted by the root virtkbdd daemon through the DriverKit
         virtual HID driver.
     -->

@@ -16,7 +16,7 @@
 //!   at `~/Library/LaunchAgents/de.adrhinum.keymapperd.plist` (done by the
 //!   install script).
 //! * virtkbdd — a root LaunchDaemon in the `system` domain, requiring the
-//!   plist at `/Library/LaunchDaemons/de.adrhinum.virtkbdd.plist`.  The system
+//!   plist at `/Library/LaunchDaemons/de.adrhinum.virtkbdd.plist`. The system
 //!   domain is only accessible to root, so these operations go through `sudo
 //!   launchctl`.
 
@@ -33,7 +33,7 @@ const VIRTKBDD_LABEL: &str = "de.adrhinum.virtkbdd";
 
 /// The launchd domain for the current user's graphical session.
 ///
-/// `gui/<UID>` is the standard domain for per-user agents on macOS.  It has
+/// `gui/<UID>` is the standard domain for per-user agents on macOS. It has
 /// been stable since macOS 10.10 (Yosemite).
 fn gui_domain() -> String {
     format!("gui/{}", unsafe { libc::getuid() })
@@ -56,7 +56,7 @@ fn virtkbdd_plist_path() -> String {
 /// Build a `launchctl` command, optionally prefixed with `sudo`.
 ///
 /// The system domain is only accessible to root, so virtkbdd operations go
-/// through `sudo`.  Any sudo password prompt is read from the controlling
+/// through `sudo`. Any sudo password prompt is read from the controlling
 /// terminal, not from our stdio.
 fn launchctl(sudo: bool) -> Command {
     if sudo {
@@ -83,7 +83,7 @@ fn target(domain: &str, label: &str) -> String {
 ///
 /// `launchctl print <domain>/<label>` exits 0 when the service is known to
 /// launchd and non-zero (with a "Could not find service" message) when it is
-/// not.  This reflects the *loaded* state that `bootout` unloads, which is
+/// not. This reflects the *loaded* state that `bootout` unloads, which is
 /// distinct from whether the process is alive (see [`is_running`]).
 fn is_loaded(sudo: bool, domain: &str, label: &str) -> bool {
     launchctl(sudo)
@@ -98,7 +98,7 @@ fn is_loaded(sudo: bool, domain: &str, label: &str) -> bool {
 /// Boot a service out of launchd, treating the "not loaded" no-op as success.
 ///
 /// `launchctl bootout` exits non-zero both when the service is not loaded (a
-/// no-op we treat as success) and on genuine failures.  Rather than parsing
+/// no-op we treat as success) and on genuine failures. Rather than parsing
 /// the version-specific message, we confirm the actual state: if the service
 /// is no longer known to launchd, it has been stopped (or was already
 /// stopped).
@@ -136,12 +136,12 @@ fn bootout(sudo: bool, domain: &str, label: &str) -> Result<(), String> {
 /// Check whether a keymapperd process is actually running.
 ///
 /// The authoritative check is `pgrep -x <name>`, which reports whether a live
-/// process with that exact name exists.  We deliberately do **not** rely on
+/// process with that exact name exists. We deliberately do **not** rely on
 /// `launchctl print gui/<UID> <label>` for this: that command succeeds (exit
 /// code 0) whenever the service is merely *known* to launchd, which is true
 /// even for a loaded service whose process has crashed or exited (for example
-/// when `KeepAlive` is false).  Relying on it alone would report a dead daemon
-/// as running.  `pgrep` also covers the case where the daemon was started
+/// when `KeepAlive` is false). Relying on it alone would report a dead daemon
+/// as running. `pgrep` also covers the case where the daemon was started
 /// manually rather than through launchd.
 pub fn is_running() -> bool {
     Command::new("pgrep")
@@ -156,7 +156,7 @@ pub fn is_running() -> bool {
 /// Start the keymapperd service via launchd.
 ///
 /// Boots the service using `launchctl bootstrap gui/<UID> <plist>` and then
-/// confirms the daemon process actually came up.  `launchctl bootstrap`
+/// confirms the daemon process actually came up. `launchctl bootstrap`
 /// returns success as soon as launchd accepts the job, which does not by
 /// itself guarantee the process started — with `KeepAlive` set in the plist,
 /// a daemon that crashes on startup is restarted in a loop — so we verify the
@@ -208,10 +208,10 @@ const KEYMAPPERD_LOG_COMMAND: &str =
 /// Confirm the daemon process actually came up after a `launchctl bootstrap`.
 ///
 /// `launchctl bootstrap` succeeds as soon as launchd accepts the job, even if
-/// the process then fails to start.  With `KeepAlive` set in the plist, a
+/// the process then fails to start. With `KeepAlive` set in the plist, a
 /// daemon that crashes on startup is restarted in a loop (with throttling), so
 /// we poll briefly for the process to appear, then wait a short stability
-/// window and confirm it is still alive.  On failure we point at the unified
+/// window and confirm it is still alive. On failure we point at the unified
 /// log so the user can see why the daemon exited.
 fn verify_daemon_started() -> Result<(), String> {
     // Poll for the process to appear; launchd spawns it asynchronously, so it
@@ -234,7 +234,7 @@ fn verify_daemon_started() -> Result<(), String> {
         ));
     }
 
-    // Wait a short stability window and confirm it is still alive.  This
+    // Wait a short stability window and confirm it is still alive. This
     // catches a daemon that spawns and then crashes immediately (for example
     // when the Input Monitoring / Accessibility permissions are missing or the
     // configuration is invalid).
@@ -276,10 +276,10 @@ pub fn restart() -> Result<(), String> {
 /// Check whether the virtkbdd process is actually running (system domain).
 ///
 /// As with [`is_running`], the authoritative check is `pgrep -x virtkbdd`,
-/// which reports whether a live process with that exact name exists.  `sudo
+/// which reports whether a live process with that exact name exists. `sudo
 /// launchctl print system <label>` only tells us the service is *known* to
 /// launchd, which is true even for a loaded service whose process has crashed
-/// or exited.  `pgrep` sees the root-owned virtkbdd process even when run as
+/// or exited. `pgrep` sees the root-owned virtkbdd process even when run as
 /// an unprivileged user, so no `sudo` is needed for this check.
 pub fn virtkbdd_is_running() -> bool {
     Command::new("pgrep")
@@ -305,7 +305,7 @@ pub fn virtkbdd_start() -> Result<(), String> {
     }
 
     // If the service is already loaded, boot it out first to ensure a clean
-    // start.  This makes `start` idempotent and doubles as a restart.
+    // start. This makes `start` idempotent and doubles as a restart.
     launchctl(true)
         .args(["bootout", &target("system", VIRTKBDD_LABEL)])
         .stdout(std::process::Stdio::null())

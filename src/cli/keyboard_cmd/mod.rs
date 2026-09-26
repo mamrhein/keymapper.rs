@@ -5,9 +5,9 @@
 //              with the application.
 // ---------------------------------------------------------------------------
 // $Source$
-// $Revision:
+// $Revision$
 
-//! Keyboard device listing command.  Prints a table of all detected keyboards
+//! Keyboard device listing command. Prints a table of all detected keyboards
 //! with name, vendor, model, port type, and device identifier.
 
 use crate::platform::list_keyboards;
@@ -111,7 +111,7 @@ fn print_padded(s: &str, width: usize) {
 }
 
 /// Pad a string to the given width (in characters), truncating with an
-/// ellipsis when necessary.  Truncation happens on character boundaries so
+/// ellipsis when necessary. Truncation happens on character boundaries so
 /// multi-byte UTF-8 values (e.g. non-ASCII vendor names) cannot panic.
 fn pad(s: &str, width: usize) -> String {
     if s.chars().count() <= width {

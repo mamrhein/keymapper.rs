@@ -86,8 +86,8 @@ jobs:
           cp scripts/install-karabiner-macos.sh "$STAGING/"
           cp scripts/uninstall-karabiner-macos.sh "$STAGING/"
           cp LICENSE.TXT README.md "$STAGING/"
-          # Integrity manifest verified by install-macos.sh (SEC-05).  It
-          # lists its files by path relative to the staging root, so run
+          # Integrity manifest verified by install-macos.sh.
+          # It lists its files by path relative to the staging root, so run
           # shasum from there.
           (cd "$STAGING" && shasum -a 256 keymapper keymapperd virtkbdd > SHA256SUMS.txt)
           tar -cJf "$ARCHIVE" "dist/keymapper/${{ github.ref_name }}"

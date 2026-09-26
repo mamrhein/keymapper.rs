@@ -10,7 +10,7 @@
 //! Linux systemd integration for managing the keymapperd daemon.
 //!
 //! Uses `systemctl --user` to query, start, stop and restart the user-level
-//! systemd service.  Requires the unit file to be installed at
+//! systemd service. Requires the unit file to be installed at
 //! `~/.config/systemd/user/keymapperd.service` (done by the install script).
 
 use std::process::Command;

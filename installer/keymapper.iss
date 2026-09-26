@@ -4,10 +4,10 @@
 ; Installs keymapper.exe (cli) and keymapperd.exe (daemon) per-user to
 ; %LOCALAPPDATA%\Programs\keymapper without elevation, adds the install
 ; directory to the user PATH, and registers a per-user scheduled task that
-; starts the daemon at logon.  The task action is the bare keymapperd.exe
+; starts the daemon at logon. The task action is the bare keymapperd.exe
 ; path (no arguments), which keeps the schtasks command line free of
 ; embedded quotes; `keymapper daemon status/stop/restart` keep working
-; because they match the process by image name.  A Windows service is not
+; because they match the process by image name. A Windows service is not
 ; an option: the WH_KEYBOARD_LL hook must run in the interactive user
 ; session, and services run in session 0.
 ;
@@ -151,20 +151,20 @@ begin
 end;
 
 [Run]
-; Register the per-user logon task that starts the daemon.  /ru is omitted
+; Register the per-user logon task that starts the daemon. /ru is omitted
 ; so the task runs as the user who created it, and /f makes re-runs
 ; idempotent.
 Filename: "schtasks.exe"; Description: "Register keymapperd logon task"; Parameters: "/create /tn ""{#TaskName}"" /tr ""{app}\keymapperd.exe"" /sc onlogon /f"; Flags: postinstall
 
-; Start the daemon right after installation.  Without a configuration file
+; Start the daemon right after installation. Without a configuration file
 ; it exits immediately; the user creates one with `keymapper config create`
-; and starts it again.  The entry also runs in silent mode, so a winget
+; and starts it again. The entry also runs in silent mode, so a winget
 ; install leaves the daemon running when a configuration already exists.
 Filename: "{app}\keymapperd.exe"; Description: "Start keymapperd now"; Flags: nowait postinstall runhidden
 
 [UninstallRun]
 ; Entries run after the files were removed, so the daemon is matched by
-; image name instead of by path.  This also stops a daemon that was started
+; image name instead of by path. This also stops a daemon that was started
 ; from a different location (e.g. a zip install).
 Filename: "taskkill.exe"; Parameters: "/f /im keymapperd.exe"; RunOnceId: "StopKeymapperdDaemon"
 

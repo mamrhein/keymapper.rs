@@ -25,7 +25,7 @@ VERSION="$1"
 TARGET="${2:-aarch64-apple-darwin}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Pinned Karabiner DriverKit VirtualHIDDevice release.  Keep in sync with
+# Pinned Karabiner DriverKit VirtualHIDDevice release. Keep in sync with
 # scripts/install-karabiner-macos.sh.
 KARABINER_VERSION="8.2.0"
 KARABINER_PKG_NAME="Karabiner-DriverKit-VirtualHIDDevice-${KARABINER_VERSION}.pkg"
@@ -47,11 +47,11 @@ cp "${PROJECT_ROOT}/target/${TARGET}/release/keymapper" "${VOLUME_DIR}/bin/"
 cp "${PROJECT_ROOT}/target/${TARGET}/release/keymapperd" "${VOLUME_DIR}/bin/"
 cp "${PROJECT_ROOT}/target/${TARGET}/release/virtkbdd" "${VOLUME_DIR}/bin/"
 
-# Generate the integrity manifest (SHA256SUMS.txt) at the volume root.  The
+# Generate the integrity manifest (SHA256SUMS.txt) at the volume root. The
 # DMG's install.sh and install-macos.sh verify the packaged binaries against
-# it (SEC-05); without it there is no trust anchor for the root-run daemons
-# at all.  A packaging host without shasum must abort rather than ship an
-# unverified DMG.
+# it; without it there is no trust anchor for the root-run daemons at all.
+# A packaging host without shasum must abort rather than ship an unverified
+# DMG.
 if ! (cd "${VOLUME_DIR}" && shasum -a 256 bin/* > SHA256SUMS.txt); then
     echo "Error: failed to generate SHA256SUMS.txt (is shasum missing?)." >&2
     exit 1
@@ -124,9 +124,9 @@ if [ ! -d "$DEST" ]; then
 fi
 
 # Verify every file listed in the manifest beside this script (the three
-# binaries in bin/ — CLI and both daemons, see SEC-05) before installing
-# anything from this volume.  A manifest that was tampered with together with
-# its files cannot be detected (that would require a detached signature or
+# binaries in bin/ — CLI and both daemons) before installing anything
+# from this volume. A manifest that was tampered with together with its
+# files cannot be detected (that would require a detached signature or
 # notarization); on a check failure re-download the DMG rather than
 # "repairing" the contents here.
 if [ -f "${SCRIPT_DIR}/SHA256SUMS.txt" ]; then
@@ -143,7 +143,7 @@ cp "${SCRIPT_DIR}/bin/keymapper" "$DEST/"
 echo "Installed keymapper to ${DEST}."
 echo ""
 
-# Install the Karabiner DriverKit package.  The DMG bundles the pinned
+# Install the Karabiner DriverKit package. The DMG bundles the pinned
 # package; if it is missing, install-karabiner-macos.sh falls back to a
 # pinned download from the pqrs GitHub releases.
 KARABINER_PKG=""

@@ -1,12 +1,12 @@
 # Homebrew formula for keymapper.
 #
-# Builds the Rust crate from source.  On macOS, remapped keys are emitted
+# Builds the Rust crate from source. On macOS, remapped keys are emitted
 # through the Karabiner DriverKit VirtualHIDDevice driver; the install script
 # installs that pinned driver package, registers the virtkbdd LaunchDaemon
 # (root, emits mapped keys) and the keymapperd LaunchAgent (user domain,
 # captures keyboard events), activates the DriverKit extension, and registers
 # the Karabiner daemon LaunchDaemon.
-# On Linux, it registers the keymapperd systemd user service.  The services
+# On Linux, it registers the keymapperd systemd user service. The services
 # are managed by launchd / systemctl --user and controlled with
 # `keymapper daemon status|start|stop` (not by `brew services`).
 #
@@ -41,7 +41,7 @@ class Keymapper < Formula
     on_macos do
       # Register the virtkbdd LaunchDaemon and the keymapperd LaunchAgent,
       # install the Karabiner DriverKit package, activate the extension, and
-      # register the Karabiner daemon LaunchDaemon.  Requires sudo.
+      # register the Karabiner daemon LaunchDaemon. Requires sudo.
       system "sudo", "scripts/install-macos.sh",
         prefix/"bin/keymapperd", prefix/"bin/virtkbdd"
     end

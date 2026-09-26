@@ -4,7 +4,7 @@
 #
 # Downloads the release archive for the current architecture from GitHub,
 # installs keymapper and keymapperd into the install directory, and
-# registers the keymapperd systemd user service.  No root is required.
+# registers the keymapperd systemd user service. No root is required.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/mamrhein/keymapper.rs/main/scripts/install.sh | bash
@@ -26,7 +26,7 @@ if [ "$(id -u)" -eq 0 ]; then
     exit 1
 fi
 
-# Only the Linux binaries are installed here.  On Apple Silicon, uname -m
+# Only the Linux binaries are installed here. On Apple Silicon, uname -m
 # reports arm64, which would otherwise map to the aarch64 Linux target.
 if [ "$(uname -s)" != "Linux" ]; then
     echo "Error: this script installs the Linux binaries." >&2
@@ -90,7 +90,7 @@ mkdir -p "$INSTALL_DIR"
 install -m 755 "$STAGING/keymapper" "$STAGING/keymapperd" "$INSTALL_DIR/"
 echo "Installed keymapper and keymapperd to ${INSTALL_DIR}/"
 
-# Register the systemd user service (idempotent).  This can fail when there
+# Register the systemd user service (idempotent). This can fail when there
 # is no user session yet (e.g. over SSH); the binaries are installed either
 # way, so warn instead of aborting.
 if ! "$STAGING/install-linux.sh" "$INSTALL_DIR/keymapperd"; then

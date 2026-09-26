@@ -3,7 +3,7 @@
 # Installs the Karabiner DriverKit VirtualHIDDevice package on macOS.
 #
 # keymapperd emits remapped keys through the Karabiner DriverKit virtual HID
-# driver.  This script:
+# driver. This script:
 #   1. installs the Karabiner package (from an explicit pkg path, a pkg
 #      bundled next to the script, or a pinned download from the pqrs
 #      GitHub releases) — every candidate is verified against a pinned
@@ -12,7 +12,7 @@
 #      System Settings may still be required),
 #   3. registers the Karabiner daemon LaunchDaemon (Interactive, KeepAlive).
 #
-# Idempotent — safe to run multiple times.  Requires sudo privileges.
+# Idempotent — safe to run multiple times. Requires sudo privileges.
 #
 # Usage: scripts/install-karabiner-macos.sh [pkg_path]
 #   pkg_path — path to the Karabiner .pkg (default: bundled next to the
@@ -23,7 +23,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# Pinned Karabiner DriverKit VirtualHIDDevice release.  Keep in sync with
+# Pinned Karabiner DriverKit VirtualHIDDevice release. Keep in sync with
 # scripts/package-macos.sh.
 KARABINER_VERSION="8.2.0"
 KARABINER_PKG_NAME="Karabiner-DriverKit-VirtualHIDDevice-${KARABINER_VERSION}.pkg"
@@ -38,8 +38,8 @@ BUNDLE_ID="org.pqrs.Karabiner-DriverKit-VirtualHIDDevice"
 LABEL="org.pqrs.service.daemon.Karabiner-VirtualHIDDevice-Daemon"
 LAUNCH_DAEMONS_DIR="/Library/LaunchDaemons"
 
-# Find the plist template.  It may be alongside the script (DMG layout) or
-# under ../resources/launchd/ (repo layout).  The template needs no
+# Find the plist template. It may be alongside the script (DMG layout) or
+# under ../resources/launchd/ (repo layout). The template needs no
 # substitution: the package always installs the daemon to the same path.
 if [ -f "$SCRIPT_DIR/resources/launchd/${LABEL}.plist" ]; then
     PLIST_TEMPLATE="$SCRIPT_DIR/resources/launchd/${LABEL}.plist"
@@ -91,11 +91,11 @@ else
     fi
 
     # Every candidate — an explicit path, a pkg globbed from next to the
-    # script, or the download — is checked against the pinned digest
-    # (SEC-05).  A non-matching pkg is not necessarily malicious; it may
-    # simply be another version.  But nothing else vouches for it: an
+    # script, or the download — is checked against the pinned digest.
+    # A non-matching pkg is not necessarily malicious; it may
+    # simply be another version. But nothing else vouches for it: an
     # unsigned, unbound pkg handed to `installer` would run as root
-    # unchecked.  For a different version, update KARABINER_VERSION and
+    # unchecked. For a different version, update KARABINER_VERSION and
     # KARABINER_PKG_SHA256 at the top of this script.
     if ! echo "${KARABINER_PKG_SHA256}  ${PKG_PATH}" | shasum -a 256 --check --status; then
         echo "Error: '${PKG_PATH}' does not match the pinned Karabiner package v${KARABINER_VERSION}; refusing to install an unverified package as root." >&2
@@ -149,7 +149,7 @@ echo "Installed ${LABEL}.plist to ${LAUNCH_DAEMONS_DIR}/"
 
 # The state column of `systemextensionsctl list` reads e.g. "activated
 # enabled" or "activated disabled"; a missing line means the extension is
-# not registered at all.  ("disabled" does not contain "enabled", so the
+# not registered at all. ("disabled" does not contain "enabled", so the
 # substring check is unambiguous.)
 STATE_LINE="$(systemextensionsctl list 2>/dev/null | grep -F "$BUNDLE_ID" || true)"
 

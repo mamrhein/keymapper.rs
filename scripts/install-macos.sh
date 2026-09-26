@@ -4,33 +4,33 @@
 #
 # Two processes are installed:
 #
-#   virtkbdd   — root LaunchDaemon (system domain).  Owns the Karabiner
-#                DriverKit virtual-HID socket and emits mapped keys.  The
+#   virtkbdd   — root LaunchDaemon (system domain). Owns the Karabiner
+#                DriverKit virtual-HID socket and emits mapped keys. The
 #                binary is installed to /Library/Application Support/keymapper/
 #                (a root-only directory; never /usr/local/bin, which is
 #                admin-writable on Intel Macs) and the plist to
 #                /Library/LaunchDaemons/.
 #
-#   keymapperd — user LaunchAgent (gui/<UID> domain).  Captures keyboard
+#   keymapperd — user LaunchAgent (gui/<UID> domain). Captures keyboard
 #                events with a CGEventTap and decides which keys are mapped.
 #                The binary is installed to ~/.local/bin/keymapperd and the
 #                plist to ~/Library/LaunchAgents/ of the console user.
 #
-# This script requires sudo privileges (for the system-domain part).  It also
+# This script requires sudo privileges (for the system-domain part). It also
 # installs the Karabiner DriverKit VirtualHIDDevice package (the driver
 # through which virtkbdd emits mapped keys) via install-karabiner-macos.sh.
 #
 # Idempotent — safe to run multiple times.
 #
 # Usage: scripts/install-macos.sh [[keymapperd_path] [virtkbdd_path] [karabiner_pkg_path]]
-#   Pass exactly zero, two, or three arguments.  The daemon binaries are
-#   never resolved from $PATH (SEC-05): without explicit path arguments
+#   Pass exactly zero, two, or three arguments. The daemon binaries are
+#   never resolved from $PATH: without explicit path arguments
 #   (two arguments, keymapperd first) the script discovers them next to
 #   itself, in bin/ next to itself, or in ../target/release/.
-#   karabiner_pkg_path   — path to the Karabiner .pkg (default: bundled next to
-#                          the script, or the pinned release downloaded from
-#                          GitHub).  Every .pkg is verified against a pinned
-#                          SHA-256 digest before `installer` sees it.
+#   karabiner_pkg_path — path to the Karabiner .pkg (default: bundled next to
+#                        the script, or the pinned release downloaded from
+#                        GitHub). Every .pkg is verified against a pinned
+#                        SHA-256 digest before `installer` sees it.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -40,7 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KEYMAPPERD_LABEL="de.adrhinum.keymapperd"
 VIRTKBDD_LABEL="de.adrhinum.virtkbdd"
 
-# Canonical install locations.  The root daemon binary deliberately does not
+# Canonical install locations. The root daemon binary deliberately does not
 # live in /usr/local/bin: that directory (and /usr/local itself) is admin-
 # writable on Intel Macs — and stays admin-writable under Homebrew on Apple
 # Silicon — so a daemon binary there could be replaced by any process of an
@@ -52,7 +52,7 @@ LEGACY_VIRTKBDD_BIN="/usr/local/bin/virtkbdd"
 LAUNCH_DAEMONS_DIR="/Library/LaunchDaemons"
 VIRTKBDD_LOG_DIR="/var/log/virtkbdd"
 
-# Find a plist template.  It may be alongside the script (DMG layout) or
+# Find a plist template. It may be alongside the script (DMG layout) or
 # under ../resources/launchd/ (repo layout).
 find_template() {
     local label="$1"
@@ -69,12 +69,12 @@ find_template() {
 KEYMAPPERD_TEMPLATE="$(find_template "$KEYMAPPERD_LABEL")"
 VIRTKBDD_TEMPLATE="$(find_template "$VIRTKBDD_LABEL")"
 
-# Resolve the binary source paths (SEC-05).  A root-run daemon binary
+# Resolve the binary source paths. A root-run daemon binary
 # must not be resolved from $PATH: a directory on the effective PATH
 # (e.g. /usr/local/bin or /opt/homebrew/bin, both writable by non-root
 # users on a default Homebrew install) is untrusted input, and whatever
 # was found there would have been installed to be run as root by
-# launchd.  Without explicit path arguments the binaries are discovered
+# launchd. Without explicit path arguments the binaries are discovered
 # only in packaged release layouts — the scripts beside the binaries
 # (DMG and staged archive) — or in a local `cargo build --release`.
 find_source() {
@@ -124,7 +124,7 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Resolve the console user (owner of /dev/console).  keymapperd runs in that
+# Resolve the console user (owner of /dev/console). keymapperd runs in that
 # user's gui domain.
 CONSOLE_USER="$(stat -f '%Su' /dev/console)"
 CONSOLE_UID="$(id -u "$CONSOLE_USER")"
@@ -135,10 +135,10 @@ if [ -z "$CONSOLE_HOME" ] || [ ! -d "$CONSOLE_HOME" ]; then
     exit 1
 fi
 
-# Run a launchctl command in the console user's gui domain.  This script runs
+# Run a launchctl command in the console user's gui domain. This script runs
 # as root (brew invokes it with sudo), and a root process cannot reach another
 # user's gui/<UID> domain directly — `launchctl bootstrap gui/<UID>` fails with
-# an input/output error.  `launchctl asuser` establishes the proper bootstrap
+# an input/output error. `launchctl asuser` establishes the proper bootstrap
 # port for that user's domain, so the gui-domain verbs below succeed.
 gui_launchctl() {
     launchctl asuser "$CONSOLE_UID" launchctl "$@"
@@ -148,9 +148,9 @@ KEYMAPPERD_BIN="${CONSOLE_HOME}/.local/bin/keymapperd"
 LAUNCH_AGENTS_DIR="${CONSOLE_HOME}/Library/LaunchAgents"
 KEYMAPPERD_LOG_DIR="${CONSOLE_HOME}/Library/Logs/keymapper"
 
-# Remove the com.apple.quarantine xattr from a file, if present.  brew leaves
+# Remove the com.apple.quarantine xattr from a file, if present. brew leaves
 # this on the files extracted from the release archive, and `cp`/`install`
-# carry it onto the installed copies.  launchd refuses to trust a quarantined
+# carry it onto the installed copies. launchd refuses to trust a quarantined
 # service definition (error 155), so every file we install must be clean of it.
 dequarantine() {
     xattr -d com.apple.quarantine "$1" 2>/dev/null || true
@@ -166,7 +166,7 @@ mode_writable() {
 
 # Assert that the given directory and every one of its parent directories are
 # writable only by their owner (no group or world write bit anywhere in the
-# chain).  A binary that launchd runs as root must not live below a directory
+# chain). A binary that launchd runs as root must not live below a directory
 # that non-root users can write into: any such user could delete and replace
 # the binary, which means arbitrary code execution as root at the next load.
 # Fails closed — the install aborts instead of writing into an insecure path.
@@ -177,11 +177,11 @@ assert_secure_path() {
         mode="$(stat -f '%OLp' "$path")"
         # The two lowest octal digits are the group and world permission
         # bits; the write bit (2) in either lets non-owner users replace the
-        # directory's contents.  Symlinked path components are resolved by
+        # directory's contents. Symlinked path components are resolved by
         # stat, so the chain is checked against their final targets.
         if [ $(( (8#$mode / 8) % 8 & 2 )) -ne 0 ] || [ $(( 8#$mode % 8 & 2 )) -ne 0 ]; then
             echo "Error: refusing to install into '${1}': '${path}' is group-" >&2
-            echo "or world-writable (mode ${mode}).  A root-run daemon binary must" >&2
+            echo "or world-writable (mode ${mode}). A root-run daemon binary must" >&2
             echo "not live below a directory that non-root users can write into."
             exit 1
         fi
@@ -202,19 +202,19 @@ install_binary() {
     chown "$owner" "$dst"
 }
 
-# Trust and integrity checks for the source binaries (SEC-05).
+# Trust and integrity checks for the source binaries.
 #
 # A source living in a directory that non-root users can write into (or
 # that lives below one) is untrusted input: replacing the binary there
 # amounts to root-executable code, because launchd runs whatever path it
-# launches from.  Such sources are only flagged, never rejected: the
+# launches from. Such sources are only flagged, never rejected: the
 # Homebrew formula and cask legitimately deliver their binaries from
-# group-writable /usr/local or /opt/homebrew territory.  A manifest next
+# group-writable /usr/local or /opt/homebrew territory. A manifest next
 # to the script is binding only if the source lives in the script's own
 # directory or directly below it (flat layout in the staged release
 # archives, a `bin/` subdirectory in the DMG): the source must be listed
 # in the manifest with a matching digest and every listed file must be
-# present, or the install aborts.  A self-built binary (from
+# present, or the install aborts. A self-built binary (from
 # `target/release` or `~/.local/bin`) has no external trust anchor, so
 # nothing but a warning is needed for it.
 check_source_trust() {
@@ -224,7 +224,7 @@ check_source_trust() {
     # Resolve a relative source path (e.g. `install-macos.sh bin/keymapperd
     # ...` run from a mounted volume or a staging directory) against the
     # caller's cwd so the layout tests below can recognize a packaged
-    # layout.  An unresolvable path is treated as out-of-tree and fails
+    # layout. An unresolvable path is treated as out-of-tree and fails
     # closed (the install aborts) if a manifest sits next to the script.
     case "$src" in
         /*) ;;
@@ -259,7 +259,7 @@ check_source_trust() {
     elif [ "$src_dir" != "$SCRIPT_DIR" ] && [ -f "${src_dir}/SHA256SUMS.txt" ]; then
         manifest_dir="$src_dir"
     else
-        # Without a manifest nothing vouches for the source (SEC-05):
+        # Without a manifest nothing vouches for the source:
         # ad-hoc signing plus the fixed install paths and the self-tamper
         # caveats in docs/macos-architecture.md are all that remain.
         echo "Warning: no SHA256SUMS.txt found for '${src}'; it is installed unverified." >&2
@@ -293,7 +293,7 @@ echo "Installing virtkbdd (LaunchDaemon)..."
 
 # Remove a virtkbdd binary left over from older releases (the daemon used to
 # live in admin-writable /usr/local/bin — see the note on the canonical
-# install locations above).  A dangling root-executable copy there would
+# install locations above). A dangling root-executable copy there would
 # survive this script, so drop it once the daemon has a secure home.
 if [ -f "$LEGACY_VIRTKBDD_BIN" ]; then
     rm "$LEGACY_VIRTKBDD_BIN"
@@ -305,7 +305,7 @@ mkdir -p "$LAUNCH_DAEMONS_DIR"
 mkdir -p "$VIRTKBDD_LOG_DIR"
 
 # Install the root daemon and its plist only into root-only-writable
-# directory chains; abort otherwise (SEC-04).
+# directory chains; abort otherwise.
 assert_secure_path "$VIRTKBDD_BIN_DIR"
 assert_secure_path "$LAUNCH_DAEMONS_DIR"
 
@@ -343,7 +343,7 @@ echo ""
 echo "Installing keymapperd (LaunchAgent for ${CONSOLE_USER})..."
 
 # Remove a keymapperd LaunchDaemon left over from older releases (the daemon
-# moved to the user domain).  Without this, both the legacy root process and
+# moved to the user domain). Without this, both the legacy root process and
 # the new user process would capture and remap keys.
 if launchctl print system/"$KEYMAPPERD_LABEL" >/dev/null 2>&1; then
     launchctl bootout system/"$KEYMAPPERD_LABEL" 2>/dev/null || true
@@ -389,7 +389,7 @@ fi
 # ---------------------------------------------------------------------------
 
 # Install the Karabiner DriverKit package (pkg install, driver activation,
-# and the daemon LaunchDaemon).  An explicit pkg path is passed through when
+# and the daemon LaunchDaemon). An explicit pkg path is passed through when
 # given (the DMG bundles one).
 echo ""
 if [ $# -ge 3 ]; then

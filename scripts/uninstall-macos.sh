@@ -4,9 +4,9 @@
 #
 # Boots out the virtkbdd LaunchDaemon (system domain) and the keymapperd
 # LaunchAgent (console user's gui domain) and removes their plists.  Does not
-# delete log files or binaries.  It also removes the Karabiner DriverKit
+# delete log files or binaries. It also removes the Karabiner DriverKit
 # VirtualHIDDevice package (deactivate driver + remove files) via
-# uninstall-karabiner-macos.sh.  Requires sudo privileges.
+# uninstall-karabiner-macos.sh. Requires sudo privileges.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -49,10 +49,10 @@ CONSOLE_USER="$(stat -f '%Su' /dev/console)"
 CONSOLE_UID="$(id -u "$CONSOLE_USER")"
 CONSOLE_HOME="$(dscl . -read "/Users/${CONSOLE_USER}" NFSHomeDirectory | awk '{print $2}')"
 
-# Run a launchctl command in the console user's gui domain.  This script runs
+# Run a launchctl command in the console user's gui domain. This script runs
 # as root (brew invokes it with sudo), and a root process cannot reach another
 # user's gui/<UID> domain directly — the gui-domain verbs fail with an input/
-# output error.  `launchctl asuser` establishes the proper bootstrap port for
+# output error. `launchctl asuser` establishes the proper bootstrap port for
 # that user's domain, so they succeed.
 gui_launchctl() {
     launchctl asuser "$CONSOLE_UID" launchctl "$@"

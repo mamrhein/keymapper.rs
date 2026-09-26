@@ -3,7 +3,7 @@
 # Installs the keymapperd systemd user service on Linux.
 #
 # Copies the unit template to ~/.config/systemd/user/, resolves the binary
-# path, enables and starts the service.  Idempotent — safe to run multiple
+# path, enables and starts the service. Idempotent — safe to run multiple
 # times.
 #
 # Usage: scripts/install-linux.sh [binary_path]
@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 UNIT_NAME="keymapperd.service"
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
 
-# Find the unit template.  It may be alongside the script (package layout)
+# Find the unit template. It may be alongside the script (package layout)
 # or under ../resources/systemd/ (repo layout).
 if [ -f "$SCRIPT_DIR/resources/systemd/$UNIT_NAME" ]; then
     UNIT_TEMPLATE="$SCRIPT_DIR/resources/systemd/$UNIT_NAME"
