@@ -13,8 +13,12 @@
 //! [`MappingEngine`], which owns the modifier state and key-fate tracking that
 //! is kept independently for each physical device.
 //! [`process_device_events`] drains the device's pending input, resolves each
-//! key's HID identity, asks the engine for a decision, and either emits the
-//! mapped outputs or forwards the raw event to the virtual output device.
+//! key's HID identity, and asks the engine for a decision, returning the
+//! resulting output actions ([`EmitAction`]); [`emit_actions`] then executes
+//! those actions against the virtual output device.  The split lets the event
+//! loop decide under the short managed-device lock and run the paced sub-event
+//! emissions (see [`EMIT_SPACING`]) outside it, so a mapped burst never blocks
+//! the hot-plug thread.
 
 use std::{
     os::unix::io::{AsRawFd, RawFd},
@@ -165,25 +169,52 @@ fn emit_key_event(
 // Per-device event processing
 // ---------------------------------------------------------------------------
 
+/// A single output operation decided for an input event: produced under the
+/// managed-device lock by [`process_device_events`] / [`plan_initial_state`]
+/// and executed later by [`emit_actions`] once the lock is released.
+///
+/// Deferring emission this way keeps the pacing sleeps ([`EMIT_SPACING`]) out
+/// of the critical section: a mapped key with several
+/// outputs — or a rapid burst — no longer holds the lock long enough to starve
+/// the hot-plug thread or the other devices' events.
+pub(super) enum EmitAction {
+    /// Forward a raw key event unchanged: an unmapped press/release, the
+    /// auto-repeat of an unmapped key, or the re-emitted key-down of a
+    /// modifier held at grab time.
+    Forward { code: u16, value: i32 },
+    /// Release the fired trigger's consumed modifier bits before its output,
+    /// so the output is a clean tap.
+    ReleaseConsumed { consumed: u8 },
+    /// Emit a self-contained mapped tap (modifiers, base, releases).
+    Tap { native_key: NativeKey },
+    /// Hold down a mapped modifier-key output on the virtual device.
+    Hold { native_key: NativeKey },
+}
+
 /// Process all pending events for a single managed device.
 ///
 /// Uses the device's own modifier state and path for rule lookup, ensuring
 /// that modifier state on one keyboard does not affect another.
+///
+/// Runs entirely under the managed-device lock: it reads the device, decides
+/// every event through the engine, and returns the ordered [`EmitAction`]s
+/// without touching the virtual device or sleeping.  The caller drops the lock
+/// and hands the result to [`emit_actions`].
 pub(super) fn process_device_events(
     managed: &mut ManagedDevice,
-    virtual_device: &mut VirtualDevice,
-) {
+) -> Vec<EmitAction> {
     // Drain all pending events from this non-blocking device.
     let events = match managed.device.fetch_events() {
         Ok(events) => events,
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-            return;
+            return Vec::new();
         }
         Err(e) => {
             error!("Linux: error reading events from {}: {}", managed.path, e);
-            return;
+            return Vec::new();
         }
     };
+    let mut actions = Vec::new();
 
     for event in events {
         // MSC_SCAN events carry the raw HID usage as
@@ -227,7 +258,7 @@ pub(super) fn process_device_events(
             } else if value == 0 {
                 managed.engine.clear_stale_key(code);
             }
-            forward_key_event(virtual_device, code, value);
+            actions.push(EmitAction::Forward { code, value });
             continue;
         };
 
@@ -270,7 +301,7 @@ pub(super) fn process_device_events(
                 } else {
                     debug!("pass {} {code} {action} -> {usage}", managed.path);
                 }
-                forward_key_event(virtual_device, code, value)
+                actions.push(EmitAction::Forward { code, value });
             }
             // Mapped: release the trigger's modifiers first (clean tap),
             // then emit the outputs.  An output whose base is itself a
@@ -280,20 +311,20 @@ pub(super) fn process_device_events(
             // key-up arrives.
             Decision::Emit { release, outputs } => {
                 if release != 0 {
-                    release_consumed_modifiers(virtual_device, release);
+                    actions.push(EmitAction::ReleaseConsumed {
+                        consumed: release,
+                    });
                 }
                 for native_key in &outputs {
                     debug!("emit {}", fmt_native_key(native_key));
                     if output_held_mask(native_key).is_some() {
-                        if let Err(e) =
-                            hold_modifier_output(virtual_device, native_key)
-                        {
-                            error!("Emit error: {e}");
-                        }
-                    } else if let Err(e) =
-                        emit_key_event(virtual_device, native_key)
-                    {
-                        error!("Emit error: {e}");
+                        actions.push(EmitAction::Hold {
+                            native_key: native_key.clone(),
+                        });
+                    } else {
+                        actions.push(EmitAction::Tap {
+                            native_key: native_key.clone(),
+                        });
                     }
                 }
             }
@@ -303,7 +334,9 @@ pub(super) fn process_device_events(
             Decision::Swallow { release } => {
                 trace!("swal {} {code} {action} -> {usage}", managed.path);
                 if release != 0 {
-                    release_consumed_modifiers(virtual_device, release);
+                    actions.push(EmitAction::ReleaseConsumed {
+                        consumed: release,
+                    });
                 }
             }
             // A consumed modifier release: the virtual device already released
@@ -311,6 +344,42 @@ pub(super) fn process_device_events(
             // release.
             Decision::ConsumedRelease => {
                 trace!("swal {} {code} {action} -> {usage}", managed.path);
+            }
+        }
+    }
+
+    actions
+}
+
+/// Execute a batch of output actions produced by [`process_device_events`] or
+/// [`plan_initial_state`] against the virtual output device.
+///
+/// Runs **outside** the managed-device lock: the sub-event pacing sleeps
+/// ([`EMIT_SPACING`]) happen here rather than in the critical section, so a
+/// mapped burst no longer stalls the hot-plug thread or the other devices'
+/// events.  The actions are replayed in the exact order they were
+/// decided, so the emitted key sequence is unchanged.
+pub(super) fn emit_actions(
+    device: &mut VirtualDevice,
+    actions: &[EmitAction],
+) {
+    for action in actions {
+        match action {
+            EmitAction::Forward { code, value } => {
+                forward_key_event(device, *code, *value);
+            }
+            EmitAction::ReleaseConsumed { consumed } => {
+                release_consumed_modifiers(device, *consumed);
+            }
+            EmitAction::Tap { native_key } => {
+                if let Err(e) = emit_key_event(device, native_key) {
+                    error!("Emit error: {e}");
+                }
+            }
+            EmitAction::Hold { native_key } => {
+                if let Err(e) = hold_modifier_output(device, native_key) {
+                    error!("Emit error: {e}");
+                }
             }
         }
     }
@@ -727,6 +796,20 @@ pub(super) fn sync_initial_state(
     managed: &mut ManagedDevice,
     virtual_device: &mut VirtualDevice,
 ) {
+    emit_actions(virtual_device, &plan_initial_state(managed));
+}
+
+/// Plan the held-modifier key-down re-emissions that complete the
+/// initial-state sync [`capture_held_keys`] started at grab time (see
+/// [`sync_initial_state`] for the full rationale).
+///
+/// Split from the emission so the event loop can build the actions under the
+/// managed-device lock and replay them in [`emit_actions`] outside it, right
+/// alongside the device's first batch of processed events.
+pub(super) fn plan_initial_state(
+    managed: &mut ManagedDevice,
+) -> Vec<EmitAction> {
+    let mut actions = Vec::new();
     for &code in &managed.pending_held_modifiers {
         // A modifier released during the native release window was
         // unnoted: the client already has the complete down+up pair from
@@ -742,9 +825,10 @@ pub(super) fn sync_initial_state(
             "Linux: re-emitting held modifier key-down {} on {}",
             code, managed.path
         );
-        forward_key_event(virtual_device, code, 1);
+        actions.push(EmitAction::Forward { code, value: 1 });
     }
     managed.pending_held_modifiers.clear();
+    actions
 }
 
 /// Render a list of evdev key codes for logging: each code's canonical HID

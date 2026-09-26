@@ -34,8 +34,9 @@ use std::{
 };
 
 use device::{
-    ManagedDevice, capture_held_keys, drain_pending_events,
-    native_release_window, process_device_events, sync_initial_state,
+    ManagedDevice, capture_held_keys, drain_pending_events, emit_actions,
+    native_release_window, plan_initial_state, process_device_events,
+    sync_initial_state,
 };
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
 use evdev::{AttributeSet, Device, KeyCode, uinput::VirtualDevice};
@@ -170,7 +171,8 @@ pub fn start_mapping(
     }
 
     // Share the managed devices vector with the hot-plug monitor.  The main
-    // event loop locks it briefly while processing each device's events.
+    // event loop locks it only for the brief decision phase; the paced
+    // emissions run outside the lock (SEC-14).
     let managed_devices = Arc::new(Mutex::new(managed_devices));
 
     // Start hot-plug monitor for dynamic device add/remove.
@@ -189,25 +191,38 @@ pub fn start_mapping(
                 for event in &events[..n as usize] {
                     let fd = event.u64 as RawFd;
 
-                    // Find the managed device for this file descriptor and
-                    // process its events.  The lock is held during processing
-                    // to prevent the hot-plug thread from modifying the vec
-                    // concurrently.  Hot-plug operations are rare, so the
-                    // contention is negligible.
-                    let mut devices = managed_devices.lock();
-                    if let Some(managed) =
-                        devices.iter_mut().find(|m| m.device.as_raw_fd() == fd)
-                    {
-                        // A hot-plugged device was adopted before its key
-                        // state was synced; sync it now, on the first event
-                        // from it, so that event is not processed against a
-                        // stale state.
-                        if managed.pending_initial_state {
-                            sync_initial_state(managed, &mut virtual_device);
-                            managed.pending_initial_state = false;
+                    // Short critical section: find the managed device for
+                    // this fd and run its events through the engine, which
+                    // returns the output actions to perform.  Nothing here
+                    // sleeps, so the hot-plug thread is never blocked for more
+                    // than the decision time.  The emissions pace their
+                    // sub-events with ~20 ms sleeps, so they run below, once
+                    // the lock is released (SEC-14).
+                    let actions = {
+                        let mut devices = managed_devices.lock();
+                        match devices
+                            .iter_mut()
+                            .find(|m| m.device.as_raw_fd() == fd)
+                        {
+                            Some(managed) => {
+                                let mut actions = Vec::new();
+                                // A hot-plugged device was adopted before its
+                                // key state was synced; sync it now, on the
+                                // first event from it, so that event is not
+                                // processed against a stale state.
+                                if managed.pending_initial_state {
+                                    actions
+                                        .extend(plan_initial_state(managed));
+                                    managed.pending_initial_state = false;
+                                }
+                                actions.extend(process_device_events(managed));
+                                actions
+                            }
+                            None => continue,
                         }
-                        process_device_events(managed, &mut virtual_device);
-                    }
+                    };
+
+                    emit_actions(&mut virtual_device, &actions);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
