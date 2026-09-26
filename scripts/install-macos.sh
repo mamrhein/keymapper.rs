@@ -22,12 +22,15 @@
 #
 # Idempotent — safe to run multiple times.
 #
-# Usage: scripts/install-macos.sh [keymapperd_path] [virtkbdd_path] [karabiner_pkg_path]
-#   keymapperd_path      — path to the keymapperd binary (default: found via `which`).
-#   virtkbdd_path        — path to the virtkbdd binary (default: found via `which`).
+# Usage: scripts/install-macos.sh [[keymapperd_path] [virtkbdd_path] [karabiner_pkg_path]]
+#   Pass exactly zero, two, or three arguments.  The daemon binaries are
+#   never resolved from $PATH (SEC-05): without explicit path arguments
+#   (two arguments, keymapperd first) the script discovers them next to
+#   itself, in bin/ next to itself, or in ../target/release/.
 #   karabiner_pkg_path   — path to the Karabiner .pkg (default: bundled next to
 #                          the script, or the pinned release downloaded from
-#                          GitHub).
+#                          GitHub).  Every .pkg is verified against a pinned
+#                          SHA-256 digest before `installer` sees it.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -66,23 +69,51 @@ find_template() {
 KEYMAPPERD_TEMPLATE="$(find_template "$KEYMAPPERD_LABEL")"
 VIRTKBDD_TEMPLATE="$(find_template "$VIRTKBDD_LABEL")"
 
-# Resolve the binary source paths.
-if [ $# -ge 1 ]; then
-    KEYMAPPERD_SRC="$1"
-else
-    KEYMAPPERD_SRC="$(which keymapperd 2>/dev/null || true)"
+# Resolve the binary source paths (SEC-05).  A root-run daemon binary
+# must not be resolved from $PATH: a directory on the effective PATH
+# (e.g. /usr/local/bin or /opt/homebrew/bin, both writable by non-root
+# users on a default Homebrew install) is untrusted input, and whatever
+# was found there would have been installed to be run as root by
+# launchd.  Without explicit path arguments the binaries are discovered
+# only in packaged release layouts — the scripts beside the binaries
+# (DMG and staged archive) — or in a local `cargo build --release`.
+find_source() {
+    local name="$1"
+    local candidate
+    for candidate in "${SCRIPT_DIR}/bin/${name}" "${SCRIPT_DIR}/${name}" \
+            "${SCRIPT_DIR}/../target/release/${name}"; do
+        if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+KEYMAPPERD_SRC=""
+VIRTKBDD_SRC=""
+
+if [ $# -eq 0 ]; then
+    # No packaged or freshly built binary was found: a `cargo install
+    # --path .` of an earlier version leaves the daemons in ~/.local/bin
+    # beside the CLI, so accept them only as a last resort.
+    KEYMAPPERD_SRC="$(find_source keymapperd)" || KEYMAPPERD_SRC="${HOME}/.local/bin/keymapperd"
+    VIRTKBDD_SRC="$(find_source virtkbdd)" || VIRTKBDD_SRC="${HOME}/.local/bin/virtkbdd"
+elif [ $# -ne 2 ] && [ $# -ne 3 ]; then
+    echo "Error: pass zero, two, or three arguments: [keymapperd_path] [virtkbdd_path] [karabiner_pkg_path]." >&2
+    exit 1
 fi
 
 if [ $# -ge 2 ]; then
+    KEYMAPPERD_SRC="$1"
     VIRTKBDD_SRC="$2"
-else
-    VIRTKBDD_SRC="$(which virtkbdd 2>/dev/null || true)"
 fi
 
 for src in "$KEYMAPPERD_SRC" "$VIRTKBDD_SRC"; do
     if [ -z "$src" ] || [ ! -x "$src" ]; then
         echo "Error: binary not found or not executable: '${src:-<missing>}'." >&2
-        echo "Provide the keymapperd and virtkbdd paths as arguments, or ensure both are in \$PATH." >&2
+        echo "Build the daemons (cargo build --release) or pass both daemon paths" >&2
+        echo "explicitly: $(basename "$0") <keymapperd_path> <virtkbdd_path> [karabiner_pkg_path]." >&2
         exit 1
     fi
 done
@@ -125,6 +156,14 @@ dequarantine() {
     xattr -d com.apple.quarantine "$1" 2>/dev/null || true
 }
 
+# True if the given octal mode (as printed by `stat -f '%OLp'`) carries
+# the write bit in its group or world octal digit, i.e. if users other
+# than the owner could modify or replace the file at that mode.
+mode_writable() {
+    local mode="$(stat -f '%OLp' "$1")"
+    [ $(( (8#$mode / 8) % 8 & 2 )) -ne 0 ] || [ $(( 8#$mode % 8 & 2 )) -ne 0 ]
+}
+
 # Assert that the given directory and every one of its parent directories are
 # writable only by their owner (no group or world write bit anywhere in the
 # chain).  A binary that launchd runs as root must not live below a directory
@@ -162,6 +201,89 @@ install_binary() {
     dequarantine "$dst"
     chown "$owner" "$dst"
 }
+
+# Trust and integrity checks for the source binaries (SEC-05).
+#
+# A source living in a directory that non-root users can write into (or
+# that lives below one) is untrusted input: replacing the binary there
+# amounts to root-executable code, because launchd runs whatever path it
+# launches from.  Such sources are only flagged, never rejected: the
+# Homebrew formula and cask legitimately deliver their binaries from
+# group-writable /usr/local or /opt/homebrew territory.  A manifest next
+# to the script is binding only if the source lives in the script's own
+# directory or directly below it (flat layout in the staged release
+# archives, a `bin/` subdirectory in the DMG): the source must be listed
+# in the manifest with a matching digest and every listed file must be
+# present, or the install aborts.  A self-built binary (from
+# `target/release` or `~/.local/bin`) has no external trust anchor, so
+# nothing but a warning is needed for it.
+check_source_trust() {
+    local src="$1"
+    local src_dir manifest_dir
+
+    # Resolve a relative source path (e.g. `install-macos.sh bin/keymapperd
+    # ...` run from a mounted volume or a staging directory) against the
+    # caller's cwd so the layout tests below can recognize a packaged
+    # layout.  An unresolvable path is treated as out-of-tree and fails
+    # closed (the install aborts) if a manifest sits next to the script.
+    case "$src" in
+        /*) ;;
+        *)
+            if src_dir="$(cd "$(dirname "$src")" && pwd)"; then
+                src="$src_dir/$(basename "$src")"
+            fi
+            ;;
+    esac
+
+    src_dir="$(dirname "$src")"
+
+    # Warning path — sources below the script's own directory are exempt
+    # (a packaged layout the user unpacked, checked via its manifest
+    # below), and so are sources below a private home directory or the
+    # world-writable temp directories (self-built, or a staged archive
+    # copy whose scripts could write nothing but themselves).
+    if [ "${src#"$SCRIPT_DIR"/}" = "$src" ] && { mode_writable "$src" || mode_writable "$src_dir"; }; then
+        case "$src_dir" in
+            "$HOME"|"$HOME"/*|/tmp/*|/private/tmp/*|/Users/Shared/*) ;;
+            *)
+                echo "Warning: '${src}' lives below '${src_dir}', which non-root users could write into; it is installed unverified." >&2
+                ;;
+        esac
+    fi
+
+    # Binding check — find the manifest that can vouch for this binary.
+    if [ -f "${SCRIPT_DIR}/SHA256SUMS.txt" ] \
+            && { [ "$src_dir" = "$SCRIPT_DIR" ] || [ "$src_dir" = "${SCRIPT_DIR}/bin" ] \
+                 || [ "${src#"$SCRIPT_DIR"/}" = "$src" ]; }; then
+        manifest_dir="$SCRIPT_DIR"
+    elif [ "$src_dir" != "$SCRIPT_DIR" ] && [ -f "${src_dir}/SHA256SUMS.txt" ]; then
+        manifest_dir="$src_dir"
+    else
+        # Without a manifest nothing vouches for the source (SEC-05):
+        # ad-hoc signing plus the fixed install paths and the self-tamper
+        # caveats in docs/macos-architecture.md are all that remain.
+        echo "Warning: no SHA256SUMS.txt found for '${src}'; it is installed unverified." >&2
+        return 0
+    fi
+    # A `--check` run resolves the manifest's relative paths against the
+    # working directory and fails on any mismatching or missing entry, so
+    # it doubles as the completeness proof for the package's own files.
+    # The greps then prove the source itself is listed with a matching
+    # digest (plain `--check` ignores a source it does not list, and
+    # `--ignore-missing` must not be used because it hides removals).
+    if ! (cd "$manifest_dir" && shasum -a 256 --check SHA256SUMS.txt >/dev/null 2>&1 \
+            && grep -F "  ${src#"$manifest_dir"/}" "SHA256SUMS.txt" | grep -qF \
+                 "$(shasum -a 256 "$src" | cut -d' ' -f1)"); then
+        echo "Error: '${src}' is not listed with a matching digest in '${manifest_dir}/SHA256SUMS.txt'; refusing to install an unverified binary as root." >&2
+        return 1
+    fi
+    return 0
+}
+
+if ! check_source_trust "$KEYMAPPERD_SRC" || ! check_source_trust "$VIRTKBDD_SRC"; then
+    echo "Re-download the release archive (see docs/macos-architecture.md) rather than repairing it in place." >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # virtkbdd — root LaunchDaemon (system domain)

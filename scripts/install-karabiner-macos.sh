@@ -6,7 +6,8 @@
 # driver.  This script:
 #   1. installs the Karabiner package (from an explicit pkg path, a pkg
 #      bundled next to the script, or a pinned download from the pqrs
-#      GitHub releases),
+#      GitHub releases) — every candidate is verified against a pinned
+#      SHA-256 digest before `installer` sees it,
 #   2. activates the DriverKit extension (a one-time user approval in
 #      System Settings may still be required),
 #   3. registers the Karabiner daemon LaunchDaemon (Interactive, KeepAlive).
@@ -82,12 +83,22 @@ else
         trap 'rm -rf "$TMP_DIR"' EXIT
         PKG_PATH="${TMP_DIR}/${KARABINER_PKG_NAME}"
         curl -fL --retry 3 -o "$PKG_PATH" "$KARABINER_PKG_URL"
-        # Verify the download against the pinned checksum.
-        echo "${KARABINER_PKG_SHA256}  ${PKG_PATH}" | shasum -a 256 --check
     fi
 
     if [ ! -f "$PKG_PATH" ]; then
         echo "Error: Karabiner package not found at '${PKG_PATH}'." >&2
+        exit 1
+    fi
+
+    # Every candidate — an explicit path, a pkg globbed from next to the
+    # script, or the download — is checked against the pinned digest
+    # (SEC-05).  A non-matching pkg is not necessarily malicious; it may
+    # simply be another version.  But nothing else vouches for it: an
+    # unsigned, unbound pkg handed to `installer` would run as root
+    # unchecked.  For a different version, update KARABINER_VERSION and
+    # KARABINER_PKG_SHA256 at the top of this script.
+    if ! echo "${KARABINER_PKG_SHA256}  ${PKG_PATH}" | shasum -a 256 --check --status; then
+        echo "Error: '${PKG_PATH}' does not match the pinned Karabiner package v${KARABINER_VERSION}; refusing to install an unverified package as root." >&2
         exit 1
     fi
 

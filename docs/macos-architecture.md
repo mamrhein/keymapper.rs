@@ -118,7 +118,7 @@ sudo scripts/install-macos.sh
 
 The install script registers the virtkbdd LaunchDaemon (`/Library/Application Support/keymapper/virtkbdd`, a root-only directory — the daemon no longer lives in admin-writable `/usr/local/bin`), registers the keymapperd LaunchAgent (`~/.local/bin/keymapperd`) for the console user, then installs the pinned Karabiner DriverKit package (downloading it from the pqrs GitHub releases if no local copy is available), activates the DriverKit extension, and registers the Karabiner daemon LaunchDaemon. It is idempotent — safe to run multiple times.
 
-The script also accepts explicit paths: `sudo scripts/install-macos.sh [keymapperd_path] [virtkbdd_path] [karabiner_pkg_path]`.
+The script also accepts explicit paths: `sudo scripts/install-macos.sh [keymapperd_path] [virtkbdd_path] [karabiner_pkg_path]` — pass the two daemon paths as a pair or omit both. It never resolves the daemons from `$PATH`. Without arguments they are discovered next to the script, in `../target/release/` (a local `cargo build --release`) or in `~/.local/bin`. Packaged releases ship a `SHA256SUMS.txt` manifest, and the installer verifies every daemon binary against it (and the Karabiner package against its pinned digest) before installing anything that `launchd` would run as root.
 
 ### Standalone binaries (DMG)
 

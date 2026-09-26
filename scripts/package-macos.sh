@@ -47,6 +47,16 @@ cp "${PROJECT_ROOT}/target/${TARGET}/release/keymapper" "${VOLUME_DIR}/bin/"
 cp "${PROJECT_ROOT}/target/${TARGET}/release/keymapperd" "${VOLUME_DIR}/bin/"
 cp "${PROJECT_ROOT}/target/${TARGET}/release/virtkbdd" "${VOLUME_DIR}/bin/"
 
+# Generate the integrity manifest (SHA256SUMS.txt) at the volume root.  The
+# DMG's install.sh and install-macos.sh verify the packaged binaries against
+# it (SEC-05); without it there is no trust anchor for the root-run daemons
+# at all.  A packaging host without shasum must abort rather than ship an
+# unverified DMG.
+if ! (cd "${VOLUME_DIR}" && shasum -a 256 bin/* > SHA256SUMS.txt); then
+    echo "Error: failed to generate SHA256SUMS.txt (is shasum missing?)." >&2
+    exit 1
+fi
+
 # Copy documentation.
 cp "${PROJECT_ROOT}/README.md" "${VOLUME_DIR}/"
 cp "${PROJECT_ROOT}/LICENSE.TXT" "${VOLUME_DIR}/"
@@ -111,6 +121,21 @@ fi
 if [ ! -d "$DEST" ]; then
     echo "Creating ${DEST}..."
     mkdir -p "$DEST"
+fi
+
+# Verify every file listed in the manifest beside this script (the three
+# binaries in bin/ — CLI and both daemons, see SEC-05) before installing
+# anything from this volume.  A manifest that was tampered with together with
+# its files cannot be detected (that would require a detached signature or
+# notarization); on a check failure re-download the DMG rather than
+# "repairing" the contents here.
+if [ -f "${SCRIPT_DIR}/SHA256SUMS.txt" ]; then
+    if ! (cd "$SCRIPT_DIR" && shasum -a 256 --check SHA256SUMS.txt >/dev/null 2>&1); then
+        echo "Error: integrity check failed — re-download the keymapper DMG." >&2
+        exit 1
+    fi
+else
+    echo "Warning: SHA256SUMS.txt is missing; the binaries in this volume are installed unverified." >&2
 fi
 
 cp "${SCRIPT_DIR}/bin/keymapper" "$DEST/"
