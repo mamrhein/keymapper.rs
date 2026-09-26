@@ -13,7 +13,10 @@
 //! directory when the runtime dir is unset) and serves one command per
 //! connection. The socket is the auth mechanism, so it is created `0600`
 //! and owned by the daemon's uid — the current user — meaning only that user
-//! can connect.
+//! can connect. The bind runs under a temporarily tightened `umask` so the
+//! socket is born owner-only, with no `bind`-to-`chmod` window; as defense
+//! in depth every accepted connection is additionally checked against the
+//! peer's kernel-reported credentials (see [`authorize_peer`]).
 //!
 //! The cache-directory fallback may live below a world-writable base such
 //! as `/tmp`, where a local attacker could plant the endpoint directory and
@@ -128,8 +131,15 @@ fn prepare_socket_dir(parent: &Path, current_uid: u32) -> Result<(), String> {
 /// Bind the endpoint at *path*, removing any stale socket first.
 ///
 /// The parent directory is validated (and created, if missing) by
-/// [`prepare_socket_dir`] before the bind, so the unlink below can only
-/// ever remove an entry in a directory that belongs to us.
+/// [`prepare_socket_dir`] before the stale-socket unlink and the bind, so the
+/// unlink below can only ever remove an entry in a directory that belongs to
+/// us.
+///
+/// The bind runs under a temporarily tightened umask so the socket inode is
+/// created owner-only (`0777 & ~0o177` = `0600`) *at creation time*. A
+/// `chmod` after the bind would leave a window — the socket is born
+/// `0777 & ~umask`, so under a permissive umask another local user could
+/// connect before the mode is corrected.
 fn bind_at(path: &Path) -> Result<UnixListener, String> {
     if let Some(parent) = path.parent() {
         prepare_socket_dir(parent, unsafe { libc::getuid() })?;
@@ -138,12 +148,16 @@ fn bind_at(path: &Path) -> Result<UnixListener, String> {
     // bind otherwise fails with `AddressInUse`.
     let _ = fs_err::remove_file(path);
 
-    let listener = UnixListener::bind(path).map_err(|e| e.to_string())?;
-    // Owner-only: the socket is the auth mechanism, so restrict it to the
-    // daemon's uid (the current user). Best-effort, as in the virtkbdd IPC
-    // server.
-    let _ = fs_err::set_permissions(path, Permissions::from_mode(0o600));
-    Ok(listener)
+    // `umask` is process-global, so this briefly affects file creations by
+    // other threads. The deviation is microsecond-sized and one-directional:
+    // other threads' files can only end up *more* restrictive, never more
+    // permissive.
+    let previous_umask = unsafe { libc::umask(0o177) };
+    let bound = UnixListener::bind(path);
+    unsafe { libc::umask(previous_umask) };
+    // Owner-only from the first instant: the socket is the auth mechanism,
+    // so it must never exist in a group- or world-writable state.
+    bound.map_err(|e| e.to_string())
 }
 
 /// Bind the endpoint and spawn the accept thread.
@@ -184,6 +198,15 @@ fn serve_with_timeout(listener: UnixListener, io_timeout: Duration) {
         let Ok(mut stream) = stream else {
             continue;
         };
+        // Authoritative peer check, mirroring the `getpeereid` gate in the
+        // virtkbdd IPC server: the file mode is the first gate, but kernel
+        // credentials are the source of truth, so a permission race (or a
+        // mode weakened by an external actor) still cannot admit a foreign
+        // user.
+        if let Err(e) = authorize_peer(&stream, unsafe { libc::getuid() }) {
+            debug!("control-socket rejecting connection: {e}");
+            continue;
+        }
         // Bound the I/O before touching the stream so a stalled peer
         // cannot wedge this single-threaded loop; a timeout surfaces as
         // an I/O error and closes the connection.
@@ -199,6 +222,101 @@ fn serve_with_timeout(listener: UnixListener, io_timeout: Duration) {
             debug!("control-socket connection ended: {e}");
         }
     }
+}
+
+/// Verify that *stream* comes from a process allowed to use the control
+/// endpoint.
+///
+/// The socket is owner-only (`0600`), so file permissions alone should admit
+/// only the daemon's own uid. Peer credentials are checked anyway because
+/// they are authoritative: the kernel reports them (`SO_PEERCRED` on Linux,
+/// `LOCAL_PEERCRED` on macOS) and they cannot be forged, while file modes
+/// can be raced or changed behind the daemon's back.
+///
+/// Root is admitted as well: it bypasses file-permission checks anyway, so
+/// refusing it would not confine root but would break `sudo keymapper ...`
+/// against a user-run daemon.
+fn authorize_peer(
+    stream: &UnixStream,
+    current_uid: libc::uid_t,
+) -> Result<(), String> {
+    let peer = peer_uid(stream)?;
+    if peer == 0 || peer == current_uid {
+        Ok(())
+    } else {
+        Err(format!(
+            "peer uid {peer} is neither the daemon uid nor root"
+        ))
+    }
+}
+
+/// Return the uid of the connected peer, or an error if the kernel cannot
+/// report it (the caller then fails closed).
+#[cfg(not(target_os = "macos"))]
+fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
+    use std::{io, os::unix::io::AsRawFd};
+
+    // `SO_PEERCRED` is filled in by the kernel at connect time and cannot
+    // be forged by the peer.
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
+            &mut len,
+        )
+    };
+    if status != 0 {
+        return Err(format!(
+            "getsockopt(SO_PEERCRED): {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(cred.uid)
+}
+
+/// The macOS `struct xid` exchanged with `getpeereid(2)`.
+///
+/// macOS 27 changed the prototype from `(int, struct xid *)` to
+/// `(int, uid_t *, gid_t *)`. Passing the first and third fields of this
+/// struct as the two out-pointers is correct under both ABIs: the classic
+/// form writes all three fields through the first pointer, while the new
+/// form writes the euid and the gid to offsets 0 and 8. Only offset 0 is
+/// read back, so the call stays within the struct on every release.
+///
+/// (Same layout trick as the virtkbdd IPC server's `peer_uid`.)
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct Xid {
+    xi_uid: libc::uid_t,
+    xi_euid: libc::uid_t,
+    xi_gid: libc::gid_t,
+}
+
+/// Return the uid of the connected peer, via `getpeereid(2)`.
+///
+/// Offset 0 of [`Xid`] holds the effective uid on macOS 27+ and the real
+/// uid on earlier releases. For a normal user process such as keymapperd
+/// the two are equal, and it is the identity that matters here.
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
+    use std::{io, os::unix::io::AsRawFd};
+
+    let mut xid = Xid {
+        xi_uid: 0,
+        xi_euid: 0,
+        xi_gid: 0,
+    };
+    let status = unsafe {
+        libc::getpeereid(stream.as_raw_fd(), &mut xid.xi_uid, &mut xid.xi_gid)
+    };
+    if status != 0 {
+        return Err(format!("getpeereid: {}", io::Error::last_os_error()));
+    }
+    Ok(xid.xi_uid)
 }
 
 /// Connect to the endpoint at *path* as a client.
@@ -340,6 +458,53 @@ mod tests {
 
         // Restore the default level so other tests observe it.
         logging::set_level(log::LevelFilter::Info);
+    }
+
+    /// The socket must be born owner-only even under a fully permissive
+    /// umask: the bind runs under `umask(0o177)`, so there is no window in
+    /// which another user could connect (SEC-11). Mutating the umask is
+    /// process-global and therefore only safe because nextest runs each test
+    /// in its own process.
+    #[test]
+    fn bind_at_creates_owner_only_socket_under_permissive_umask() {
+        use std::os::unix::fs::MetadataExt;
+
+        unsafe { libc::umask(0o000) };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOCKET_NAME);
+        let listener = match bind_at(&path) {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!(
+                    "skipping owner-only-socket bind test: cannot bind ({e})"
+                );
+                return;
+            }
+        };
+        // Without the umask scope the socket would be created 0777 here; the
+        // mode is read while the listener is alive, i.e. the moment an
+        // attacker could still connect.
+        let mode = fs_err::metadata(&path).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        drop(listener);
+    }
+
+    /// `authorize_peer` admits the daemon's own uid (and root) and rejects
+    /// any other uid. A real foreign-uid peer cannot be created without
+    /// privileges, so the rejection path is exercised through the uid
+    /// parameter, mirroring `socket_dir_rejects_foreign_owner`.
+    #[test]
+    fn authorize_peer_checks_peer_credentials() {
+        let (server, _client) = UnixStream::pair().unwrap();
+
+        // The peer of a socketpair is this very process, i.e. the current
+        // uid.
+        authorize_peer(&server, unsafe { libc::getuid() }).unwrap();
+
+        let foreign_uid = unsafe { libc::getuid() } + 1;
+        let err = authorize_peer(&server, foreign_uid).unwrap_err();
+        assert!(err.contains("neither the daemon uid nor root"));
     }
 
     /// A parent directory owned by a different uid must be refused: its
