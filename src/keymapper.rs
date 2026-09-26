@@ -20,7 +20,7 @@ use keymapper::{
         },
         keyboard::KeyboardSpecifier,
     },
-    daemon::{control, logging::LevelFilter},
+    daemon::{config_io::read_config_content, control, logging::LevelFilter},
 };
 
 /// CLI utility for managing the keymapperd configuration.
@@ -236,7 +236,11 @@ fn load_config() -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
         },
     )?;
 
-    let contents = fs_err::read_to_string(&path)?;
+    // Read through the daemon's hardened reader so the CLI enforces the
+    // same constraints as the daemon (size cap, symlink, ownership, and
+    // world-writable checks).
+    let contents = read_config_content(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
 
     Ok((path, contents))
 }
@@ -261,32 +265,19 @@ fn load_config_at(
         .into());
     };
 
-    reject_symlink(&path)?;
-
     if !path.is_file() {
         return Err(
             format!("config file not found: {}", path.display()).into()
         );
     }
 
-    let contents = fs_err::read_to_string(&path)?;
+    // The hardened reader rejects a symlinked config file (via symlink
+    // metadata and `O_NOFOLLOW`) and applies the same size, ownership, and
+    // world-writable checks as the daemon.
+    let contents = read_config_content(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
 
     Ok((path, contents))
-}
-
-/// Check that a config file is not a symbolic link and return it if valid.
-fn reject_symlink(path: &Path) -> Result<(), String> {
-    if std::fs::symlink_metadata(path)
-        .ok()
-        .is_some_and(|m| m.file_type().is_symlink())
-    {
-        Err(format!(
-            "config file {} is a symbolic link and will not be followed",
-            path.display(),
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 fn cmd_appnames() -> Result<(), Box<dyn std::error::Error>> {
@@ -488,9 +479,12 @@ fn cmd_config_add(
                 "configuration file not found"
             })?;
 
-            // `find_config_path` guarantees the file exists.
-            reject_symlink(&path)?;
-            let contents = fs_err::read_to_string(&path)?;
+            // `find_config_path` guarantees the file exists and is not a
+            // symlink; the hardened reader re-checks that and enforces the
+            // size, ownership, and world-writable checks.
+            let contents = read_config_content(&path).map_err(|err| {
+                format!("failed to read {}: {err}", path.display())
+            })?;
 
             (path, contents)
         }
