@@ -40,12 +40,15 @@ pub const PAGE_CONSUMER: u16 = 0x0C;
 /// Returns a user-friendly error message for an unrecognised key name.
 ///
 /// Shared by the `HidUsage` parser and the platform `Key` enums, which all
-/// resolve the same set of config-facing key names.
+/// resolve the same set of config-facing key names.  The offending token is
+/// embedded debug-quoted (rather than raw between quotes) so control
+/// characters in a config string — newlines, ESC sequences — are escaped
+/// instead of being emitted verbatim into daemon logs or terminal output,
+/// where they could forge log lines.
 pub(crate) fn unknown_key_error(s: &str) -> String {
     format!(
-        "Unknown key name '{}'. Use names like CapsLock, LeftCtrl, A, F1, 1, \
-         Minus, Equal, BracketLeft, etc.",
-        s
+        "Unknown key name {s:?}. Use names like CapsLock, LeftCtrl, A, F1, \
+         1, Minus, Equal, BracketLeft, etc."
     )
 }
 
@@ -518,6 +521,20 @@ mod tests {
         // Error message contains the input string.
         let err = HidUsage::try_from("BadKey").unwrap_err();
         assert!(err.to_string().contains("BadKey"));
+    }
+
+    #[test]
+    fn unknown_key_error_escapes_control_chars() {
+        // A config key name may embed newlines or ANSI escapes.
+        // The error message is echoed into daemon logs and CLI output, so
+        // the token must be escaped and must not smuggle control chars.
+        let err =
+            HidUsage::try_from("A\n\u{1b}[31mnope\u{1b}[0m").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.chars().any(|c| c.is_ascii_control()),
+            "control character leaked into error message: {msg:?}"
+        );
     }
 
     #[test]

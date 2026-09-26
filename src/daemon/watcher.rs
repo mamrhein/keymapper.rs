@@ -104,7 +104,11 @@ fn spawn_reload_thread(
                     };
 
                     if should_log {
-                        error!("Failed to hot-reload configuration: {msg}");
+                        // `{:?}` escapes control characters: the error text
+                        // can quote raw config fragments (unknown key names,
+                        // parser snippets), which would otherwise forge log
+                        // lines in the daemon log.
+                        error!("Failed to hot-reload configuration: {msg:?}");
                         if consecutive_errors > ERROR_THROTTLE_LIMIT {
                             error!(
                                 "(Throttling further error output until a \
