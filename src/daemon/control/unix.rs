@@ -14,8 +14,16 @@
 //! connection. The socket is the auth mechanism, so it is created `0600`
 //! and owned by the daemon's uid — the current user — meaning only that user
 //! can connect.
+//!
+//! The cache-directory fallback may live below a world-writable base such
+//! as `/tmp`, where a local attacker could plant the endpoint directory and
+//! later unlink or replace the socket to impersonate the daemon to the CLI.
+//! The daemon therefore refuses to bind unless the socket's parent
+//! directory is owned by the current user, and creates it `0700` when it is
+//! missing (see [`prepare_socket_dir`]).
 
 use std::{
+    fs::Permissions,
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
@@ -57,10 +65,74 @@ pub(super) fn socket_path() -> PathBuf {
     base.join(APP_NAME).join(SOCKET_NAME)
 }
 
+/// Validate (and if necessary create) the socket's parent directory.
+///
+/// Deletion permission on a unix socket comes from the *containing
+/// directory*, so whoever owns the parent can unlink or replace the socket
+/// and impersonate the daemon to the CLI. A bind is therefore only allowed
+/// when *parent* is a directory owned by *current_uid*.
+///
+/// As root the check is relaxed to "not world-writable": a root-run daemon
+/// may legitimately sit in a user-owned runtime directory, so ownership
+/// proves nothing there. This mirrors the policy of the hardened config
+/// reader (`config_io`).
+///
+/// A directory that does not exist yet is created with mode `0700`
+/// (`create_dir_all` would apply the process umask); a pre-existing one —
+/// e.g. a systemd `XDG_RUNTIME_DIR` — is left as it is.
+fn prepare_socket_dir(parent: &Path, current_uid: u32) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut created = false;
+    let meta = match fs_err::metadata(parent) {
+        Ok(meta) => meta,
+        Err(_) => {
+            fs_err::create_dir_all(parent).map_err(|e| {
+                format!("cannot create {}: {e}", parent.display())
+            })?;
+            created = true;
+            fs_err::metadata(parent).map_err(|e| {
+                format!("cannot stat {}: {e}", parent.display())
+            })?
+        }
+    };
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", parent.display()));
+    }
+    if !created {
+        if current_uid == 0 {
+            if meta.mode() & 0o002 != 0 {
+                return Err(format!(
+                    "refusing to bind in {}: directory is world-writable",
+                    parent.display(),
+                ));
+            }
+        } else if meta.uid() != current_uid {
+            return Err(format!(
+                "refusing to bind in {}: directory is owned by uid {}, not \
+                 by the current uid {current_uid}",
+                parent.display(),
+                meta.uid(),
+            ));
+        }
+    }
+    if created {
+        fs_err::set_permissions(parent, Permissions::from_mode(0o700))
+            .map_err(|e| {
+                format!("cannot set permissions on {}: {e}", parent.display())
+            })?;
+    }
+    Ok(())
+}
+
 /// Bind the endpoint at *path*, removing any stale socket first.
+///
+/// The parent directory is validated (and created, if missing) by
+/// [`prepare_socket_dir`] before the bind, so the unlink below can only
+/// ever remove an entry in a directory that belongs to us.
 fn bind_at(path: &Path) -> Result<UnixListener, String> {
     if let Some(parent) = path.parent() {
-        fs_err::create_dir_all(parent).map_err(|e| e.to_string())?;
+        prepare_socket_dir(parent, unsafe { libc::getuid() })?;
     }
     // Remove a stale socket left by a previous (crashed) instance; a fresh
     // bind otherwise fails with `AddressInUse`.
@@ -70,8 +142,7 @@ fn bind_at(path: &Path) -> Result<UnixListener, String> {
     // Owner-only: the socket is the auth mechanism, so restrict it to the
     // daemon's uid (the current user). Best-effort, as in the virtkbdd IPC
     // server.
-    let _ =
-        fs_err::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    let _ = fs_err::set_permissions(path, Permissions::from_mode(0o600));
     Ok(listener)
 }
 
@@ -269,6 +340,75 @@ mod tests {
 
         // Restore the default level so other tests observe it.
         logging::set_level(log::LevelFilter::Info);
+    }
+
+    /// A parent directory owned by a different uid must be refused: its
+    /// owner could unlink or replace the socket. A real foreign-owned
+    /// directory cannot be created without privileges, so the check itself
+    /// is exercised through the uid parameter.
+    #[test]
+    fn socket_dir_rejects_foreign_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let foreign_uid = unsafe { libc::getuid() } + 1;
+        let err = prepare_socket_dir(dir.path(), foreign_uid).unwrap_err();
+        assert!(err.contains("refusing to bind"));
+        assert!(err.contains("owned by uid"));
+    }
+
+    /// Running as root the ownership check is relaxed, but a world-writable
+    /// parent must still be refused (any local user could replace the
+    /// socket).
+    #[test]
+    fn socket_dir_rejects_world_writable_parent_for_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let world_writable = dir.path().join("world_writable");
+        fs_err::create_dir(&world_writable).unwrap();
+        fs_err::set_permissions(
+            &world_writable,
+            Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        let err = prepare_socket_dir(&world_writable, 0).unwrap_err();
+        assert!(err.contains("world-writable"));
+    }
+
+    /// A non-directory in the parent position must be refused with a clear
+    /// error instead of a confusing `bind` failure.
+    #[test]
+    fn socket_dir_rejects_non_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("regular_file");
+        fs_err::write(&file, b"not a directory").unwrap();
+        let err =
+            prepare_socket_dir(&file, unsafe { libc::getuid() }).unwrap_err();
+        assert!(err.contains("not a directory"));
+    }
+
+    /// A missing parent is created with mode `0700`, independent of the
+    /// process umask, so other users cannot even traverse into it.
+    #[test]
+    fn socket_dir_creates_missing_parent_as_0700() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+        prepare_socket_dir(&nested, unsafe { libc::getuid() }).unwrap();
+        let mode = fs_err::metadata(&nested).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    /// An existing directory we own (e.g. a systemd `XDG_RUNTIME_DIR`) is
+    /// used as-is; its mode must not be rewritten.
+    #[test]
+    fn socket_dir_keeps_mode_of_existing_dir() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        fs_err::set_permissions(dir.path(), Permissions::from_mode(0o755))
+            .unwrap();
+        prepare_socket_dir(dir.path(), unsafe { libc::getuid() }).unwrap();
+        let mode = fs_err::metadata(dir.path()).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o755);
     }
 
     /// `connect_error` maps the two "no daemon" I/O kinds to friendly

@@ -632,6 +632,11 @@ fn cmd_daemon_restart() -> Result<(), Box<dyn std::error::Error>> {
 /// The daemon replies `OK <level>` on success. A connection failure means no
 /// daemon is reachable (not running, or older than this CLI); a daemon reply
 /// starting with `ERROR` means the request was rejected.
+///
+/// At `debug` and above the daemon records every key-down with its resolved
+/// HID usage, enough to reconstruct typed input, so after confirming the new
+/// level a warning is printed telling the user not to type sensitive data
+/// while it is active.
 fn cmd_daemon_log(
     level: LevelFilter,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -651,6 +656,13 @@ fn cmd_daemon_log(
         return Err(reason.into());
     }
     println!("{reply}");
+    if level >= LevelFilter::Debug {
+        eprintln!(
+            "Warning: keystrokes are written to the daemon log at the \
+             {level:?} level. Do not type sensitive data (passwords, keys, \
+             tokens) while it is active!"
+        );
+    }
     Ok(())
 }
 
