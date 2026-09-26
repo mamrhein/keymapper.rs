@@ -1090,10 +1090,23 @@ impl Drop for LevelResetGuard {
 }
 
 /// Run the e2e test in local mode: drive the user's already-running daemon,
-/// never start or stop it.  Skips with a message when a precondition is
-/// unmet (daemon not running, log stream not readable, control socket
-/// unreachable).
+/// never start or stop it.  Because local mode injects real key events into
+/// the user's focused application, it only runs when the user opts in with a
+/// non-empty `E2E` environment variable.  Skips with a message when a
+/// precondition is unmet (`E2E` unset, daemon not running, log stream not
+/// readable, control socket unreachable).
 fn run_e2e_local(phases: &[Option<&Path>], label: &str) {
+    // Local mode takes over the user's keyboard, so it must never run as a
+    // side effect of a plain `cargo nextest`.  The user opts in explicitly
+    // with `E2E` (any non-empty value) after preparing their focus.
+    if !env::var("E2E").is_ok_and(|v| !v.is_empty()) {
+        eprintln!(
+            "skipping {label}: local e2e mode injects keys into your focused \
+             application; focus the target app and re-run with `E2E=1`"
+        );
+        return;
+    }
+
     let _lock = E2eLock::acquire();
 
     // Preconditions, checked before anything destructive.  The log-source
