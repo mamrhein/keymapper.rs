@@ -9,11 +9,22 @@
 
 //! The Windows control endpoint: a byte-mode named pipe.
 //!
-//! The daemon creates `\\.\\pipe\\keymapperd` and serves one command per
-//! connection. The pipe is the auth mechanism: its DACL grants only the
-//! current user (a single `ACCESS_ALLOWED` ACE for the caller's SID) full
-//! control, so only that user can open it. This supersedes the
-//! `daemon_token` removed in Phase 2.
+//! The daemon creates `\\.\pipe\keymapperd-<nonce>` and serves one command
+//! per connection. The nonce is random per daemon run, so the full name is
+//! unpredictable: a same-user process that starts before the daemon (e.g.
+//! during the logon race against the scheduled task) cannot squat a fixed
+//! name to steal the endpoint. The pipe is the auth mechanism: its DACL
+//! grants only the current user (a single `ACCESS_ALLOWED` ACE for the
+//! caller's SID) full control, so only that user can open it. This
+//! supersedes the `daemon_token` removed in Phase 2.
+//!
+//! Discovery goes the other way around: once the pipe is live with its
+//! owner-only DACL applied, the daemon publishes its exact name to
+//! `%LOCALAPPDATA%\keymapperd\control.pipe`, hardened with the same
+//! owner-only DACL. Because publication happens only after the pipe exists,
+//! a readable publish file always names a live, genuine endpoint, and the
+//! CLI never connects to a name it guessed itself. A missing or stale file
+//! surfaces on the CLI as a clean "no daemon is running" error.
 //!
 //! The pipe is created *without* a security descriptor, and the owner-only
 //! DACL is applied right afterwards with `SetSecurityInfo`. Passing the
@@ -26,6 +37,8 @@
 
 use std::{
     io::{Read, Write},
+    os::windows::io::AsRawHandle,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -38,10 +51,10 @@ use windows::{
             WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
-            ACL_REVISION, GetLengthSid, GetTokenInformation,
-            InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, PSID,
-            SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_QUERY,
-            TOKEN_USER, TokenUser,
+            ACL_REVISION, Cryptography::ProcessPrng, GetLengthSid,
+            GetTokenInformation, InitializeSecurityDescriptor,
+            PSECURITY_DESCRIPTOR, PSID, SECURITY_DESCRIPTOR,
+            SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
@@ -66,8 +79,26 @@ use windows::{
 
 use super::{IoStream, handle_connection};
 
-/// The control pipe name.
-const PIPE_NAME: &str = r"\\.\pipe\keymapperd";
+/// The control pipe name prefix. The daemon appends a per-run random nonce
+/// (see [`pipe_name`]), so the full name is unpredictable: a same-user
+/// process that starts before the daemon cannot squat it.
+const PIPE_PREFIX: &str = r"\\.\pipe\keymapperd-";
+
+/// The root every published pipe name must live under. The CLI validates
+/// the publish file against it, so a foreign file can never redirect the
+/// client to an arbitrary object.
+const PIPE_ROOT: &str = r"\\.\pipe\";
+
+/// Random bytes in the per-run pipe-name nonce (rendered as 32 hex
+/// characters).
+const NONCE_BYTES: usize = 16;
+
+/// The daemon's directory under `%LOCALAPPDATA%` (shared with the log
+/// directory).
+const APP_DIR_NAME: &str = "keymapperd";
+
+/// The file that publishes the daemon's live pipe name to the CLI.
+const PUBLISH_FILE_NAME: &str = "control.pipe";
 
 /// The pipe's input and output buffer sizes (bytes).
 const PIPE_BUFFER: u32 = 4096;
@@ -97,12 +128,17 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 /// The `ERROR_PIPE_BUSY` code: the daemon exists but is serving a client.
 const ERROR_PIPE_BUSY: i32 = 231;
 
-/// How long to keep waiting for the daemon's single pipe instance to be
-/// released: on the client side when opening the pipe, and on the daemon side
-/// when creating it after a previous daemon was killed mid-connection. The
-/// serve loop disconnects within microseconds of the previous client's close,
-/// so this only matters under load or for a misbehaving peer that never
-/// closes; 2 s is a comfortable upper bound.
+/// The `ERROR_ACCESS_DENIED` code: with `FILE_FLAG_FIRST_PIPE_INSTANCE`,
+/// another process already owns the first instance of the name.
+const ERROR_ACCESS_DENIED: i32 = 5;
+
+/// How long to keep retrying pipe opens and creations: on the client side
+/// when the daemon's single instance is serving another client
+/// (`ERROR_PIPE_BUSY`), and on the daemon side when a name is transiently
+/// unavailable (see the creation retry in [`start_with_name`]). With a
+/// per-run nonce the daemon's own name is effectively never contended, so
+/// the daemon-side retries are purely defensive; 2 s is a comfortable upper
+/// bound.
 const BUSY_RETRY_ATTEMPTS: u32 = 20;
 const BUSY_RETRY_WAIT_MS: u32 = 100;
 
@@ -475,26 +511,137 @@ fn to_wide(name: &str) -> Vec<u16> {
     name.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Create the pipe and spawn the serve thread.
-pub fn start() {
-    start_with_name(PIPE_NAME)
+/// The control pipe name: the fixed prefix plus a per-run random nonce.
+///
+/// `None` only when the system PRNG fails; the caller must then disable the
+/// endpoint rather than fall back to a predictable name.
+fn pipe_name() -> Option<String> {
+    let mut nonce = [0u8; NONCE_BYTES];
+    let ok = unsafe {
+        // SAFETY: `ProcessPrng` fills the caller's buffer in place; it
+        // needs no algorithm handle or initialisation.
+        ProcessPrng(&mut nonce)
+    };
+    if !ok.as_bool() {
+        return None;
+    }
+    let hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("{PIPE_PREFIX}{hex}"))
 }
 
-/// Create the pipe at *name* and spawn the serve thread.
-fn start_with_name(name: &str) {
+/// The file through which the daemon publishes its pipe name to the CLI:
+/// `%LOCALAPPDATA%\keymapperd\control.pipe`. Both sides resolve it the
+/// same way from the environment, so they always agree.
+fn publish_path() -> Option<PathBuf> {
+    Some(
+        dirs::data_local_dir()?
+            .join(APP_DIR_NAME)
+            .join(PUBLISH_FILE_NAME),
+    )
+}
+
+/// Publish *name* (the pipe the daemon is serving) at *path*.
+///
+/// The file is hardened with the same owner-only DACL as the pipe *before*
+/// any content is written, and removed again when the hardening fails: a
+/// file that cannot be locked down to the owner must not leak the name
+/// (fail closed). Publication runs only after the pipe is live with its
+/// DACL applied, so a readable publish file always names a genuine
+/// endpoint.
+fn publish_name(path: &Path, name: &str) -> Result<(), String> {
+    let Some(sid) = current_user_sid() else {
+        return Err("could not resolve the current user's SID".to_string());
+    };
+    let Some(desc) = owner_only_descriptor(&sid) else {
+        return Err(
+            "could not build an owner-only security descriptor".to_string()
+        );
+    };
+    if let Some(parent) = path.parent() {
+        fs_err::create_dir_all(parent)
+            .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    }
+    let mut file = fs_err::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    // Harden before writing: the file only ever holds the name while it
+    // is owner-only.
+    let dacl_error = set_dacl(HANDLE(file.as_raw_handle()), &desc.sd);
+    drop(desc);
+    if dacl_error != 0 {
+        drop(file);
+        let _ = fs_err::remove_file(path);
+        return Err(format!(
+            "cannot apply the owner-only DACL to {} (error \
+             {dacl_error:#010x})",
+            path.display()
+        ));
+    }
+    file.write_all(name.as_bytes())
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Read the pipe name published at *path*.
+///
+/// `None` when the file is missing, unreadable, or does not name a pipe: a
+/// stale or foreign file must never redirect the CLI to an arbitrary
+/// object, and a missing name surfaces (via [`connect`]) as "no daemon".
+fn resolve_published_name(path: &Path) -> Option<String> {
+    let name = fs_err::read_to_string(path).ok()?;
+    let name = name.trim();
+    (!name.is_empty() && name.starts_with(PIPE_ROOT)).then(|| name.to_string())
+}
+
+/// Create the pipe and spawn the serve thread.
+///
+/// The pipe name carries a per-run random nonce (see [`pipe_name`]); once
+/// the endpoint is live, its exact name is published to [`publish_path`]
+/// so the CLI can discover it.
+pub fn start() {
+    let Some(name) = pipe_name() else {
+        warn!(
+            "Could not generate a control pipe nonce; runtime log-level \
+             control is disabled"
+        );
+        return;
+    };
+    if !start_with_name(&name) {
+        return;
+    }
+    let published = match publish_path() {
+        Some(path) => publish_name(&path, &name),
+        None => Err(format!(
+            "no local data directory (LOCALAPPDATA) for {}",
+            PUBLISH_FILE_NAME
+        )),
+    };
+    if let Err(e) = published {
+        warn!(
+            "The control endpoint is live but its name could not be \
+             published: {e}; the CLI will not find the running daemon"
+        );
+    }
+}
+
+/// Create the pipe at *name*, apply the owner-only DACL, and spawn the
+/// serve thread. Returns whether the control endpoint is live.
+fn start_with_name(name: &str) -> bool {
     let Some(sid) = current_user_sid() else {
         warn!(
             "Could not resolve the current user's SID; runtime log-level \
              control is disabled"
         );
-        return;
+        return false;
     };
     let Some(desc) = owner_only_descriptor(&sid) else {
         warn!(
             "Could not build an owner-only pipe security descriptor; runtime \
              log-level control is disabled"
         );
-        return;
+        return false;
     };
     // The ACE copied the SID bytes into the ACL, so the owned buffer only
     // needs to drop when this function returns (never `FreeSid`; see
@@ -505,10 +652,6 @@ fn start_with_name(name: &str) {
     // The pipe is created without a security descriptor; the owner-only DACL
     // is applied right afterwards. Passing the descriptor to
     // `CreateNamedPipeW` directly is rejected on recent Windows builds.
-    // With a single pipe instance, a daemon killed mid-connection (e.g. by
-    // the e2e harness's `TerminateProcess`) can leave the name briefly busy,
-    // so the creation is retried with `WaitNamedPipeW`, mirroring the
-    // client-side busy handling in `connect_to`.
     let (pipe, code) = {
         let mut attempts = 0;
         loop {
@@ -534,8 +677,15 @@ fn start_with_name(name: &str) {
                 )
             };
             let code = unsafe { GetLastError() };
+            // Retry while the name is transiently unavailable: an earlier
+            // instance is still connected (`ERROR_PIPE_BUSY`) or another
+            // process holds the first instance (`ERROR_ACCESS_DENIED`).
+            // With a per-run nonce both are practically impossible for the
+            // daemon's own name, so the retry is purely defensive; the
+            // bound keeps a persistent squatter from stalling startup.
             if !pipe.is_invalid()
-                || code.0 != ERROR_PIPE_BUSY as u32
+                || (code.0 != ERROR_PIPE_BUSY as u32
+                    && code.0 != ERROR_ACCESS_DENIED as u32)
                 || attempts + 1 >= BUSY_RETRY_ATTEMPTS
             {
                 break (pipe, code);
@@ -556,7 +706,7 @@ fn start_with_name(name: &str) {
              runtime log-level control is disabled",
             code.0
         );
-        return;
+        return false;
     }
 
     // Apply the owner-only DACL. Fail closed: a pipe that cannot be locked
@@ -572,7 +722,7 @@ fn start_with_name(name: &str) {
              (error {dacl_error:#010x}); runtime log-level control is \
              disabled"
         );
-        return;
+        return false;
     }
     info!("Control socket listening on {name}");
 
@@ -582,7 +732,9 @@ fn start_with_name(name: &str) {
         .spawn(move || serve(handle))
     {
         warn!("Failed to spawn the control-socket thread: {e}");
+        return false;
     }
+    true
 }
 
 /// Serve connections on a single pipe instance: connect, handle one command,
@@ -688,8 +840,25 @@ fn wait_for_client_close(conn: &mut Pipe) {
 }
 
 /// Open the control pipe as a client.
+///
+/// The daemon's pipe name contains a per-run nonce, so the CLI does not
+/// guess a fixed name; it resolves the name from the daemon's publish file
+/// (see [`resolve_published_name`]). A missing or unparsable file is
+/// reported as [`std::io::ErrorKind::NotFound`], which [`connect_error`]
+/// renders like a missing daemon.
 pub(super) fn connect() -> std::io::Result<Box<dyn IoStream>> {
-    connect_to(PIPE_NAME)
+    let path = publish_path().ok_or_else(no_endpoint_error)?;
+    let name = resolve_published_name(&path).ok_or_else(no_endpoint_error)?;
+    connect_to(&name)
+}
+
+/// The error for "no published control endpoint": no local data directory
+/// to look in, or no readable publish file in it.
+fn no_endpoint_error() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        "the running daemon published no control endpoint",
+    )
 }
 
 /// Open the pipe at *name* as a client.
@@ -749,11 +918,17 @@ fn open_pipe(name: &[u16]) -> std::io::Result<HANDLE> {
 /// Convert a failed client connection into a friendly message for the CLI.
 pub(super) fn connect_error(e: &std::io::Error) -> String {
     match e.raw_os_error() {
-        Some(ERROR_FILE_NOT_FOUND) => "no daemon is running (or its control \
-                                       pipe does not exist)"
+        Some(ERROR_FILE_NOT_FOUND) => "no daemon is running (or it published \
+                                       no control endpoint)"
             .to_string(),
         Some(ERROR_PIPE_BUSY) => {
             "the daemon control pipe is busy; try again".to_string()
+        }
+        // Covers `no_endpoint_error` (no publish file) and any other
+        // "not found" that means no reachable daemon.
+        _ if e.kind() == std::io::ErrorKind::NotFound => {
+            "no daemon is running (it published no control endpoint)"
+                .to_string()
         }
         _ => e.to_string(),
     }
@@ -832,7 +1007,7 @@ mod tests {
     fn start_with_name_serves_the_owner() {
         let name =
             format!("\\\\.\\pipe\\keymapperd_prod_{}", std::process::id());
-        start_with_name(&name);
+        assert!(start_with_name(&name));
         let mut conn = connect_to(&name).expect("the owner could not connect");
         write_frame(&mut conn, "SET-LOG-LEVEL info")
             .expect("the write failed");
@@ -907,5 +1082,95 @@ mod tests {
             .expect("the second write failed");
         let reply = read_frame(&mut second).expect("the second read failed");
         assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+    }
+
+    /// Pipe names are unpredictable: the fixed prefix plus a fresh 32-
+    /// character hex nonce on every draw. This is what removes the
+    /// predictable-name logon race.
+    #[test]
+    fn pipe_names_are_unique_and_prefixed() {
+        let a = pipe_name().expect("the system PRNG failed");
+        let b = pipe_name().expect("the system PRNG failed");
+        assert!(a.starts_with(PIPE_PREFIX));
+        assert!(b.starts_with(PIPE_PREFIX));
+        assert_ne!(a, b, "consecutive nonces must differ");
+        let nonce = a.strip_prefix(PIPE_PREFIX).unwrap();
+        assert_eq!(nonce.len(), 2 * NONCE_BYTES);
+        assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// The discovery channel end to end (with a temp publish file instead
+    /// of the real `%LOCALAPPDATA%` one): publish the live pipe's name,
+    /// resolve it back, and round-trip a command through the resolved
+    /// name.
+    ///
+    /// The serve thread is intentionally left running; it dies with the
+    /// test process.
+    #[test]
+    fn published_endpoint_round_trips_through_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PUBLISH_FILE_NAME);
+        let name =
+            format!("\\\\.\\pipe\\keymapperd_disc_{}", std::process::id());
+        assert!(start_with_name(&name));
+        publish_name(&path, &name).expect("publishing failed");
+        let resolved =
+            resolve_published_name(&path).expect("discovery failed");
+        assert_eq!(resolved, name);
+        let mut conn =
+            connect_to(&resolved).expect("the owner could not connect");
+        write_frame(&mut conn, "SET-LOG-LEVEL info")
+            .expect("the write failed");
+        let reply = read_frame(&mut conn).expect("the read failed");
+        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+    }
+
+    /// A missing, empty, or foreign publish file must never yield a name:
+    /// the CLI then reports "no daemon" instead of connecting to an
+    /// arbitrary object.
+    #[test]
+    fn resolve_rejects_missing_or_foreign_publish_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PUBLISH_FILE_NAME);
+        assert_eq!(resolve_published_name(&path), None);
+        fs_err::write(&path, "not a pipe name\n").unwrap();
+        assert_eq!(resolve_published_name(&path), None);
+        fs_err::write(&path, "   \n").unwrap();
+        assert_eq!(resolve_published_name(&path), None);
+    }
+
+    /// A stale publish file from a previous daemon run names a pipe that
+    /// nothing serves any more: the connect fails and the CLI message
+    /// stays "no daemon is running".
+    #[test]
+    fn stale_publish_file_reports_no_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PUBLISH_FILE_NAME);
+        let stale =
+            format!("{}keymapperd-{}", PIPE_ROOT, "0".repeat(2 * NONCE_BYTES));
+        fs_err::write(&path, &stale).unwrap();
+        let name =
+            resolve_published_name(&path).expect("the name must resolve");
+        let err = match connect_to(&name) {
+            Ok(_) => panic!("a dead name must not connect"),
+            Err(e) => e,
+        };
+        let msg = connect_error(&err);
+        assert!(
+            msg.contains("no daemon is running"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    #[test]
+    fn connect_error_classifies() {
+        let e = std::io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND);
+        assert!(connect_error(&e).contains("no daemon is running"));
+        let e = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY);
+        assert!(connect_error(&e).contains("busy"));
+        assert!(
+            connect_error(&no_endpoint_error())
+                .contains("no daemon is running")
+        );
     }
 }
