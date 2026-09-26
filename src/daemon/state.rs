@@ -103,8 +103,17 @@ pub struct RuntimeState {
     /// device IDs to [`KeyboardInfo`] for keyboard filtering.
     keyboard_registry: HashMap<String, KeyboardInfo>,
     /// Short-TTL cache for the expensive active-app platform query, which is
-    /// performed on every key event.
+    /// performed on every key event.  The lock is only ever held for the
+    /// duration of a (cheap) field read or write, never across the platform
+    /// query itself.
     active_app_cache: Mutex<CachedActiveApp>,
+    /// Single-flight guard for the active-app refresh.  The thread that finds
+    /// the cache expired holds this lock for the duration of the (blocking)
+    /// platform query; concurrent callers serve the stale cache entry instead
+    /// of queueing up behind a stalled IPC peer.  Without it, a slow
+    /// compositor would block every engine thread on `active_app_cache` and
+    /// freeze keyboard input system-wide.
+    active_app_refresh: Mutex<()>,
     /// Injectable source for the active application name.  The daemon binary
     /// wires this to the platform query; tests can supply a fixed value.
     /// Kept as a closure so the state struct never references platform code
@@ -118,6 +127,7 @@ impl std::fmt::Debug for RuntimeState {
             .field("lookup_cache", &self.lookup_cache)
             .field("keyboard_registry", &self.keyboard_registry)
             .field("active_app_cache", &self.active_app_cache)
+            .field("active_app_refresh", &self.active_app_refresh)
             .field("active_app_source", &"<fn>")
             .finish()
     }
@@ -142,6 +152,7 @@ impl RuntimeState {
                 name: Arc::from("unknown"),
                 queried_at: Instant::now(),
             }),
+            active_app_refresh: Mutex::new(()),
             active_app_source,
         }
     }
@@ -201,13 +212,31 @@ impl RuntimeState {
 
     /// Name of the currently foreground application, served from a short-TTL
     /// cache so per-event lookups stay cheap.
+    ///
+    /// The refresh is single-flight and the blocking platform query (X11
+    /// round-trip, D-Bus call, compositor socket) runs _outside_ the cache
+    /// lock: the first caller to find the entry expired claims the refresh
+    /// slot and updates the cache when the query returns, while any other
+    /// caller immediately receives the last known value.  A stalled IPC peer
+    /// can therefore at worst cause brief staleness, never a lock-up of the
+    /// keystroke hot path.  If the query panics, the guard's `Drop` releases
+    /// the refresh slot, so the cache cannot be wedged permanently.
     fn active_app(&self) -> Arc<str> {
-        let mut cache = self.active_app_cache.lock();
-        if cache.queried_at.elapsed() >= ACTIVE_APP_TTL {
-            cache.name = (self.active_app_source)().into();
-            cache.queried_at = Instant::now();
+        {
+            let cache = self.active_app_cache.lock();
+            if cache.queried_at.elapsed() < ACTIVE_APP_TTL {
+                return Arc::clone(&cache.name);
+            }
         }
-        Arc::clone(&cache.name)
+        // The entry is stale.  Serve it while a single thread refreshes.
+        let Some(_refresh_slot) = self.active_app_refresh.try_lock() else {
+            return Arc::clone(&self.active_app_cache.lock().name);
+        };
+        let name: Arc<str> = (self.active_app_source)().into();
+        let mut cache = self.active_app_cache.lock();
+        cache.name = Arc::clone(&name);
+        cache.queried_at = Instant::now();
+        name
     }
 }
 
@@ -304,6 +333,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    };
+
     use super::*;
     use crate::{
         common::{config::AppConfig, hid_usage::HidUsage},
@@ -958,5 +992,181 @@ groups:
         assert_eq!(results[2], None);
         // CapsLock up is mapped to Ctrl up.
         assert!(results[3].is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Active-app cache
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn active_app_serves_fresh_entries_without_querying() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let src_calls = Arc::clone(&calls);
+        let state = RuntimeState::new(
+            RuntimeLookupCache::compile_from_config(&AppConfig::default()),
+            Vec::new(),
+            Box::new(move || {
+                src_calls.fetch_add(1, Ordering::SeqCst);
+                "queried_app".to_string()
+            }),
+        );
+
+        // The entry seeded by `new` is fresh, so no query runs.
+        assert_eq!(&*state.active_app(), "unknown");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn active_app_refresh_publishes_and_is_cached() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let src_calls = Arc::clone(&calls);
+        let state = RuntimeState::new(
+            RuntimeLookupCache::compile_from_config(&AppConfig::default()),
+            Vec::new(),
+            Box::new(move || {
+                let n = src_calls.fetch_add(1, Ordering::SeqCst);
+                format!("app{n}")
+            }),
+        );
+        expire_active_app_cache(&state);
+
+        assert_eq!(&*state.active_app(), "app0");
+        // Serving the refreshed entry within the TTL must not re-query.
+        assert_eq!(&*state.active_app(), "app0");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A stalled platform query must not block concurrent callers: exactly
+    /// one thread runs the refresh (outside the cache lock) while the others
+    /// immediately serve the stale entry.
+    #[test]
+    fn active_app_stalled_refresh_does_not_block_callers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let src_calls = Arc::clone(&calls);
+        // Signals set by the source when a query starts and by the test when
+        // the stalled query may finish.  `release_main` releases the one
+        // blocking refresh; `release_others` lets any *unexpected* second
+        // query return promptly instead of hanging the test forever.
+        let query_started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let src_started = Arc::clone(&query_started);
+        let src_release = Arc::clone(&release);
+
+        let state = RuntimeState::new(
+            RuntimeLookupCache::compile_from_config(&AppConfig::default()),
+            Vec::new(),
+            Box::new(move || {
+                src_calls.fetch_add(1, Ordering::SeqCst);
+                src_started.store(true, Ordering::SeqCst);
+                // Simulate a compositor or IPC peer that stops responding.
+                while !src_release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                "fresh_app".to_string()
+            }),
+        );
+        expire_active_app_cache(&state);
+
+        std::thread::scope(|s| {
+            let refresher = s.spawn(|| state.active_app());
+
+            // Wait until the refresh is genuinely in flight, i.e. the source
+            // has been entered (which happens while the refresh slot, but
+            // not the cache lock, is held).
+            while !query_started.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+
+            // Concurrent callers must serve the stale value immediately
+            // rather than queueing behind the stalled query.
+            let start = Instant::now();
+            let served = state.active_app();
+            let elapsed = start.elapsed();
+            assert_eq!(&*served, "unknown");
+            assert!(
+                elapsed < ACTIVE_APP_TTL,
+                "caller blocked behind the stalled refresh ({elapsed:?})",
+            );
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "refresh is not single-flight",
+            );
+
+            // Let the stalled query finish, then verify its result got
+            // published.
+            release.store(true, Ordering::SeqCst);
+            assert_eq!(&*refresher.join().unwrap(), "fresh_app");
+        });
+        assert_eq!(&*state.active_app(), "fresh_app");
+    }
+
+    /// Hammer the cache from many threads while the platform query is slow:
+    /// concurrent lookups must never deadlock and never run more than one
+    /// query at a time.  The in-flight assertion lives inside the source so
+    /// it holds regardless of how the threads interleave.
+    #[test]
+    fn active_app_concurrent_stale_reads_do_not_deadlock() {
+        const N_READERS: usize = 8;
+        const N_READS: usize = 500;
+
+        let queries = Arc::new(AtomicUsize::new(0));
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel::<()>();
+        let started_tx = Arc::new(started_tx);
+
+        let src_queries = Arc::clone(&queries);
+        let src_in_flight = Arc::clone(&in_flight);
+        let src_started_tx = Arc::clone(&started_tx);
+        let state = Arc::new(RuntimeState::new(
+            RuntimeLookupCache::compile_from_config(&AppConfig::default()),
+            Vec::new(),
+            Box::new(move || {
+                src_queries.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    src_in_flight.fetch_add(1, Ordering::SeqCst),
+                    0,
+                    "two active-app queries ran concurrently",
+                );
+                // Unbounded channel: `send` never blocks.
+                let _ = src_started_tx.send(());
+                // Simulate a slow compositor round-trip.
+                std::thread::sleep(Duration::from_millis(20));
+                src_in_flight.fetch_sub(1, Ordering::SeqCst);
+                "slow_app".to_string()
+            }),
+        ));
+        expire_active_app_cache(&state);
+
+        let readers: Vec<_> = (0..N_READERS)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                std::thread::spawn(move || {
+                    for _ in 0..N_READS {
+                        let name = state.active_app();
+                        assert!(!name.is_empty());
+                    }
+                })
+            })
+            .collect();
+
+        // At least one refresh was in flight while the readers hammered; the
+        // readers finishing without deadlock is verified by the joins.
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("no refresh ever started");
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        assert!(queries.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// Force the active-app cache entry stale without waiting for the real
+    /// TTL to elapse.
+    fn expire_active_app_cache(state: &RuntimeState) {
+        // `Instant::now() - ACTIVE_APP_TTL` cannot underflow in practice
+        // (the monotonic clock starts at boot).
+        state.active_app_cache.lock().queried_at =
+            Instant::now() - ACTIVE_APP_TTL * 2;
     }
 }
