@@ -18,7 +18,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use super::{InjectorError, KeyInjector};
-use crate::{HidUsage, platform::Key};
+use keymapper::{HidUsage, platform::Key};
 
 /// Whether the platform injector can inject the given usage.
 ///

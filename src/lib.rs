@@ -11,7 +11,6 @@ pub mod cli;
 pub mod common;
 pub mod daemon;
 pub mod platform;
-pub mod test_util;
 
 // Re-export the HID-centric key identity so downstream code (and tests)
 // can refer to it via the crate root.

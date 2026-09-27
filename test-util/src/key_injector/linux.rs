@@ -26,9 +26,9 @@ use std::{
 use evdev::{
     AttributeSet, InputEvent, KeyCode, MiscCode, uinput::VirtualDevice,
 };
+use keymapper::{HidUsage, platform::hid_translate::hid_usage_to_keycode};
 
 use super::{InjectorError, KeyInjector};
-use crate::{HidUsage, platform::hid_translate::hid_usage_to_keycode};
 
 /// Unique device name prefix for injector input keyboards.
 pub const INPUT_DEVICE_NAME_PREFIX: &str = "virtual-keyboard";

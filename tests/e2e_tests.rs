@@ -75,13 +75,13 @@ use keymapper::{
     cli::daemon_cmd,
     common::{config::AppConfig, hid_usage::HidUsage},
     daemon::engine::fmt_key_event,
-    test_util::key_injector::{InjectorError, KeyInjector, is_injectable},
 };
 #[cfg(target_os = "linux")]
 use log_capture::JournalLogSource;
 use log_capture::{
     FileLogSource, LogSource, Mark, reset_to_default, set_debug,
 };
+use test_util::key_injector::{InjectorError, KeyInjector, is_injectable};
 
 // ---------------------------------------------------------------------------
 // Mode selection — ci (spawn a daemon) vs. local (drive the user's daemon)
@@ -873,19 +873,19 @@ fn create_injector()
 -> Result<Option<Box<dyn KeyInjector + Send>>, InjectorError> {
     #[cfg(target_os = "macos")]
     {
-        use keymapper::test_util::key_injector::MacOSInjector;
+        use test_util::key_injector::MacOSInjector;
         let injector = MacOSInjector::new()?;
         Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>))
     }
     #[cfg(target_os = "linux")]
     {
-        use keymapper::test_util::key_injector::LinuxInjector;
+        use test_util::key_injector::LinuxInjector;
         let injector = LinuxInjector::new()?;
         Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>))
     }
     #[cfg(target_os = "windows")]
     {
-        use keymapper::test_util::key_injector::WindowsInjector;
+        use test_util::key_injector::WindowsInjector;
         let injector = WindowsInjector::new()?;
         Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>))
     }

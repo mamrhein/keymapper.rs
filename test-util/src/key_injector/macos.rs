@@ -23,12 +23,13 @@ use std::{
     time::Duration,
 };
 
-use super::{InjectorError, KeyInjector};
-use crate::{
+use keymapper::{
     HidUsage,
     common::hid_usage::PAGE_KEYBOARD,
     platform::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient},
 };
+
+use super::{InjectorError, KeyInjector};
 
 /// How long `setup()` waits for the injection keyboard to become ready.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);

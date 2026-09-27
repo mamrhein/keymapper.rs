@@ -11,6 +11,9 @@ license-file = "LICENSE.TXT"
 keywords = ["Cross-platform", "Linux", "Windows", "keymapper", "macOS"]
 categories = ["command-line-utilities"]
 
+[workspace]
+members = ["test-util"]
+
 [[bin]]
 name = "keymapper"
 path = "src/keymapper.rs"
@@ -40,6 +43,7 @@ time = { version = "0.3", features = ["formatting"] }  # timestamp format for th
 
 [dev-dependencies]
 tempfile = "3"  # unique, auto-removed temp files for tests
+test-util = { path = "test-util" }  # e2e key injector harness helper (dev-only)
 
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]

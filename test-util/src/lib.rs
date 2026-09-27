@@ -7,7 +7,10 @@
 // $Source$
 // $Revision$
 
-//! Test helpers for the e2e test harness: the key event injector, which
-//! feeds a virtual keyboard into the daemon's capture path.
+//! Test helpers for keymapper's e2e test harness: the key event injector,
+//! which feeds a virtual keyboard into the daemon's capture path.
+//!
+//! This is a dev-only helper crate (a `dev-dependency` of `keymapper`); it
+//! is never linked into a release binary.
 
 pub mod key_injector;

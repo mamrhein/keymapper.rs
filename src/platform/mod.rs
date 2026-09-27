@@ -8,8 +8,9 @@
 // $Revision$
 
 //! Platform backend: the single public boundary between the platform
-//! layer and the code above it (the daemon, `test_util`, `cli`, and — for
-//! [`config_dir`] and, on macOS, `console_user_home` — `common`).
+//! layer and the code above it (the daemon, `cli`, the `test-util`
+//! dev-dependency crate, and — for [`config_dir`] and, on macOS,
+//! `console_user_home` — `common`).
 //!
 //! The stable public surface that the code above may depend on is, per
 //! platform:
@@ -26,7 +27,8 @@
 //!   `common::config_path` when running as root)
 //! - windows: additionally `Key`
 //!
-//! Layering rule: `test_util` and `cli` may depend only on this
+//! Layering rule: the `test-util` dev-dependency crate and `cli` may
+//! depend only on this
 //! surface, never on the `pub(crate)` internals of the platform
 //! module. Anything not re-exported here is private implementation
 //! detail and may change without notice.

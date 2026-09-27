@@ -16,7 +16,7 @@
 
 use std::fmt;
 
-use crate::HidUsage;
+use keymapper::HidUsage;
 
 /// Errors that can occur during injector setup or operation.
 #[allow(dead_code)]

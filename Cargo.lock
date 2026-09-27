@@ -792,6 +792,7 @@ dependencies = [
  "signal-hook",
  "sysinfo",
  "tempfile",
+ "test-util",
  "thiserror",
  "time",
  "udev",
@@ -1543,6 +1544,16 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "test-util"
+version = "0.1.0"
+dependencies = [
+ "evdev",
+ "keymapper",
+ "libc",
+ "windows",
 ]
 
 [[package]]
