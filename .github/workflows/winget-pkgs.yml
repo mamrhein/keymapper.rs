@@ -158,6 +158,11 @@ jobs:
         shell: bash
         run: |
           BRANCH="keymapper-${VERSION}"
+          # The runner has no git identity configured, which makes git commit
+          # abort with "Author identity unknown"; set the actions-bot user so
+          # the commit below has a valid author and the PR opens.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git add "manifests/a/adrhinum/keymapper/${VERSION}"
           git diff --cached --quiet || git commit -m "chore: add keymapper ${VERSION}"
