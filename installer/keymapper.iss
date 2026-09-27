@@ -81,7 +81,9 @@ begin
     Result := True;
     exit;
   end;
-  // Look for the path with leading/trailing semicolons to prevent partial matching
+  // Normalize trailing separator so that both "C:\dir" and "C:\dir\" in
+  // either Param or the stored PATH are recognized as the same entry.
+  Param := ExcludeTrailingBackslash(Param);
   Result := (Pos(';' + UpperCase(Param) + ';', ';' + UpperCase(OrigPath) + ';') = 0) and
             (Pos(';' + UpperCase(Param) + '\;', ';' + UpperCase(OrigPath) + ';') = 0);
 end;
@@ -109,18 +111,28 @@ procedure EnvRemovePath(PathToRemove: string);
 var
   OrigPath: string;
   P: Integer;
+  DelLen: Integer;
 begin
   if RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', OrigPath) then
   begin
-    // Modify search string to include semicolons for exact matching
+    // Normalize trailing separator so both "C:\dir" and "C:\dir\" match.
+    PathToRemove := ExcludeTrailingBackslash(PathToRemove);
+    // Try exact match first, then trailing-backslash variant in the stored PATH
     P := Pos(';' + UpperCase(PathToRemove) + ';', ';' + UpperCase(OrigPath) + ';');
+    DelLen := Length(PathToRemove) + 1;
+    if P = 0 then
+    begin
+      P := Pos(';' + UpperCase(PathToRemove) + '\;', ';' + UpperCase(OrigPath) + ';');
+      if P > 0 then
+        DelLen := Length(PathToRemove) + 2;
+    end;
     if P > 0 then
     begin
-      // Delete the specific path substring including one semicolon
-      Delete(OrigPath, P, Length(PathToRemove) + 1);
+      // Delete the path substring and one adjacent semicolon
+      Delete(OrigPath, P, DelLen);
 
-      // Clean up accidental leading or trailing semicolons if necessary
-      if (OrigPath <> '') and (OrigPath = ';') then
+      // Clean up leading or trailing semicolons left behind by the deletion
+      if (OrigPath <> '') and (OrigPath[1] = ';') then
         Delete(OrigPath, 1, 1);
       if (OrigPath <> '') and (OrigPath[Length(OrigPath)] = ';') then
         Delete(OrigPath, Length(OrigPath), 1);
