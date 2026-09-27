@@ -17,6 +17,11 @@ name: winget-pkgs
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to subscribe (e.g. 0.3.2, without the leading v)."
+        required: true
+        type: string
 
   workflow_run:
     workflows: ["release"]
@@ -73,12 +78,13 @@ jobs:
         shell: bash
         run: |
           # Extract the tag name from the triggering workflow run; a manual
-          # dispatch has no triggering run, so fall back to the ref tag.
+          # dispatch has no triggering run, so take the version from the
+          # workflow_dispatch input instead.
           if [[ -n "${{ github.event.workflow_run.id }}" ]]; then
             TAG=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
               --jq '.head_branch')
           else
-            TAG="${GITHUB_REF_NAME}"
+            TAG="v${{ github.event.inputs.version }}"
           fi
           if [[ "$TAG" != v* ]]; then
             echo "Not a version tag ($TAG), skipping." >&2
