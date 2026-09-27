@@ -37,7 +37,10 @@ jobs:
   # Add the winget manifest when the release workflow succeeds
   # -----------------------------------------------------------------------
   update-manifest:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Skip only when the release workflow failed; a manual dispatch has no
+    # workflow_run context, so evaluating its conclusion here would always
+    # skip the job.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     # `winget validate` is only available on Windows.
     runs-on: windows-latest
 
