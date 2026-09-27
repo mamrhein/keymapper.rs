@@ -12,13 +12,13 @@
 //! Injected events are posted to the current desktop session and are
 //! visible to both the daemon's hook and external observers.
 
+use keymapper::{HidUsage, platform::Key};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, MapVirtualKeyW, SendInput,
-    VIRTUAL_KEY, MAPVK_VK_TO_VSC,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, MAPVK_VK_TO_VSC,
+    MapVirtualKeyW, SendInput, VIRTUAL_KEY,
 };
 
 use super::{InjectorError, KeyInjector};
-use keymapper::{HidUsage, platform::Key};
 
 /// Whether the platform injector can inject the given usage.
 ///

@@ -34,8 +34,8 @@
 //! 1. **Hook thread** — Installs the \`WH_KEYBOARD_LL\` hook and runs a
 //!    blocking \`GetMessageW\` loop.  The loop dispatches the raw input
 //!    window's \`WM_INPUT\` (the window is owned by this thread) and drains
-//!    the emission queue on a \`WM_APP\` wake (fed only by standalone
-//!    consumer events).  Decides and emits in-callback.
+//!    the emission queue on a \`WM_APP\` wake (fed only by standalone consumer
+//!    events).  Decides and emits in-callback.
 //! 2. **Raw worker thread** — Consumes the raw input channel, maintains the
 //!    device-identification buffer, and processes standalone Consumer Control
 //!    events, which never reach the hook.
@@ -71,8 +71,8 @@ use windows::Win32::{
         },
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetForegroundWindow,
-            GetMessageW, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT, MSG,
-            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+            GetMessageW, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT,
+            MSG, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
             WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
         },
     },
@@ -358,9 +358,8 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
             },
         },
     };
-    let sent = unsafe {
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32)
-    };
+    let sent =
+        unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
     if sent != 1 {
         error!(
             "SendInput failed for vk={:#04X} ({}) (returned {sent})",
@@ -615,15 +614,9 @@ extern "system" fn low_level_keyboard_proc(
     // input.
     if !matches!(decision, Decision::Pass) && foreground_is_elevated() {
         if is_key_down {
-            debug!(
-                "elevated fg: passing vk={} {action} unmapped",
-                vk_code.0
-            );
+            debug!("elevated fg: passing vk={} {action} unmapped", vk_code.0);
         } else {
-            trace!(
-                "elevated fg: passing vk={} {action} unmapped",
-                vk_code.0
-            );
+            trace!("elevated fg: passing vk={} {action} unmapped", vk_code.0);
         }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
