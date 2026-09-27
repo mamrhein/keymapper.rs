@@ -69,9 +69,14 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # Extract the tag name from the triggering workflow run
-          TAG=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
-            --jq '.head_branch')
+          # Extract the tag name from the triggering workflow run; a manual
+          # dispatch has no triggering run, so fall back to the ref tag.
+          if [[ -n "${{ github.event.workflow_run.id }}" ]]; then
+            TAG=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
+              --jq '.head_branch')
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
           if [[ "$TAG" != v* ]]; then
             echo "Not a version tag ($TAG), skipping." >&2
             exit 1
@@ -122,7 +127,10 @@ jobs:
 
           foreach ($name in @("adrhinum.keymapper.yaml", "adrhinum.keymapper.installer.yaml", "adrhinum.keymapper.locale.en-US.yaml")) {
             $path = Join-Path $manifestDir $name
-            $content = Get-ContentAtRef "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION"
+            # ${name} must be brace-delimited: PowerShell treats '?' as a
+            # valid variable-name character, so "$name?ref" would expand the
+            # (empty) variable 'name?ref' and corrupt the URL.
+            $content = Get-ContentAtRef "repos/${{ github.repository }}/contents/winget/${name}?ref=v$env:VERSION"
             [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content)) |
               Set-Content -Path $path -Encoding utf8 -NoNewline
             (Get-Content $path -Raw) `
