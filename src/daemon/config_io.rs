@@ -36,7 +36,7 @@ pub const MAX_CONFIG_SIZE: u64 = 1024 * 1024;
 /// Error returned when the config file cannot be read safely.
 #[derive(Debug, Error)]
 pub enum ConfigReadError {
-    /// The config file does not exist or could not be opened.
+    /// The config file does not exist.
     #[error("config file not found")]
     NotFound,
 
@@ -74,7 +74,9 @@ pub enum ConfigReadError {
     #[error("untrusted parent directory '{path}' ({reason})")]
     UntrustedParentDir { path: String, reason: &'static str },
 
-    /// The config content could not be read.
+    /// The config file could not be opened or read for a reason other
+    /// than absence (e.g. a permission or symlink-chain failure).  The
+    /// distinct I/O error kind is preserved for diagnostics.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -101,8 +103,15 @@ pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
     // Security check: verify the config file itself is not a symlink.
     // This is an extra guard beyond O_NOFOLLOW below, closing the window
     // in which a symlink could be planted between inspection and open.
-    let sym_meta = std::fs::symlink_metadata(path)
-        .map_err(|_| ConfigReadError::NotFound)?;
+    // Only ENOENT means "not found"; other failures (e.g. EACCES from an
+    // unsearchable parent directory) keep their distinct error kind.
+    let sym_meta = std::fs::symlink_metadata(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ConfigReadError::NotFound
+        } else {
+            ConfigReadError::Io(err)
+        }
+    })?;
     if sym_meta.file_type().is_symlink() {
         return Err(ConfigReadError::Symlink);
     }
@@ -171,12 +180,28 @@ pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
             .read(true)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
-            .map_err(|_| ConfigReadError::NotFound)?
+            .map_err(|err| {
+                // `O_NOFOLLOW` rejects a symlink in the final position
+                // with ELOOP: that is the symlink refusal, most likely a
+                // link planted after the symlink-metadata check above.
+                if err.raw_os_error() == Some(libc::ELOOP) {
+                    ConfigReadError::Symlink
+                } else if err.kind() == std::io::ErrorKind::NotFound {
+                    ConfigReadError::NotFound
+                } else {
+                    ConfigReadError::Io(err)
+                }
+            })?
     };
 
     #[cfg(not(unix))]
-    let mut file =
-        std::fs::File::open(path).map_err(|_| ConfigReadError::NotFound)?;
+    let mut file = std::fs::File::open(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ConfigReadError::NotFound
+        } else {
+            ConfigReadError::Io(err)
+        }
+    })?;
 
     let metadata = file.metadata().map_err(|_| ConfigReadError::Metadata)?;
 
@@ -401,5 +426,37 @@ mod tests {
         std::fs::remove_dir_all(&real).ok();
 
         assert_eq!(content, "groups: []");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untraversable_parent_dir_keeps_the_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // The superuser ignores directory execute permissions, so the
+        // setup below cannot produce EACCES when running as root.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let Some(dir) = private_temp_subdir("nox_parent") else {
+            return;
+        };
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "groups: []").expect("failed to write config");
+        // Revoking every permission bit on the parent makes every path
+        // operation under it fail with EACCES (denied traversal) rather
+        // than ENOENT; that distinction must survive into the error.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000))
+            .expect("failed to chmod dir");
+
+        let err = read_config_content(&path).unwrap_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("failed to restore the dir mode");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            matches!(err, ConfigReadError::Io(_)),
+            "expected a preserved I/O error, got {err:?}",
+        );
     }
 }

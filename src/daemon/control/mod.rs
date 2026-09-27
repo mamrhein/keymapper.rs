@@ -172,7 +172,9 @@ pub(crate) fn handle_connection<R: Read + Write>(
 ///
 /// `SET-LOG-LEVEL` is implemented; the reserved verbs are recognised so a
 /// future daemon stops reporting them as unknown but has no action yet;
-/// anything else is an unknown command.
+/// anything else is an unknown command. Trailing arguments are never
+/// silently ignored: a command with unexpected arguments is answered with
+/// an error so CLI misuse stays visible.
 pub(crate) fn dispatch(command: &str) -> Response {
     let mut parts = command.split_whitespace();
     let Some(verb) = parts.next() else {
@@ -192,6 +194,14 @@ pub(crate) fn dispatch(command: &str) -> Response {
                         );
                     }
                 };
+            // Reject trailing arguments rather than ignoring them:
+            // `SET-LOG-LEVEL debug junk` answering `OK debug` would mask
+            // CLI misuse.
+            if let Some(extra) = parts.next() {
+                return Response::Error(format!(
+                    "unexpected argument '{extra}'"
+                ));
+            }
             logging::set_level(level);
             Response::Ok(level_name(level).to_string())
         }
@@ -451,5 +461,19 @@ mod tests {
     #[test]
     fn dispatch_rejects_unknown_verbs() {
         assert_eq!(dispatch("FLY").to_string(), "ERROR unknown command");
+    }
+
+    #[test]
+    fn dispatch_rejects_trailing_arguments() {
+        // The guard is about masking CLI misuse, so the reply must not
+        // look like the command was accepted.
+        assert_eq!(
+            dispatch("SET-LOG-LEVEL debug junk").to_string(),
+            "ERROR unexpected argument 'junk'",
+        );
+        assert_eq!(
+            dispatch("SET-LOG-LEVEL bogus junk").to_string(),
+            "ERROR invalid level; expected error, warn, info, debug, or trace",
+        );
     }
 }
