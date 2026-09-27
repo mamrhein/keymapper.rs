@@ -28,9 +28,13 @@
 //!   them.
 //! - Extracted `RawInputEvent`s are sent through a `crossbeam-channel`.
 
-use std::ptr;
+use std::{
+    ptr,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
-use crossbeam_channel::Sender;
+use crossbeam_channel::{Sender, TrySendError};
+use log::warn;
 use windows::{
     Win32::{
         Devices::HumanInterfaceDevice::{
@@ -84,6 +88,20 @@ const RIM_TYPEHID: u32 = 0x04;
 
 /// Extra message ID used to signal the message-only window to terminate.
 const WM_STOP: u32 = WM_USER + 1;
+
+/// Capacity of the bounded raw input event channel.
+///
+/// Human typing produces a handful of events per second and the raw worker
+/// drains the queue eagerly, so the depth is never approached in normal use.
+/// The cap is a backstop: a stalled worker, or a hostile HID device flooding
+/// its report rate, can no longer grow the queue between the pump thread and
+/// the worker without bound.
+const RAW_INPUT_CHANNEL_CAPACITY: usize = 4096;
+
+/// Emit a saturation warning for the first dropped event and then at most
+/// once per this many drops, so a flooding device cannot use the daemon log
+/// as an amplifier.
+const RAW_INPUT_DROPPED_LOG_EVERY: usize = 4096;
 
 /// A keyboard event extracted from a Raw Input `WM_INPUT` message.
 ///
@@ -141,6 +159,61 @@ fn set_raw_input_tx(tx: Sender<RawInputEvent>) {
 /// Retrieves the sender for pushing raw input events.
 fn get_raw_input_tx() -> Option<Sender<RawInputEvent>> {
     RAW_INPUT_TX.lock().clone()
+}
+
+/// Number of raw input events dropped because the bounded event channel was
+/// full.  Drives the throttled saturation warning in [`note_dropped`].
+static RAW_INPUT_DROPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// Count a raw input event dropped on channel saturation, warning on the
+/// first drop and then at most once per [`RAW_INPUT_DROPPED_LOG_EVERY`].
+fn note_dropped(dropped: &AtomicUsize) {
+    let total = dropped.fetch_add(1, Ordering::Relaxed) + 1;
+    if total == 1
+        || (total - 1) / RAW_INPUT_DROPPED_LOG_EVERY
+            < total / RAW_INPUT_DROPPED_LOG_EVERY
+    {
+        warn!(
+            "Raw input channel full; dropped {total} events so far (the raw \
+             worker has stalled or a device is flooding its report rate)"
+        );
+    }
+}
+
+/// Forward `event` to `tx`, never blocking.  On a full channel the event is
+/// dropped and counted in `dropped`; on a disconnected channel (the worker
+/// has exited) it is dropped silently.  Returns `true` when delivered.
+///
+/// The counter is passed in rather than read from the process-wide static so
+/// the send-and-count logic is unit-testable in isolation.
+fn try_send_or_drop(
+    tx: &Sender<RawInputEvent>,
+    dropped: &AtomicUsize,
+    event: RawInputEvent,
+) -> bool {
+    match tx.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            note_dropped(dropped);
+            false
+        }
+        // The worker exited during shutdown; nothing to deliver and nothing
+        // that counts as saturation.
+        Err(TrySendError::Disconnected(_)) => false,
+    }
+}
+
+/// Deliver a raw input event to the worker through the process-wide bounded
+/// channel.
+///
+/// Called from the window procedure, which runs on the input chain and must
+/// never block; a full channel drops the event rather than back-pressuring
+/// the message pump.
+fn send_raw_input_event(event: RawInputEvent) {
+    let Some(tx) = get_raw_input_tx() else {
+        return;
+    };
+    try_send_or_drop(&tx, &RAW_INPUT_DROPPED, event);
 }
 
 // ---------------------------------------------------------------------------
@@ -236,9 +309,7 @@ unsafe fn handle_wm_input(_hwnd: HWND, l_param: LPARAM) {
                     device_handle_ptr: raw_input.header.hDevice.0 as usize,
                 };
 
-                if let Some(tx) = get_raw_input_tx() {
-                    let _ = tx.send(event);
-                }
+                send_raw_input_event(event);
             }
             RIM_TYPEHID => {
                 let hid = &raw_input.data.hid;
@@ -273,9 +344,7 @@ unsafe fn handle_wm_input(_hwnd: HWND, l_param: LPARAM) {
                     device_handle_ptr: raw_input.header.hDevice.0 as usize,
                 };
 
-                if let Some(tx) = get_raw_input_tx() {
-                    let _ = tx.send(event);
-                }
+                send_raw_input_event(event);
             }
             _ => {}
         }
@@ -516,7 +585,7 @@ pub fn start_raw_input_loop() -> Result<
     (RawInputLoop, crossbeam_channel::Receiver<RawInputEvent>),
     Box<dyn std::error::Error>,
 > {
-    let (tx, rx) = crossbeam_channel::unbounded();
+    let (tx, rx) = crossbeam_channel::bounded(RAW_INPUT_CHANNEL_CAPACITY);
 
     let hwnd = create_message_only_window()?;
     register_keyboards(hwnd)?;
@@ -619,26 +688,61 @@ mod tests {
     }
 
     #[test]
-    fn channel_is_unbounded() {
-        let (tx, rx) = crossbeam_channel::unbounded::<RawInputEvent>();
+    fn channel_is_bounded() {
+        // The production channel is bounded: it accepts up to
+        // `RAW_INPUT_CHANNEL_CAPACITY` events, then a further `try_send`
+        // is rejected instead of growing the queue without bound.
+        let (tx, rx) = crossbeam_channel::bounded::<RawInputEvent>(
+            RAW_INPUT_CHANNEL_CAPACITY,
+        );
 
-        // Send a burst of events without blocking.
-        for i in 0..1000 {
-            tx.send(RawInputEvent {
+        for i in 0..RAW_INPUT_CHANNEL_CAPACITY {
+            tx.try_send(RawInputEvent {
                 usage: None,
                 vk_code: Some(VIRTUAL_KEY(i as u16)),
-                is_key_up: i % 2 == 0,
+                is_key_up: false,
                 device_handle_ptr: 0,
             })
-            .unwrap();
+            .expect("the channel must accept up to its capacity");
         }
 
-        // Receive them all back.
-        let mut count = 0;
-        while let Ok(_event) = rx.try_recv() {
-            count += 1;
-        }
-        assert_eq!(count, 1000);
+        // The channel is full: a further send is rejected, not queued.
+        assert!(
+            tx.try_send(RawInputEvent {
+                usage: None,
+                vk_code: Some(VIRTUAL_KEY(0)),
+                is_key_up: false,
+                device_handle_ptr: 0,
+            })
+            .is_err()
+        );
+        assert_eq!(rx.len(), RAW_INPUT_CHANNEL_CAPACITY);
+    }
+
+    #[test]
+    fn try_send_or_drop_counts_full_channel() {
+        let (tx, rx) = crossbeam_channel::bounded::<RawInputEvent>(1);
+        let dropped = AtomicUsize::new(0);
+        let event = || RawInputEvent {
+            usage: None,
+            vk_code: Some(VIRTUAL_KEY(0x41)),
+            is_key_up: false,
+            device_handle_ptr: 0,
+        };
+
+        // The first event fits.
+        assert!(try_send_or_drop(&tx, &dropped, event()));
+        // The second finds the channel full: it is dropped and counted,
+        // never queued.
+        assert!(!try_send_or_drop(&tx, &dropped, event()));
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(rx.len(), 1);
+
+        // A disconnected channel (worker gone) drops silently; it is not
+        // counted as saturation.
+        drop(rx);
+        assert!(!try_send_or_drop(&tx, &dropped, event()));
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
     }
 
     #[test]

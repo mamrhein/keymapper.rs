@@ -36,6 +36,17 @@ use crate::common::hid_usage::HidUsage;
 /// a previous keystroke is never matched against the current press.
 pub(crate) const RAW_EVENT_MAX_AGE: Duration = Duration::from_millis(100);
 
+/// Upper bound on the device path cache.
+///
+/// The number of simultaneously attached keyboards is a handful, so this
+/// bound is never approached in normal use.  It is a backstop so a hostile
+/// device that recycles handle pointers cannot retain an entry forever (the
+/// old insert-only cache grew without limit and, because Windows reuses
+/// handle values, could mis-attribute a device via a stale entry).  When a
+/// brand-new handle would exceed the bound the whole cache is cleared, which
+/// also flushes stale handle→path mappings left behind by removed devices.
+const MAX_CACHED_DEVICES: usize = 128;
+
 /// Raw input key-down stored in the matching buffer with a receive
 /// timestamp so that stale entries can be evicted.
 #[derive(Debug)]
@@ -147,10 +158,37 @@ impl DeviceCache {
         // Resolve via GetRawInputDeviceInfoW.
         let path = resolve_device_path(handle_ptr)?;
 
-        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
-        map.insert(handle_ptr, path.clone());
+        self.insert(handle_ptr, path.clone());
 
         Some(path)
+    }
+
+    /// Insert a resolved mapping, bounding the cache.
+    ///
+    /// When a *new* handle arrives while the cache is at capacity the whole
+    /// map is cleared before inserting, so memory stays bounded and stale
+    /// mappings for removed devices are flushed.  Updating an existing handle
+    /// never triggers a clear.
+    fn insert(&self, handle_ptr: usize, path: String) {
+        let mut map = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if !map.contains_key(&handle_ptr) && map.len() >= MAX_CACHED_DEVICES {
+            map.clear();
+        }
+        map.insert(handle_ptr, path);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    #[cfg(test)]
+    fn get(&self, handle_ptr: usize) -> Option<String> {
+        self.map
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&handle_ptr)
+            .cloned()
     }
 }
 
@@ -377,6 +415,36 @@ mod tests {
     #[test]
     fn resolve_device_path_rejects_null_handle() {
         assert!(resolve_device_path(0).is_none());
+    }
+
+    #[test]
+    fn device_cache_bounds_and_flushes_on_overflow() {
+        let cache = DeviceCache::new();
+        // Fill the cache to capacity with distinct handles.
+        for i in 0..MAX_CACHED_DEVICES {
+            cache.insert(i, format!("path{i}"));
+        }
+        assert_eq!(cache.len(), MAX_CACHED_DEVICES);
+
+        // A new handle at capacity clears the cache (flushing any stale
+        // entries) and retains only the fresh mapping.
+        cache.insert(MAX_CACHED_DEVICES, "fresh".to_string());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(MAX_CACHED_DEVICES).as_deref(), Some("fresh"));
+        assert!(cache.get(0).is_none());
+    }
+
+    #[test]
+    fn device_cache_update_does_not_flush() {
+        let cache = DeviceCache::new();
+        for i in 0..MAX_CACHED_DEVICES {
+            cache.insert(i, format!("path{i}"));
+        }
+        // Updating an existing handle must not clear the bound cache.
+        cache.insert(0, "updated".to_string());
+        assert_eq!(cache.len(), MAX_CACHED_DEVICES);
+        assert_eq!(cache.get(0).as_deref(), Some("updated"));
+        assert_eq!(cache.get(7).as_deref(), Some("path7"));
     }
 
     #[test]
