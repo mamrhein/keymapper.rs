@@ -1,9 +1,5 @@
-# ---------------------------------------------------------------------------
-# winget default-locale manifest template for keymapper (see
-# adrhinum.keymapper.yaml for how this file is used).
-# ---------------------------------------------------------------------------
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.10.0.schema.json
 
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
 PackageIdentifier: adrhinum.keymapper
 PackageVersion: "@VERSION@"
 PackageLocale: en-US
@@ -20,4 +16,4 @@ Description: |
   hook, applies user-defined remapping rules (optionally scoped to specific
   applications or keyboards), and emits the mapped keys.
 ManifestType: defaultLocale
-ManifestVersion: 1.12.0
+ManifestVersion: 1.10.0
