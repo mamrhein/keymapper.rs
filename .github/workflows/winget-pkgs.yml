@@ -115,14 +115,13 @@ jobs:
           $manifestDir = "manifests/a/adrhinum/keymapper/$env:VERSION"
           New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
 
-          # Fetch the templates from the keymapper repository at the release
-          # tag (the repo is the source of truth, mirroring homebrew-tap),
-          # then substitute the version and sha256 placeholders.
-          # Retry each fetch because a freshly pushed tag may not be
-          # resolvable by the contents API immediately, even after the ref
-          # itself is visible; a deleted and re-pushed tag can briefly expose
-          # the old tree as well.
-          function Get-ContentAtRef([string]$url) {
+          # Fetch the templates from the keymapper repository and substitute
+          # the version and sha256 placeholders. The default branch is the
+          # source of truth (mirroring homebrew-tap), so no ref is pinned:
+          # a release tag points at the commit that created the release and
+          # would serve stale template content forever after.
+          # Retry each fetch to ride out transient api.github.com failures.
+          function Get-ContentFromDefaultBranch([string]$url) {
             for ($attempt = 1; $attempt -le 5; $attempt++) {
               # On failure, `gh api --jq` prints the error JSON to stdout,
               # so check the exit code before decoding to avoid a misleading
@@ -131,15 +130,12 @@ jobs:
               if ($LASTEXITCODE -eq 0) { return $content }
               Start-Sleep -Seconds 30
             }
-            throw "Failed to fetch $url after 5 attempts (gh exit code $LASTEXITCODE). The tag may be missing or the file may not exist at that ref."
+            throw "Failed to fetch $url after 5 attempts (gh exit code $LASTEXITCODE). The file may not exist on the default branch."
           }
 
           foreach ($name in @("adrhinum.keymapper.yaml", "adrhinum.keymapper.installer.yaml", "adrhinum.keymapper.locale.en-US.yaml")) {
             $path = Join-Path $manifestDir $name
-            # ${name} must be brace-delimited: PowerShell treats '?' as a
-            # valid variable-name character, so "$name?ref" would expand the
-            # (empty) variable 'name?ref' and corrupt the URL.
-            $content = Get-ContentAtRef "repos/${{ github.repository }}/contents/winget/${name}?ref=v$env:VERSION"
+            $content = Get-ContentFromDefaultBranch "repos/${{ github.repository }}/contents/winget/$name"
             [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content)) |
               Set-Content -Path $path -Encoding utf8 -NoNewline
             (Get-Content $path -Raw) `
