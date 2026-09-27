@@ -86,7 +86,7 @@ The original media action cannot be suppressed: Windows delivers consumer contro
 
 These are accepted trade-offs of the final architecture:
 
-- **Injected events are visible as synthetic.** `SendInput` marks its events (`LLKHF_INJECTED`, `dwExtraInfo`). Applications that filter synthetic input may ignore remapped keys, and — as with any synthetic input — events cannot be delivered to elevated windows (UIPI).
+- **Injected events are visible as synthetic.** `SendInput` marks its events (`LLKHF_INJECTED`, `dwExtraInfo`). Applications that filter synthetic input may ignore remapped keys. When the foreground window is elevated (higher integrity level than the daemon), the hook detects this via the process token and passes mapped keys through unmapped, so the elevated window receives the original keystroke instead of losing it.
 - **Standalone media actions cannot be suppressed** (see [Standalone consumer control](#standalone-consumer-control)).
 - **The document-level `keyboards` filter is a no-op.** Capture is a session-global hook; applying the global filter per device is out of scope. Per-group `keyboards` filters work via raw input device identification.
 

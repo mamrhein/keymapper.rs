@@ -42,7 +42,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use log::{debug, error, info, trace};
@@ -52,10 +52,16 @@ use parking_lot::RwLock;
 #[cfg(not(test))]
 use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
 use windows::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Foundation::{CloseHandle, HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Security::{
+        GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
+    },
     System::{
         LibraryLoader::GetModuleHandleW,
-        Threading::GetCurrentThreadId,
+        Threading::{
+            GetCurrentProcess, GetCurrentThreadId, OpenProcess,
+            OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
     },
     UI::{
         Input::KeyboardAndMouse::{
@@ -64,10 +70,10 @@ use windows::Win32::{
             MapVirtualKeyW, SendInput, VIRTUAL_KEY,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK,
-            KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW, TranslateMessage,
-            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN,
-            WM_SYSKEYDOWN,
+            CallNextHookEx, DispatchMessageW, GetForegroundWindow,
+            GetMessageW, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT, MSG,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+            WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
         },
     },
 };
@@ -135,6 +141,112 @@ fn set_engine(engine: MappingEngine<EngineKey>) {
 
 fn engine() -> Option<&'static parking_lot::Mutex<MappingEngine<EngineKey>>> {
     ENGINE.get()
+}
+
+// ---------------------------------------------------------------------------
+// Foreground-window elevation check
+// ---------------------------------------------------------------------------
+
+/// Cached PID and elevation status of the foreground window's process.
+///
+/// The elevation status of a process cannot change during its lifetime, so
+/// we only need to re-query when the foreground PID differs from the cached
+/// value.  On the hook thread the accesses are sequential (Windows
+/// serializes the low-level hook), but atomics keep the types `Sync` for
+/// the static.
+static FG_PID: AtomicU32 = AtomicU32::new(0);
+static FG_ELEVATED: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` when the foreground window's process has a higher
+/// integrity level than the current process (i.e., it is elevated while we
+/// are not), meaning `SendInput` will be blocked by UIPI.
+///
+/// The result is cached by PID so the syscall path (`OpenProcess` →
+/// `OpenProcessToken` → `GetTokenInformation`) executes only on a foreground
+/// switch, not per keypress.
+fn foreground_is_elevated() -> bool {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return false;
+    }
+
+    // Fast path: same foreground process as last check.
+    if pid == FG_PID.load(Ordering::Relaxed) {
+        return FG_ELEVATED.load(Ordering::Relaxed);
+    }
+
+    // Slow path: query the target process token elevation.
+    let elevated = query_token_elevated(pid);
+    FG_PID.store(pid, Ordering::Relaxed);
+    FG_ELEVATED.store(elevated, Ordering::Relaxed);
+    elevated
+}
+
+/// Query whether the process identified by `pid` runs with an elevated
+/// (UAC-elevated / High IL) token while our own process does not.
+fn query_token_elevated(pid: u32) -> bool {
+    unsafe {
+        // Determine whether our own process is elevated.  If we already are,
+        // SendInput can reach any target at the same or lower IL.
+        let mut our_token = HANDLE::default();
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY,
+            &mut our_token as *mut _,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let our_elevated = token_is_elevated(our_token);
+        let _ = CloseHandle(our_token);
+        if our_elevated {
+            return false;
+        }
+
+        // Open the target process and check its elevation.
+        let Ok(proc) =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+        else {
+            // Cannot open (e.g. protected process) — assume elevated.
+            return true;
+        };
+        let mut token = HANDLE::default();
+        if OpenProcessToken(proc, TOKEN_QUERY, &mut token as *mut _).is_err() {
+            let _ = CloseHandle(proc);
+            // Cannot read token — assume elevated to fail open.
+            return true;
+        }
+        let result = token_is_elevated(token);
+        let _ = CloseHandle(token);
+        let _ = CloseHandle(proc);
+        result
+    }
+}
+
+/// Check the `TokenElevation` information class for *token*.
+///
+/// # Safety
+///
+/// `token` must be a valid handle to an opened process token.
+unsafe fn token_is_elevated(token: HANDLE) -> bool {
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0u32;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    ok.is_ok() && elevation.TokenIsElevated != 0
 }
 
 // ---------------------------------------------------------------------------
@@ -246,8 +358,15 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
             },
         },
     };
-    unsafe {
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    let sent = unsafe {
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32)
+    };
+    if sent != 1 {
+        error!(
+            "SendInput failed for vk={:#04X} ({}) (returned {sent})",
+            vk.0,
+            if is_key_up { "up" } else { "down" },
+        );
     }
 }
 
@@ -485,6 +604,32 @@ extern "system" fn low_level_keyboard_proc(
     // other hooks and the target window (the capture-mode e2e tests capture
     // the tagged re-emission from a separate process's hook), so the mapped
     // output is emitted directly in the callback.
+    //
+    // UIPI guard: when the foreground window is elevated (High IL while we
+    // are Medium IL), every `SendInput` we issue would be silently dropped
+    // by the OS.  Rather than swallowing the physical key and losing it,
+    // pass it through unmapped so the elevated window receives the original
+    // keystroke.  The engine state is slightly inconsistent (it believes the
+    // key was consumed), but this matches the pre-existing "mapped keys
+    // vanish" behavior and prevents the strictly worse outcome of dropped
+    // input.
+    if !matches!(decision, Decision::Pass) && foreground_is_elevated() {
+        if is_key_down {
+            debug!(
+                "elevated fg: passing vk={} {action} unmapped",
+                vk_code.0
+            );
+        } else {
+            trace!(
+                "elevated fg: passing vk={} {action} unmapped",
+                vk_code.0
+            );
+        }
+        return unsafe {
+            CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
+        };
+    }
+
     match decision {
         // Unmapped (or the repeat of an unmapped key): let the event through.
         Decision::Pass => {
