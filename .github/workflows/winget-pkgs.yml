@@ -9,8 +9,11 @@
 #
 # One-time prerequisites:
 #   - Fork microsoft/winget-pkgs as mamrhein/winget-pkgs.
-#   - Create a personal access token with write access to the fork and add
-#     it as the WINGET_PKGS_TOKEN repository secret.
+#   - Create a classic personal access token with the `repo` scope and add it
+#     as the WINGET_PKGS_TOKEN repository secret. A fine-grained PAT cannot
+#     be used here: it never covers microsoft/winget-pkgs (a repository the
+#     account does not own), so `gh pr create` fails against the target repo
+#     with "Resource not accessible by personal access token".
 # ---------------------------------------------------------------------------
 
 name: winget-pkgs
@@ -166,7 +169,11 @@ jobs:
           git checkout -b "$BRANCH"
           git add "manifests/a/adrhinum/keymapper/${VERSION}"
           git diff --cached --quiet || git commit -m "chore: add keymapper ${VERSION}"
-          git push origin "$BRANCH" --force-with-lease
+          # --force, not --force-with-lease: the shallow checkout never fetched
+          # the remote branch, so a lease would always see "stale info" if an
+          # earlier failed run had already pushed this branch. The branch is
+          # bot-owned and regenerated idempotently, so overwriting is safe.
+          git push origin "$BRANCH" --force
           gh pr create \
             --repo ${{ env.WINGET_TARGET_REPO }} \
             --title "chore: add keymapper ${VERSION}" \
