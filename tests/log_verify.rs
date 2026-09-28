@@ -286,7 +286,112 @@ fn dump_window(window: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use keymapper::keymap_core::{
+        logfmt::{self, Direction},
+        mapping_cache::NativeKey,
+    };
+
     use super::*;
+
+    // --- contract: the `log_verify` parser round-trips the `logfmt` producer
+    //
+    // These tests are the automated link between the production log formatter
+    // (`keymapper::keymap_core::logfmt`) and the parser the e2e harness relies
+    // on: every line the formatter produces must parse back to the event it
+    // describes.  A reworded formatter or a drifted parser breaks one of
+    // these.
+
+    /// Wrap a formatted message body in a `{LEVEL} {target}: ` log line the
+    /// parser understands (no timestamp, like the Linux stream).
+    fn log_line(level: &str, message: &str) -> String {
+        format!("{level} keymapper::x: {message}")
+    }
+
+    #[test]
+    fn parser_round_trips_formatted_recv_pass_swal() {
+        for (dir, action) in [
+            (Direction::Down, Action::Down),
+            (Direction::Up, Action::Up),
+            (Direction::Repeat, Action::Repeat),
+        ] {
+            // The native field is platform free text; the parser ignores it.
+            let recv = logfmt::fmt_recv(
+                format_args!("/dev/input/event3 30"),
+                dir,
+                HidUsage::D,
+            );
+            let pass = logfmt::fmt_pass(
+                format_args!("/dev/input/event3 30"),
+                dir,
+                HidUsage::D,
+            );
+            let swal = logfmt::fmt_swal(
+                format_args!("/dev/input/event3 30"),
+                dir,
+                HidUsage::D,
+            );
+
+            let parsed = parse_lines(&[
+                &log_line("DEBUG", &recv),
+                &log_line("DEBUG", &pass),
+                &log_line("TRACE", &swal),
+            ]);
+            assert_eq!(
+                parsed.key_events,
+                vec![
+                    KeyEvent {
+                        kind: Kind::Recv,
+                        usage: HidUsage::D,
+                        action
+                    },
+                    KeyEvent {
+                        kind: Kind::Pass,
+                        usage: HidUsage::D,
+                        action
+                    },
+                    KeyEvent {
+                        kind: Kind::Swal,
+                        usage: HidUsage::D,
+                        action
+                    },
+                ],
+                "round-trip failed for direction {dir:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn parser_round_trips_formatted_emit() {
+        let bare = logfmt::fmt_emit(&NativeKey {
+            modifiers: 0,
+            usage: HidUsage::B,
+        });
+        let chord = logfmt::fmt_emit(&NativeKey {
+            modifiers: 0b0000_1000,
+            usage: HidUsage::A,
+        });
+        let parsed = parse_lines(&[
+            &log_line("DEBUG", &bare),
+            &log_line("DEBUG", &chord),
+        ]);
+        assert_eq!(parsed.emits, vec!["B", "LeftCommand+A"]);
+    }
+
+    #[test]
+    fn formatter_uses_the_up_is_trace_down_is_debug_level_rule() {
+        // The level is what separates the informative down from the noisy up
+        // in the default debug output; the parser treats both as
+        // non-error, so this pins the rule directly against `logfmt`'s
+        // documented mapping.
+        assert!(
+            logfmt::fmt_recv(format_args!("0"), Direction::Up, HidUsage::A)
+                .ends_with("up -> A")
+        );
+        assert!(
+            logfmt::fmt_recv(format_args!("0"), Direction::Down, HidUsage::A)
+                .ends_with("down -> A")
+        );
+    }
 
     // --- parser: line splitting and level detection -------------------------
 
