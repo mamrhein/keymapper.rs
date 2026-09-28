@@ -31,9 +31,10 @@
 //! descriptor to `CreateNamedPipeW` directly fails on recent Windows builds
 //! (the creation is rejected with `ERROR_LOCAL_DEVICE_NOT_FOUND` or
 //! `ERROR_INVALID_SECURITY_DESCRIPTOR`), while the two-step approach
-//! succeeds. The ACL itself is filled in byte by byte, because
-//! advapi32's `InitializeAcl`/`AddAccessAllowedAce` write an `AclSize` that
-//! does not match the ACE they add, which stricter validation rejects.
+//! succeeds. The descriptor itself comes from an SDDL string —
+//! `D:(A;;GA;;;<user-sid>)`, a single `ACCESS_ALLOWED` ACE granting the
+//! caller's SID generic all — converted by the Win32 security API, so the
+//! ACL byte layout is produced by the system rather than assembled by hand.
 
 use std::{
     io::{Read, Write},
@@ -46,15 +47,21 @@ use log::{debug, info, warn};
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
-            ERROR_PIPE_CONNECTED, GENERIC_ALL, GetLastError, HANDLE,
-            WAIT_OBJECT_0, WAIT_TIMEOUT,
+            BOOL, CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
+            ERROR_PIPE_CONNECTED, GENERIC_ALL, GetLastError, HANDLE, HLOCAL,
+            LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
-            ACL_REVISION, Cryptography::ProcessPrng, GetLengthSid,
-            GetTokenInformation, InitializeSecurityDescriptor,
-            PSECURITY_DESCRIPTOR, PSID, SECURITY_DESCRIPTOR,
-            SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
+            ACCESS_ALLOWED_ACE, ACL,
+            Authorization::{
+                ConvertSidToStringSidW,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
+            },
+            Cryptography::ProcessPrng,
+            DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
+            GetSecurityDescriptorDacl, GetTokenInformation,
+            PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
@@ -74,7 +81,7 @@ use windows::{
             },
         },
     },
-    core::PCWSTR,
+    core::{PCWSTR, PWSTR},
 };
 
 use super::{IoStream, handle_connection};
@@ -103,24 +110,9 @@ const PUBLISH_FILE_NAME: &str = "control.pipe";
 /// The pipe's input and output buffer sizes (bytes).
 const PIPE_BUFFER: u32 = 4096;
 
-/// The `SECURITY_DESCRIPTOR_REVISION` value (kept local to avoid pulling in an
-/// unrelated feature just for the named constant).
-const SD_REVISION: u32 = 1;
-
-/// Size of the on-wire `ACL` header: revision, size, count, and two unused
-/// bytes.
-const ACL_HEADER_BYTES: usize = 8;
-
-/// Size of an `ACCESS_ALLOWED` ACE's fixed part (type, flags, size, mask);
-/// the SID bytes follow directly.
-const ACE_FIXED_BYTES: usize = 8;
-
-/// `SE_FILE_OBJECT`, the object type of a named pipe for `SetSecurityInfo`
-/// (not in the `windows` crate's surface, kept local like `SD_REVISION`).
-const SE_FILE_OBJECT: u32 = 1;
-
-/// `DACL_SECURITY_INFORMATION`: apply only the DACL.
-const DACL_SECURITY_INFORMATION: u32 = 4;
+/// `SDDL_REVISION_1`: the only SDDL revision currently defined, passed to
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+const SDDL_REVISION_1: u32 = 1;
 
 /// The `ERROR_FILE_NOT_FOUND` code: no pipe to open means no daemon.
 const ERROR_FILE_NOT_FOUND: i32 = 2;
@@ -351,59 +343,19 @@ fn wait_overlapped(handle: HANDLE, ov: &OVERLAPPED) -> std::io::Result<u32> {
     }
 }
 
-/// An owner-only security descriptor, keeping the backing `ACL` buffer and the
-/// An owner-only security descriptor, keeping the backing `ACL` buffer and
-/// the `SECURITY_DESCRIPTOR` alive together. The descriptor's DACL points
-/// into `acl`.
-struct OwnerOnlyDescriptor {
-    sd: SECURITY_DESCRIPTOR,
-    /// Never read by Rust; the field only keeps the buffer alive because the
-    /// descriptor's DACL points into it.
-    #[allow(dead_code)]
-    acl: Vec<u8>,
-}
-
-/// `SetSecurityInfo` (advapi32), which the `windows` crate does not expose.
-mod ffi {
-    // SAFETY: FFI wrapper around the stable advapi32 `SetSecurityInfo`
-    // entry point; parameters are passed by value or pointer and the return
-    // value is a `BOOL`.
-    unsafe extern "system" {
-        pub fn SetSecurityInfo(
-            hobject: *mut core::ffi::c_void,
-            object_type: u32,
-            security_information: u32,
-            security_descriptor: *mut core::ffi::c_void,
-        ) -> i32;
-    }
-}
-
-/// Apply *sd* as the DACL of *handle*. Returns the Win32 error, or 0.
-fn set_dacl(handle: HANDLE, sd: &SECURITY_DESCRIPTOR) -> u32 {
-    let ok = unsafe {
-        ffi::SetSecurityInfo(
-            handle.0,
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            sd as *const _ as *mut core::ffi::c_void,
-        )
-    };
-    if ok != 0 {
-        0
-    } else {
-        unsafe { GetLastError().0 }
-    }
-}
-
-/// The caller's primary SID, from the current process token, owned by the
-/// caller as a byte buffer.
+/// The caller's primary SID, from the current process token, owned as a
+/// DWORD-aligned buffer of `u32` words.
 ///
 /// `GetTokenInformation` writes the SID *inside* the caller's buffer (the
-/// `TOKEN_USER` pointer lands just past its 8-byte header), so the bytes are
-/// copied out into a `Vec<u8>`. The SID must never be passed to `FreeSid`: it
-/// is not a system-allocated SID object, and freeing a mid-allocation pointer
-/// corrupts the heap.
-fn current_user_sid() -> Option<Vec<u8>> {
+/// `TOKEN_USER` pointer lands just past its 8-byte header), so the SID is
+/// copied out before that scratch buffer and the token handle are gone.  It
+/// is copied into a `u32` buffer rather than a `Vec<u8>` because a Win32 SID
+/// must be DWORD-aligned, which a byte buffer does not guarantee; the result
+/// can therefore be handed to the SID APIs as a `PSID` directly.
+///
+/// The SID must never be passed to `FreeSid`: it is not a system-allocated
+/// SID object, and freeing a mid-allocation pointer corrupts the heap.
+fn current_user_sid() -> Option<Vec<u32>> {
     unsafe {
         let process = GetCurrentProcess();
         let mut token = HANDLE::default();
@@ -439,7 +391,7 @@ fn current_user_sid() -> Option<Vec<u8>> {
             return None;
         }
 
-        // Copy the SID bytes out of the scratch buffer before it drops.
+        // Copy the SID out of the scratch buffer before it drops.
         let token_user: TOKEN_USER =
             core::ptr::read_unaligned(buffer.as_ptr() as *const TOKEN_USER);
         let sid_ptr = token_user.User.Sid.0;
@@ -447,63 +399,104 @@ fn current_user_sid() -> Option<Vec<u8>> {
             return None;
         }
         let sid_len = GetLengthSid(PSID(sid_ptr)) as usize;
-        Some(
-            std::slice::from_raw_parts(sid_ptr as *const u8, sid_len).to_vec(),
-        )
+        let mut sid =
+            vec![0u32; sid_len.div_ceil(core::mem::size_of::<u32>())];
+        // SAFETY: `sid` provides at least `sid_len` bytes of capacity, the
+        // source SID is valid for exactly `sid_len` bytes, and the two buffers
+        // do not overlap.
+        core::ptr::copy_nonoverlapping(
+            sid_ptr as *const u8,
+            sid.as_mut_ptr() as *mut u8,
+            sid_len,
+        );
+        Some(sid)
     }
 }
 
-/// Build an owner-only descriptor granting the SID in *sid* full control of
-/// the pipe.
+/// Build an owner-only DACL that grants the SID in *sid* full control and
+/// apply it to *handle* (a named pipe or a file).
 ///
-/// The ACL is filled in byte by byte (8-byte header + one
-/// `ACCESS_ALLOWED` ACE + the SID): advapi32's `InitializeAcl`/
-/// `AddAccessAllowedAce` leave the `AclSize` field inconsistent with the
-/// ACE they append, and creation with such a descriptor is rejected on
-/// recent Windows builds.
+/// The descriptor is produced from an SDDL DACL string — a single
+/// `ACCESS_ALLOWED` ACE granting `GENERIC_ALL` to exactly the caller's SID —
+/// converted by `ConvertStringSecurityDescriptorToSecurityDescriptorW`, then
+/// applied with the `windows` crate's `SetSecurityInfo` (the correct
+/// seven-argument entry point), which copies the DACL into the object.
+/// Letting the security API lay out the ACL replaces the hand-assembled ACE
+/// bytes and the mismatched-arity `SetSecurityInfo` declaration this code
+/// used to carry.
 ///
-/// Returns `None` when the descriptor cannot be built (in which case the
-/// pipe is not exposed at all, so it is never weaker than owner-only).
-fn owner_only_descriptor(sid: &[u8]) -> Option<OwnerOnlyDescriptor> {
-    let total = ACL_HEADER_BYTES + ACE_FIXED_BYTES + sid.len();
-    let mut acl = vec![0u8; total];
-    // Header: revision, total size, one ACE.
-    acl[0] = ACL_REVISION.0 as u8;
-    acl[2..4].copy_from_slice(&(total as u16).to_le_bytes());
-    acl[4..6].copy_from_slice(&1u16.to_le_bytes());
-    // ACE at offset 8: type 0 (`ACCESS_ALLOWED_ACE_TYPE`), no flags, its own
-    // size (fixed part + SID), the mask, then the SID bytes.
-    acl[8] = 0;
-    let ace_size = ACE_FIXED_BYTES + sid.len();
-    acl[10..12].copy_from_slice(&(ace_size as u16).to_le_bytes());
-    acl[12..16].copy_from_slice(&GENERIC_ALL.0.to_le_bytes());
-    acl[16..].copy_from_slice(sid);
+/// Returns the Win32 error code, or 0 on success.  A non-zero result means
+/// the caller must fail closed and never expose the handle.
+fn apply_owner_only_dacl(handle: HANDLE, sid: &[u32]) -> u32 {
+    unsafe {
+        // `sid` is the DWORD-aligned buffer from `current_user_sid`; the SID
+        // APIs read exactly the length the SID header declares.
+        let sid_psid = PSID(sid.as_ptr() as *mut core::ffi::c_void);
 
-    // `mem::zeroed` on a struct containing raw pointers is unsafe on Rust
-    // 2024; the descriptor is fully initialised by the calls below.
-    let sd: SECURITY_DESCRIPTOR = unsafe { core::mem::zeroed() };
-    // Two-step cast: a reference may only become a raw pointer of its own type
-    // in a single step, so route through `*mut SECURITY_DESCRIPTOR` first.
-    let sd_ptr = PSECURITY_DESCRIPTOR(
-        &sd as *const SECURITY_DESCRIPTOR as *mut core::ffi::c_void,
-    );
-    if unsafe { InitializeSecurityDescriptor(sd_ptr, SD_REVISION) }.is_err() {
-        return None;
-    }
-    if unsafe {
-        SetSecurityDescriptorDacl(
-            sd_ptr,
-            true,
-            Some(acl.as_ptr() as *const _),
-            false,
+        // SID bytes -> "S-1-5-21-…" textual form for the SDDL string.
+        let mut sid_str = PWSTR::null();
+        if ConvertSidToStringSidW(sid_psid, &mut sid_str).is_err() {
+            return GetLastError().0;
+        }
+        let sid_text = sid_str.to_string().unwrap_or_default();
+        // The SID string was allocated by advapi32 with LocalAlloc and must
+        // be released with LocalFree.
+        let _ = LocalFree(Some(HLOCAL(sid_str.0 as *mut core::ffi::c_void)));
+        if sid_text.is_empty() {
+            // `to_string` failed to find a terminator; treat it as a hard
+            // error rather than emit a DACL for a truncated SID.
+            return GetLastError().0;
+        }
+
+        // Owner-only DACL: one ACCESS_ALLOWED ACE granting GENERIC_ALL to
+        // exactly the caller's SID, and nothing else.
+        let sddl = to_wide(&format!("D:(A;;GA;;;{sid_text})"));
+        let mut sd = PSECURITY_DESCRIPTOR(core::ptr::null_mut());
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut sd,
+            None,
         )
-    }
-    .is_err()
-    {
-        return None;
-    }
+        .is_err()
+        {
+            return GetLastError().0;
+        }
 
-    Some(OwnerOnlyDescriptor { sd, acl })
+        // The DACL points into the converted descriptor, so it stays valid
+        // until `sd` is freed below; `SetSecurityInfo` copies it into the
+        // object before then.
+        let mut present = BOOL::default();
+        let mut defaulted = BOOL::default();
+        let mut dacl: *mut ACL = core::ptr::null_mut();
+        let code = if GetSecurityDescriptorDacl(
+            sd,
+            &mut present,
+            &mut dacl,
+            &mut defaulted,
+        )
+        .is_err()
+            || !present.as_bool()
+            || dacl.is_null()
+        {
+            GetLastError().0
+        } else {
+            SetSecurityInfo(
+                handle,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(dacl as *const ACL),
+                None,
+            )
+            .0
+        };
+        // The descriptor was allocated by
+        // `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
+        let _ = LocalFree(Some(HLOCAL(sd.0 as *mut core::ffi::c_void)));
+        code
+    }
 }
 
 /// The NUL-terminated UTF-16 form of *name*, for the `W` Win32 APIs.
@@ -552,11 +545,6 @@ fn publish_name(path: &Path, name: &str) -> Result<(), String> {
     let Some(sid) = current_user_sid() else {
         return Err("could not resolve the current user's SID".to_string());
     };
-    let Some(desc) = owner_only_descriptor(&sid) else {
-        return Err(
-            "could not build an owner-only security descriptor".to_string()
-        );
-    };
     if let Some(parent) = path.parent() {
         fs_err::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -569,8 +557,7 @@ fn publish_name(path: &Path, name: &str) -> Result<(), String> {
         .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
     // Harden before writing: the file only ever holds the name while it
     // is owner-only.
-    let dacl_error = set_dacl(HANDLE(file.as_raw_handle()), &desc.sd);
-    drop(desc);
+    let dacl_error = apply_owner_only_dacl(HANDLE(file.as_raw_handle()), &sid);
     if dacl_error != 0 {
         drop(file);
         let _ = fs_err::remove_file(path);
@@ -636,17 +623,6 @@ fn start_with_name(name: &str) -> bool {
         );
         return false;
     };
-    let Some(desc) = owner_only_descriptor(&sid) else {
-        warn!(
-            "Could not build an owner-only pipe security descriptor; runtime \
-             log-level control is disabled"
-        );
-        return false;
-    };
-    // The ACE copied the SID bytes into the ACL, so the owned buffer only
-    // needs to drop when this function returns (never `FreeSid`; see
-    // `current_user_sid`). `desc` stays alive across the `SetSecurityInfo`
-    // call below, which copies the DACL into the pipe object.
 
     let wide_name = to_wide(name);
     // The pipe is created without a security descriptor; the owner-only DACL
@@ -711,8 +687,7 @@ fn start_with_name(name: &str) -> bool {
 
     // Apply the owner-only DACL. Fail closed: a pipe that cannot be locked
     // down to the owner is not exposed at all.
-    let dacl_error = set_dacl(pipe, &desc.sd);
-    drop(desc);
+    let dacl_error = apply_owner_only_dacl(pipe, &sid);
     if dacl_error != 0 {
         unsafe {
             let _ = CloseHandle(pipe);
@@ -945,53 +920,93 @@ mod tests {
         *,
     };
 
-    /// The hand-rolled ACL must be self-consistent: the header's `AclSize`
-    /// must equal the header plus exactly one ACE, and the ACE's size field
-    /// must equal its fixed part plus the SID.  Inconsistent sizes are
-    /// rejected by the kernel on recent Windows builds.
+    /// `ACCESS_ALLOWED_ACE_TYPE`, the ACE type byte our owner-only DACL uses
+    /// (the `windows` crate exposes no named constant for it).
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    /// The whole control-auth model rests on one property: the pipe's DACL
+    /// grants access to *exactly* the current user and nobody else.  Apply
+    /// the owner-only DACL to a real pipe and read the security descriptor
+    /// the OS actually stored back with `GetSecurityInfo`, then assert it is
+    /// a single ACCESS_ALLOWED ACE granting `GENERIC_ALL` to the caller's SID
+    /// and nothing else.  Verifying what the kernel recorded is stronger than
+    /// checking our own construction, and it guards the SDDL conversion.
     #[test]
-    fn owner_only_descriptor_builds_a_consistent_acl() {
-        // A 28-byte user SID (revision 1, NT authority, five subauthorities).
-        let mut sid = vec![0u8; 28];
-        sid[0] = 1;
-        sid[1] = 5;
-        let Some(desc) = owner_only_descriptor(&sid) else {
-            panic!("the descriptor could not be built");
+    fn applied_dacl_grants_only_the_current_user() {
+        let name =
+            format!("\\\\.\\pipe\\keymapperd_dacl_{}", std::process::id());
+        let wide = to_wide(&name);
+        // A throwaway pipe instance, hardened directly instead of through
+        // `start_with_name`, whose serve thread would own the handle we want
+        // to inspect.
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                PCWSTR(wide.as_ptr()),
+                FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0),
+                NAMED_PIPE_MODE(
+                    PIPE_TYPE_BYTE.0
+                        | PIPE_READMODE_BYTE.0
+                        | PIPE_REJECT_REMOTE_CLIENTS.0,
+                ),
+                1,
+                PIPE_BUFFER,
+                PIPE_BUFFER,
+                0,
+                None,
+            )
         };
-        let acl = &desc.acl;
-        assert_eq!(acl[0], ACL_REVISION.0 as u8, "wrong ACL revision");
-        let acl_size = u16::from_le_bytes([acl[2], acl[3]]) as usize;
-        let ace_count = u16::from_le_bytes([acl[4], acl[5]]);
-        assert_eq!(
-            acl_size,
-            ACL_HEADER_BYTES + ACE_FIXED_BYTES + sid.len(),
-            "AclSize does not cover exactly one ACE"
-        );
-        assert_eq!(acl_size, acl.len(), "AclSize must equal the buffer");
-        assert_eq!(ace_count, 1, "expected exactly one ACE");
-        assert_eq!(acl[8], 0, "expected an ACCESS_ALLOWED ACE");
-        assert_eq!(acl[9], 0, "unexpected ACE flags");
-        let ace_size = u16::from_le_bytes([acl[10], acl[11]]) as usize;
-        assert_eq!(
-            ace_size,
-            ACE_FIXED_BYTES + sid.len(),
-            "ACE size does not cover fixed part + SID"
-        );
-        assert_eq!(
-            &acl[12..16],
-            &GENERIC_ALL.0.to_le_bytes(),
-            "wrong ACE mask"
-        );
-        assert_eq!(&acl[16..], &sid[..], "SID was not copied into the ACE");
-        assert_eq!(
-            desc.sd.Revision, SD_REVISION as u8,
-            "wrong security descriptor revision"
-        );
-        assert_eq!(
-            desc.sd.Dacl as *const () as usize,
-            acl.as_ptr() as usize,
-            "the DACL must point at the owned buffer"
-        );
+        assert!(!pipe.is_invalid(), "could not create the test pipe");
+
+        let sid = current_user_sid().expect("could not read the current SID");
+        let code = apply_owner_only_dacl(pipe, &sid);
+        assert_eq!(code, 0, "applying the owner-only DACL failed");
+
+        // Read the stored DACL back from the object.  Windows allocates the
+        // returned ACL, so it is released with `LocalFree` at the end.
+        let mut dacl: *mut ACL = core::ptr::null_mut();
+        let err = unsafe {
+            GetSecurityInfo(
+                pipe,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut dacl),
+                None,
+                None,
+            )
+        };
+        assert_eq!(err.0, 0, "GetSecurityInfo failed");
+        assert!(!dacl.is_null(), "the pipe has no DACL");
+
+        unsafe {
+            let acl = &*dacl;
+            assert_eq!(acl.AceCount, 1, "expected exactly one ACE");
+
+            let mut ace_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+            GetAce(dacl, 0, &mut ace_ptr).expect("could not read ACE 0");
+            let ace = &*(ace_ptr as *const ACCESS_ALLOWED_ACE);
+            assert_eq!(
+                ace.Header.AceType, ACCESS_ALLOWED_ACE_TYPE,
+                "expected an ACCESS_ALLOWED ACE"
+            );
+            assert_eq!(ace.Mask, GENERIC_ALL.0, "wrong ACE mask");
+
+            // The SID follows the ACE's fixed part, starting at `SidStart`.
+            let ace_sid =
+                PSID(core::ptr::addr_of!(ace.SidStart)
+                    as *mut core::ffi::c_void);
+            let user_sid = PSID(sid.as_ptr() as *mut core::ffi::c_void);
+            assert!(
+                EqualSid(ace_sid, user_sid).is_ok(),
+                "the single ACE was not granted to the current user"
+            );
+        }
+
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(dacl as *mut core::ffi::c_void)));
+            let _ = CloseHandle(pipe);
+        }
     }
 
     /// The production path end to end: create the pipe without a security
