@@ -23,8 +23,9 @@
 //! removed in Phase 2.
 //!
 //! Wire format. A frame reuses the versioned length-prefix idea from the
-//! macOS emitter channel and carries a single UTF-8 command line with no
-//! terminating newline (the length prefix delimits it):
+//! macOS emitter channel (`platform::macos::ipc_frame`) and carries a single
+//! UTF-8 command line with no terminating newline (the length prefix
+//! delimits it):
 //!
 //! ```text
 //! [u8 version = 1][u32 LE payload_len][payload]
@@ -34,6 +35,12 @@
 //! matching response frame holds the reply (`OK debug` or `ERROR <reason>`).
 //! A connection carries exactly one request/response pair, then the peer
 //! closes.
+//!
+//! The two codecs share this framing shape but are intentionally kept
+//! separate: this one frames a UTF-8 command line, whereas `ipc_frame` frames
+//! an encoded batch of mapped-output keys. Keeping them apart lets the control
+//! and emitter protocols evolve independently without a shared codec binding
+//! them.
 
 use std::io::{ErrorKind, Read, Write};
 

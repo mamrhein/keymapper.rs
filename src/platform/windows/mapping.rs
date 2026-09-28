@@ -253,6 +253,24 @@ unsafe fn token_is_elevated(token: HANDLE) -> bool {
 // Modifier handling
 // ---------------------------------------------------------------------------
 
+/// Poll the eight physical modifier VK codes and pack the result into a
+/// modifier bitmask.
+///
+/// This is the modifier source for the standalone Consumer-Page path in the
+/// raw-input worker (`raw_worker`), which never receives a low-level keyboard
+/// hook event and so cannot consult the engine's authoritative
+/// `modifier_state` (the `MappingEngine` in `daemon::engine` builds that from
+/// hook events).
+///
+/// Invariant: the engine's `modifier_state` is authoritative for keys seen
+/// through the hook; this poll is only a fallback for the Consumer path.
+/// Because it reads live OS keyboard state at call time rather than state
+/// observed through the hook chain, the two can disagree within a narrow
+/// window — e.g. a modifier pressed while the hook chain was busy, or a
+/// transition not delivered to the hook (UIPI can suppress a lower-privilege
+/// hook under an elevated window). The divergence is accepted, not reconciled:
+/// for a Consumer event this poll is the best available approximation of the
+/// chord the user is holding.
 pub(super) fn extract_modifier_bits() -> u8 {
     let mut bits: u8 = 0;
     if unsafe { GetAsyncKeyState(Key::LeftControl.as_native() as i32) } < 0 {

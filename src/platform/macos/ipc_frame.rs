@@ -22,6 +22,11 @@
 //! [`MAX_PAYLOAD_LEN`] bound (4096) is a generous guard against corrupt length
 //! fields.  The codec is hand-rolled and trivially testable, so no external
 //! serialization dependency is introduced.
+//!
+//! The daemon control socket (`daemon::control`) uses the same
+//! `[u8 version][u32 LE len][payload]` shape for its single-line command
+//! payloads.  The two codecs are intentionally kept separate so the emitter
+//! and control protocols can evolve independently.
 
 use std::io::{ErrorKind, Read};
 

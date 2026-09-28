@@ -52,10 +52,8 @@ pub use linux::{
 };
 #[cfg(target_os = "macos")]
 pub use macos::{
-    HidDevice, HidDeviceManager, HidQueue, HidQueueHandle, HidValueCallback,
-    INJECTION_KEYBOARD_IDENTITY, IOHIDQueue, KarabinerClient,
-    for_each_hid_value, keycode_to_hid_usage, list_keyboards, start_mapping,
-    start_virtkbd,
+    INJECTION_KEYBOARD_IDENTITY, KarabinerClient, keycode_to_hid_usage,
+    list_keyboards, start_mapping, start_virtkbd,
 };
 #[cfg(target_os = "macos")]
 pub use macos::{config_dir, console_user_home};

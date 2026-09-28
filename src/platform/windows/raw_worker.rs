@@ -21,6 +21,14 @@
 //!   A `SendInput` issued from this thread could race a keyboard hook chain in
 //!   progress and be dropped by the input system, which is why the emission
 //!   goes through the same deferred queue as any other main-loop emission.
+//!
+//! Modifier state has two sources. The engine owns the authoritative
+//! `modifier_state`, derived from low-level keyboard hook events; this thread
+//! cannot use it, because Consumer Control events bypass the hook entirely.
+//! Instead the consumer path polls the live OS keyboard state via
+//! [`extract_modifier_bits`]. The two can disagree within a narrow window (see
+//! that function's docs); this divergence is accepted for Consumer events as
+//! the best available approximation.
 
 use std::sync::Arc;
 
@@ -34,7 +42,7 @@ use crate::platform::windows::mapping::queue_emission;
 // remaining imports are used unconditionally.
 use crate::{
     common::hid_usage::{HidUsage, PAGE_CONSUMER},
-    daemon::state::Lookup,
+    daemon::{mapping_cache::NativeKey, state::Lookup},
     platform::windows::{
         device_match::{device_cache, evict, push_event},
         mapping::extract_modifier_bits,
@@ -110,17 +118,7 @@ fn process_consumer_event(
     usage: HidUsage,
     lookup: &Arc<RwLock<dyn Lookup>>,
 ) {
-    let modifiers = extract_modifier_bits();
-    let device_path = device_cache().get_or_resolve(event.device_handle_ptr);
-
-    let guard = lookup.read();
-    let outputs = guard
-        .for_active_app(usage, modifiers, device_path.as_deref())
-        .or_else(|| guard.global(usage, modifiers, device_path.as_deref()))
-        .map(|v| v.to_vec());
-    drop(guard);
-
-    let Some(outputs) = outputs else {
+    let Some(outputs) = resolve_consumer_outputs(event, usage, lookup) else {
         return;
     };
 
@@ -135,6 +133,29 @@ fn process_consumer_event(
 
     #[cfg(test)]
     let _ = outputs;
+}
+
+/// Resolve the mapped output sequence for a Consumer Page key-down, if any.
+///
+/// Split out from [`process_consumer_event`] so the resolution is observable
+/// in unit tests: the emission itself (`queue_emission`) is compiled out under
+/// `cfg(test)`, so this return value is what the consumer path pins down.  It
+/// is the exact batch the shipping build hands to `queue_emission`.
+fn resolve_consumer_outputs(
+    event: &RawInputEvent,
+    usage: HidUsage,
+    lookup: &Arc<RwLock<dyn Lookup>>,
+) -> Option<Vec<NativeKey>> {
+    let modifiers = extract_modifier_bits();
+    let device_path = device_cache().get_or_resolve(event.device_handle_ptr);
+
+    let guard = lookup.read();
+    let outputs = guard
+        .for_active_app(usage, modifiers, device_path.as_deref())
+        .or_else(|| guard.global(usage, modifiers, device_path.as_deref()))
+        .map(|v| v.to_vec());
+    drop(guard);
+    outputs
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +287,49 @@ mod tests {
             HidUsage::PlayPause,
             &lookup,
         );
+    }
+
+    #[test]
+    fn consumer_event_resolves_mapped_outputs_for_emission() {
+        // Pin the consumer-event resolution: a mapped media key must resolve
+        // to exactly the output batch the shipping build hands to
+        // `queue_emission` (which is `cfg(not(test))` and therefore invisible
+        // here).  This is the behavior F11 asks us to lock in behind the
+        // test-shaped import.
+        let outputs = vec![
+            NativeKey {
+                modifiers: 0,
+                usage: HidUsage::A,
+            },
+            NativeKey {
+                modifiers: 0,
+                usage: HidUsage::B,
+            },
+        ];
+        let lookup: Arc<RwLock<dyn Lookup>> =
+            Arc::new(RwLock::new(MockLookup::with_global(vec![(
+                HidUsage::PlayPause,
+                outputs.clone(),
+            )])));
+
+        let resolved = resolve_consumer_outputs(
+            &consumer_event(HidUsage::PlayPause, 0x11),
+            HidUsage::PlayPause,
+            &lookup,
+        );
+        assert_eq!(resolved, Some(outputs));
+    }
+
+    #[test]
+    fn consumer_event_resolves_to_none_without_mapping() {
+        // An unmapped consumer key resolves to no outputs, so nothing would
+        // be queued.
+        let resolved = resolve_consumer_outputs(
+            &consumer_event(HidUsage::PlayPause, 0x11),
+            HidUsage::PlayPause,
+            &empty_lookup(),
+        );
+        assert_eq!(resolved, None);
     }
 
     #[test]
