@@ -25,10 +25,10 @@ use std::{
 
 use keymapper::{
     common::hid_usage::HidUsage,
-    daemon::{
+    daemon::{state::RuntimeState, watcher::start_config_watcher},
+    keymap_core::{
+        lookup::{Lookup, MutableLookup},
         mapping_cache::RuntimeLookupCache,
-        state::{Lookup, MutableLookup, RuntimeState},
-        watcher::start_config_watcher,
     },
 };
 use parking_lot::RwLock;

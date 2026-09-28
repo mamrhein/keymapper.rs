@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn ignores_map_and_unknown_lines() {
         let parsed = parse_lines(&[
-            "DEBUG keymapper::daemon::engine: map A -> [B]",
+            "DEBUG keymapper::keymap_core::engine: map A -> [B]",
             "INFO keymapper::x: Configuration hot-swapped successfully!",
             "garbage line without a target",
         ]);

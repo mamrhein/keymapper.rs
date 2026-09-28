@@ -38,7 +38,7 @@ use super::{
     config_dir::console_uid, emit::emit_native_key, ipc_frame,
     karabiner_client::KarabinerClient,
 };
-use crate::daemon::mapping_cache::NativeKey;
+use crate::keymap_core::mapping_cache::NativeKey;
 
 /// Directory holding the virtkbdd IPC socket.
 const SOCKET_DIR: &str = "/var/run/virtkbdd";

@@ -17,9 +17,9 @@
 
 use crate::{
     common::{config::AppConfig, hid_usage::HidUsage},
-    daemon::{
+    keymap_core::{
+        lookup::{Lookup, find_match},
         mapping_cache::{NativeKey, RuntimeLookupCache},
-        state::{Lookup, find_match},
     },
 };
 

@@ -7,12 +7,14 @@
 // $Source$
 // $Revision$
 
-//! Shared application identity queries, configuration parsing, path
-//! resolution, modifier definitions, and the HID-centric key identity
-//! ([`HidUsage`]) used as the canonical key type across all platforms.
+//! Shared application identity queries, configuration parsing and hardened
+//! reading, path resolution, modifier definitions, and the HID-centric key
+//! identity ([`HidUsage`]) used as the canonical key type across all
+//! platforms.
 
 pub mod app_identity;
 pub mod config;
+pub mod config_io;
 pub mod config_path;
 pub mod hid_usage;
 pub mod keyboard;

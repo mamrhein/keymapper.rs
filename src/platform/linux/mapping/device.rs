@@ -31,7 +31,7 @@ use log::{debug, error, trace, warn};
 
 use crate::{
     common::{hid_usage::HidUsage, modifier::ModifierRole},
-    daemon::{
+    keymap_core::{
         engine::{Decision, MappingEngine, fmt_native_key, output_held_mask},
         mapping_cache::NativeKey,
     },
@@ -971,7 +971,7 @@ mod tests {
 
         use parking_lot::RwLock;
 
-        use crate::daemon::{state::Lookup, test_lookup::TestLookup};
+        use crate::keymap_core::{lookup::Lookup, test_lookup::TestLookup};
 
         // Grab-time held keys: Return (28), LeftCtrl (29), and 729, which
         // the translation table cannot resolve.

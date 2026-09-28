@@ -18,9 +18,9 @@ use keymapper::{
         },
     },
     daemon::{
-        control, logging, mapping_cache::RuntimeLookupCache,
-        state::RuntimeState, watcher::start_config_watcher,
+        control, logging, state::RuntimeState, watcher::start_config_watcher,
     },
+    keymap_core::mapping_cache::RuntimeLookupCache,
     platform::{list_keyboards, start_mapping},
 };
 use log::{error, info, trace};

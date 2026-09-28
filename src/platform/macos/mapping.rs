@@ -69,10 +69,10 @@ use crate::{
         keyboard::KeyboardSpecifier,
         modifier::ModifierRole,
     },
-    daemon::{
+    keymap_core::{
         engine::{Decision, MappingEngine, fmt_native_key},
+        lookup::Lookup,
         mapping_cache::NativeKey,
-        state::Lookup,
     },
 };
 

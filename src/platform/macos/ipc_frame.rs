@@ -32,7 +32,9 @@ use std::io::{ErrorKind, Read};
 
 use thiserror::Error;
 
-use crate::{common::hid_usage::HidUsage, daemon::mapping_cache::NativeKey};
+use crate::{
+    common::hid_usage::HidUsage, keymap_core::mapping_cache::NativeKey,
+};
 
 /// The only supported frame version.
 const FRAME_VERSION: u8 = 1;

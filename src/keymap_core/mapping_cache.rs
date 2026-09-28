@@ -12,9 +12,11 @@ use std::{collections::HashSet, path::Path};
 use indexmap::IndexMap;
 use thiserror::Error;
 
-use super::config_io::{ConfigReadError, read_config_content};
 use crate::common::{
-    config::AppConfig, hid_usage::HidUsage, keyboard::KeyboardSpecifier,
+    config::AppConfig,
+    config_io::{ConfigReadError, read_config_content},
+    hid_usage::HidUsage,
+    keyboard::KeyboardSpecifier,
 };
 
 // ---------------------------------------------------------------------------

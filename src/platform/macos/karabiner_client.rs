@@ -765,7 +765,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        common::hid_usage::HidUsage, daemon::mapping_cache::NativeKey,
+        common::hid_usage::HidUsage, keymap_core::mapping_cache::NativeKey,
     };
 
     /// The expected `virtual_hid_keyboard_initialize` frame.  The Phase-0

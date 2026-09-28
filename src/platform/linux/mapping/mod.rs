@@ -54,7 +54,7 @@ use crate::{
     common::keyboard::{
         KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
     },
-    daemon::{engine::MappingEngine, state::Lookup},
+    keymap_core::{engine::MappingEngine, lookup::Lookup},
 };
 
 /// Name of the daemon's own uinput output device.

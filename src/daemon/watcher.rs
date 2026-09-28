@@ -22,9 +22,9 @@ use notify::{
 };
 use parking_lot::RwLock;
 
-use super::{
-    config_io::read_config_content, mapping_cache::RuntimeLookupCache,
-    state::MutableLookup,
+use crate::{
+    common::config_io::read_config_content,
+    keymap_core::{lookup::MutableLookup, mapping_cache::RuntimeLookupCache},
 };
 
 /// Debounce interval: wait this long after the last filesystem event before

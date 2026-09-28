@@ -17,7 +17,7 @@
 
 use super::karabiner_client::KarabinerClient;
 use crate::{
-    common::hid_usage::PAGE_KEYBOARD, daemon::mapping_cache::NativeKey,
+    common::hid_usage::PAGE_KEYBOARD, keymap_core::mapping_cache::NativeKey,
 };
 
 /// Emit a single mapped-output key through the Karabiner virtual keyboard.

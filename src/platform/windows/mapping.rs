@@ -90,10 +90,10 @@ use crate::{
         hid_usage::HidUsage, keyboard::KeyboardSpecifier,
         modifier::ModifierRole,
     },
-    daemon::{
+    keymap_core::{
         engine::{Decision, MappingEngine, fmt_native_key, output_held_mask},
+        lookup::Lookup,
         mapping_cache::NativeKey,
-        state::Lookup,
     },
 };
 
@@ -259,7 +259,8 @@ unsafe fn token_is_elevated(token: HANDLE) -> bool {
 /// This is the modifier source for the standalone Consumer-Page path in the
 /// raw-input worker (`raw_worker`), which never receives a low-level keyboard
 /// hook event and so cannot consult the engine's authoritative
-/// `modifier_state` (the `MappingEngine` in `daemon::engine` builds that from
+/// `modifier_state` (the `MappingEngine` in `keymap_core::engine` builds
+/// that from
 /// hook events).
 ///
 /// Invariant: the engine's `modifier_state` is authoritative for keys seen

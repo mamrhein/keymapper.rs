@@ -10,6 +10,7 @@
 pub mod cli;
 pub mod common;
 pub mod daemon;
+pub mod keymap_core;
 pub mod platform;
 
 // Re-export the HID-centric key identity so downstream code (and tests)

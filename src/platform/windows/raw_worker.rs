@@ -42,7 +42,7 @@ use crate::platform::windows::mapping::queue_emission;
 // remaining imports are used unconditionally.
 use crate::{
     common::hid_usage::{HidUsage, PAGE_CONSUMER},
-    daemon::{mapping_cache::NativeKey, state::Lookup},
+    keymap_core::{lookup::Lookup, mapping_cache::NativeKey},
     platform::windows::{
         device_match::{device_cache, evict, push_event},
         mapping::extract_modifier_bits,
@@ -166,7 +166,7 @@ fn resolve_consumer_outputs(
 mod tests {
     use super::*;
     use crate::{
-        common::hid_usage::HidUsage, daemon::mapping_cache::NativeKey,
+        common::hid_usage::HidUsage, keymap_core::mapping_cache::NativeKey,
         platform::windows::device_match::match_usage,
     };
 

@@ -27,8 +27,14 @@
 //!   `common::config_path` when running as root)
 //! - windows: additionally `Key`
 //!
-//! Layering rule: the `test-util` dev-dependency crate and `cli` may
-//! depend only on this
+//! Layering rule: the dependency arrows run
+//! `platform -> keymap_core -> common`. The platform layer drives its
+//! capture path through the cross-platform mapping core
+//! ([`crate::keymap_core`]) and the shared [`common`](crate::common)
+//! types; it must never depend on [`daemon`](crate::daemon) (the daemon
+//! orchestrates the platform backends, not the other way around).
+//!
+//! The `test-util` dev-dependency crate and `cli` may depend only on this
 //! surface, never on the `pub(crate)` internals of the platform
 //! module. Anything not re-exported here is private implementation
 //! detail and may change without notice.

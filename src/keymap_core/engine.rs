@@ -31,7 +31,7 @@
 //! an evdev code on Linux, a `(scan, ext)` pair on Windows, a HID usage id on
 //! macOS). It depends only on the shared [`HidUsage`], [`NativeKey`], and
 //! [`Lookup`] types, so it is unit-testable in isolation with the
-//! [`TestLookup`](crate::daemon::test_lookup::TestLookup) harness.
+//! [`TestLookup`](crate::keymap_core::test_lookup::TestLookup) harness.
 //!
 //! [`MappingEngine::decide`] returns a [`Decision`] that the platform's
 //! emission layer interprets according to its own architecture. The `release`
@@ -55,9 +55,9 @@ use parking_lot::RwLock;
 
 use crate::{
     common::{config::KeyEvent, hid_usage::HidUsage, modifier::ModifierRole},
-    daemon::{
+    keymap_core::{
+        lookup::Lookup,
         mapping_cache::{NativeKey, compile_modifier_bits},
-        state::Lookup,
     },
 };
 
@@ -561,7 +561,7 @@ pub fn fmt_key_event(event: &KeyEvent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::test_lookup::TestLookup;
+    use crate::keymap_core::test_lookup::TestLookup;
 
     // -----------------------------------------------------------------------
     // Key-fate tracking tests (tracker level)

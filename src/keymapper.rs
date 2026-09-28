@@ -15,12 +15,13 @@ use keymapper::{
     common::{
         app_identity,
         config::{AppConfig, KeyEvent, RuleGroup},
+        config_io::read_config_content,
         config_path::{
             default_config_path, find_config_path, find_config_path_strict,
         },
         keyboard::KeyboardSpecifier,
     },
-    daemon::{config_io::read_config_content, control, logging::LevelFilter},
+    daemon::{control, logging::LevelFilter},
 };
 
 /// CLI utility for managing the keymapperd configuration.
