@@ -9,14 +9,22 @@
 #
 # One-time prerequisites:
 #   - Fork microsoft/winget-pkgs as mamrhein/winget-pkgs.
-#   - Create a personal access token with write access to the fork and add
-#     it as the WINGET_PKGS_TOKEN repository secret.
+#   - Create a classic personal access token with the `repo` scope and add it
+#     as the WINGET_PKGS_TOKEN repository secret. A fine-grained PAT cannot
+#     be used here: it never covers microsoft/winget-pkgs (a repository the
+#     account does not own), so `gh pr create` fails against the target repo
+#     with "Resource not accessible by personal access token".
 # ---------------------------------------------------------------------------
 
 name: winget-pkgs
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to subscribe (e.g. 0.3.2, without the leading v)."
+        required: true
+        type: string
 
   workflow_run:
     workflows: ["release"]
@@ -37,7 +45,10 @@ jobs:
   # Add the winget manifest when the release workflow succeeds
   # -----------------------------------------------------------------------
   update-manifest:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Skip only when the release workflow failed; a manual dispatch has no
+    # workflow_run context, so evaluating its conclusion here would always
+    # skip the job.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     # `winget validate` is only available on Windows.
     runs-on: windows-latest
 
@@ -61,6 +72,10 @@ jobs:
         with:
           repository: ${{ env.WINGET_PKGS_FORK_OWNER }}/${{ env.WINGET_PKGS_FORK_REPO }}
           token: ${{ secrets.WINGET_PKGS_TOKEN }}
+          # The fork's default branch is master, like the upstream default
+          # branch; pin it so the checkout and the branch cut below start
+          # from a branch that actually exists in the fork.
+          ref: master
           fetch-depth: 1
 
       - name: Determine version
@@ -69,9 +84,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # Extract the tag name from the triggering workflow run
-          TAG=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
-            --jq '.head_branch')
+          # Extract the tag name from the triggering workflow run; a manual
+          # dispatch has no triggering run, so take the version from the
+          # workflow_dispatch input instead.
+          if [[ -n "${{ github.event.workflow_run.id }}" ]]; then
+            TAG=$(gh api repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }} \
+              --jq '.head_branch')
+          else
+            TAG="v${{ github.event.inputs.version }}"
+          fi
           if [[ "$TAG" != v* ]]; then
             echo "Not a version tag ($TAG), skipping." >&2
             exit 1
@@ -101,14 +122,13 @@ jobs:
           $manifestDir = "manifests/a/adrhinum/keymapper/$env:VERSION"
           New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
 
-          # Fetch the templates from the keymapper repository at the release
-          # tag (the repo is the source of truth, mirroring homebrew-tap),
-          # then substitute the version and sha256 placeholders.
-          # Retry each fetch because a freshly pushed tag may not be
-          # resolvable by the contents API immediately, even after the ref
-          # itself is visible; a deleted and re-pushed tag can briefly expose
-          # the old tree as well.
-          function Get-ContentAtRef([string]$url) {
+          # Fetch the templates from the keymapper repository and substitute
+          # the version and sha256 placeholders. The default branch is the
+          # source of truth (mirroring homebrew-tap), so no ref is pinned:
+          # a release tag points at the commit that created the release and
+          # would serve stale template content forever after.
+          # Retry each fetch to ride out transient api.github.com failures.
+          function Get-ContentFromDefaultBranch([string]$url) {
             for ($attempt = 1; $attempt -le 5; $attempt++) {
               # On failure, `gh api --jq` prints the error JSON to stdout,
               # so check the exit code before decoding to avoid a misleading
@@ -117,12 +137,12 @@ jobs:
               if ($LASTEXITCODE -eq 0) { return $content }
               Start-Sleep -Seconds 30
             }
-            throw "Failed to fetch $url after 5 attempts (gh exit code $LASTEXITCODE). The tag may be missing or the file may not exist at that ref."
+            throw "Failed to fetch $url after 5 attempts (gh exit code $LASTEXITCODE). The file may not exist on the default branch."
           }
 
           foreach ($name in @("adrhinum.keymapper.yaml", "adrhinum.keymapper.installer.yaml", "adrhinum.keymapper.locale.en-US.yaml")) {
             $path = Join-Path $manifestDir $name
-            $content = Get-ContentAtRef "repos/${{ github.repository }}/contents/winget/$name?ref=v$env:VERSION"
+            $content = Get-ContentFromDefaultBranch "repos/${{ github.repository }}/contents/winget/$name"
             [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($content)) |
               Set-Content -Path $path -Encoding utf8 -NoNewline
             (Get-Content $path -Raw) `
@@ -145,13 +165,26 @@ jobs:
         shell: bash
         run: |
           BRANCH="keymapper-${VERSION}"
+          # The runner has no git identity configured, which makes git commit
+          # abort with "Author identity unknown"; set the actions-bot user so
+          # the commit below has a valid author and the PR opens.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
           git add "manifests/a/adrhinum/keymapper/${VERSION}"
           git diff --cached --quiet || git commit -m "chore: add keymapper ${VERSION}"
-          git push origin "$BRANCH" --force-with-lease
+          # --force, not --force-with-lease: the shallow checkout never fetched
+          # the remote branch, so a lease would always see "stale info" if an
+          # earlier failed run had already pushed this branch. The branch is
+          # bot-owned and regenerated idempotently, so overwriting is safe.
+          git push origin "$BRANCH" --force
+          # winget-pkgs (and the fork) have no `main`; the default branch is
+          # master. With --base main the API saw a non-existent base ref and
+          # rejected the createPullRequest call ("Base ref must be a branch",
+          # "Head/Base sha can't be blank").
           gh pr create \
             --repo ${{ env.WINGET_TARGET_REPO }} \
             --title "chore: add keymapper ${VERSION}" \
             --body "Automated pull request to add the winget manifest for keymapper ${VERSION}." \
-            --base main \
+            --base master \
             --head "${{ env.WINGET_PKGS_FORK_OWNER }}:${BRANCH}"

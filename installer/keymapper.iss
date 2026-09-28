@@ -83,7 +83,7 @@ begin
   end;
   // Normalize trailing separator so that both "C:\dir" and "C:\dir\" in
   // either Param or the stored PATH are recognized as the same entry.
-  Param := ExcludeTrailingBackslash(Param);
+  Param := RemoveBackslash(Param);
   Result := (Pos(';' + UpperCase(Param) + ';', ';' + UpperCase(OrigPath) + ';') = 0) and
             (Pos(';' + UpperCase(Param) + '\;', ';' + UpperCase(OrigPath) + ';') = 0);
 end;
@@ -116,7 +116,7 @@ begin
   if RegQueryStringValue(HKEY_CURRENT_USER, EnvironmentKey, 'Path', OrigPath) then
   begin
     // Normalize trailing separator so both "C:\dir" and "C:\dir\" match.
-    PathToRemove := ExcludeTrailingBackslash(PathToRemove);
+    PathToRemove := RemoveBackslash(PathToRemove);
     // Try exact match first, then trailing-backslash variant in the stored PATH
     P := Pos(';' + UpperCase(PathToRemove) + ';', ';' + UpperCase(OrigPath) + ';');
     DelLen := Length(PathToRemove) + 1;

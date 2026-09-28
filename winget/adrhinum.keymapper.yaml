@@ -1,15 +1,7 @@
-# ---------------------------------------------------------------------------
-# winget version manifest template for keymapper.
-#
-# The winget-pkgs workflow copies this file into a fork of
-# microsoft/winget-pkgs at manifests/a/adrhinum/keymapper/<version>/ and
-# substitutes the @VERSION@ placeholder.  This file is the source of truth;
-# do not edit the generated copy in the fork.
-# ---------------------------------------------------------------------------
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.10.0.schema.json
 
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.version.1.12.0.schema.json
 PackageIdentifier: adrhinum.keymapper
 PackageVersion: "@VERSION@"
 DefaultLocale: en-US
 ManifestType: version
-ManifestVersion: 1.12.0
+ManifestVersion: 1.10.0

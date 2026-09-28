@@ -1,6 +1,10 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.3.3  Fixed winget script and manifest files
+
+   0.3.2  Fixed Windows installer script.
+
    0.3.1  Fixed focused-app detection on Linux when started by systemd.
           serde_yaml (deprecated) replaced with serde_saphyr.
           E2E key injector extracted into a dev-only test-util crate.
