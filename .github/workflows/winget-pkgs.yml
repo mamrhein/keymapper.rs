@@ -72,6 +72,10 @@ jobs:
         with:
           repository: ${{ env.WINGET_PKGS_FORK_OWNER }}/${{ env.WINGET_PKGS_FORK_REPO }}
           token: ${{ secrets.WINGET_PKGS_TOKEN }}
+          # The fork's default branch is master, like the upstream default
+          # branch; pin it so the checkout and the branch cut below start
+          # from a branch that actually exists in the fork.
+          ref: master
           fetch-depth: 1
 
       - name: Determine version
@@ -174,9 +178,13 @@ jobs:
           # earlier failed run had already pushed this branch. The branch is
           # bot-owned and regenerated idempotently, so overwriting is safe.
           git push origin "$BRANCH" --force
+          # winget-pkgs (and the fork) have no `main`; the default branch is
+          # master. With --base main the API saw a non-existent base ref and
+          # rejected the createPullRequest call ("Base ref must be a branch",
+          # "Head/Base sha can't be blank").
           gh pr create \
             --repo ${{ env.WINGET_TARGET_REPO }} \
             --title "chore: add keymapper ${VERSION}" \
             --body "Automated pull request to add the winget manifest for keymapper ${VERSION}." \
-            --base main \
+            --base master \
             --head "${{ env.WINGET_PKGS_FORK_OWNER }}:${BRANCH}"
