@@ -59,6 +59,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // a few milliseconds, accepted in exchange for a uniform platform
     // signature — threading the already-opened devices through would require
     // a platform-specific `start_mapping`.
+    //
+    // `unwrap_or_default()` is an accepted trade-off, not an oversight.  The
+    // empty / `Err` semantics of `list_keyboards` diverge per platform (Linux
+    // and Windows return `Err` on an empty enumeration; macOS returns a
+    // placeholder), and a failed enumeration must not abort daemon startup, so
+    // it degrades to an empty registry and the mapping loop simply stays
+    // inactive.  Surfacing a failed enumeration at the right log level per
+    // platform is a behavior change tracked for Phase 3 (architecture review
+    // F8/F8b), out of scope for this doc-only pass.
     let all_keyboards = list_keyboards().unwrap_or_default();
 
     // Determine which keyboards to actually grab based on the global filter.

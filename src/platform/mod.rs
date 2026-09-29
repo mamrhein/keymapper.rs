@@ -27,6 +27,14 @@
 //!   `common::config_path` when running as root)
 //! - windows: additionally `Key`
 //!
+//! A uniform signature is not a uniform-behavior guarantee.  `list_keyboards`
+//! and `start_mapping` share one signature across platforms, but their
+//! behavior diverges: `keyboard_filter` is honored on Linux, ignored on macOS
+//! (lookups pass `device_id = None`), and treated as a global no-op on
+//! Windows; and the empty/no-hardware result differs per platform (Linux and
+//! Windows return `Err`, macOS returns a placeholder).  Each platform's own
+//! `list_keyboards`/`start_mapping` docs are the authority on these rules.
+//!
 //! On top of the capture/injection backends, this module also exports
 //! [`app_identity`] — the active-application query used by the daemon's
 //! rule matching and by `keymapper appnames`.  It is OS-specific code, so
