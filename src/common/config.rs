@@ -189,6 +189,16 @@ impl MappingTable {
     pub fn insert(&mut self, trigger: KeyEvent, outputs: Vec<KeyEvent>) {
         self.0.insert(trigger, outputs);
     }
+
+    /// Look up the outputs registered for *trigger*.
+    pub fn get(&self, trigger: &KeyEvent) -> Option<&Vec<KeyEvent>> {
+        self.0.get(trigger)
+    }
+
+    /// Whether a mapping is registered for *trigger*.
+    pub fn contains_key(&self, trigger: &KeyEvent) -> bool {
+        self.0.contains_key(trigger)
+    }
 }
 
 /// Custom visitor that deserializes a YAML mapping into an ordered

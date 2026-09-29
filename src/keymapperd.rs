@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use keymapper::{
     common::{
-        app_identity,
         config_path::find_config_path_strict,
         keyboard::{
             KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
@@ -21,7 +20,7 @@ use keymapper::{
         control, logging, state::RuntimeState, watcher::start_config_watcher,
     },
     keymap_core::mapping_cache::RuntimeLookupCache,
-    platform::{list_keyboards, start_mapping},
+    platform::{app_identity, list_keyboards, start_mapping},
 };
 use log::{error, info, trace};
 use parking_lot::RwLock;

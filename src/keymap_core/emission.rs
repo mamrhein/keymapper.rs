@@ -83,6 +83,10 @@ pub enum ConsumedReleaseFate {
     /// Forwarded events never reach the output device (macOS): the physical
     /// release is the application's only source of truth, so it must pass
     /// through.
+    //
+    // Constructed only by the macOS backend, so it is never built on the
+    // other hosts where this `pub(crate)` enum compiles.
+    #[allow(dead_code)]
     PassThrough,
 }
 

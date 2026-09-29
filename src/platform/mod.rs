@@ -27,6 +27,12 @@
 //!   `common::config_path` when running as root)
 //! - windows: additionally `Key`
 //!
+//! On top of the capture/injection backends, this module also exports
+//! [`app_identity`] — the active-application query used by the daemon's
+//! rule matching and by `keymapper appnames`.  It is OS-specific code, so
+//! it is homed here rather than in [`common`](crate::common); this keeps
+//! `platform` the single home for platform-specific implementation.
+//!
 //! Layering rule: the dependency arrows run
 //! `platform -> keymap_core -> common`. The platform layer drives its
 //! capture path through the cross-platform mapping core
@@ -38,6 +44,13 @@
 //! surface, never on the `pub(crate)` internals of the platform
 //! module. Anything not re-exported here is private implementation
 //! detail and may change without notice.
+
+/// Application-identity queries (active app name, visible-app listing).
+///
+/// A platform facet rather than a capture/injection backend: it exposes a
+/// two-function interface over per-OS implementations and is consumed by
+/// the daemon (`keymapperd`) and the CLI (`keymapper appnames`).
+pub mod app_identity;
 
 #[cfg(target_os = "linux")]
 mod linux;
