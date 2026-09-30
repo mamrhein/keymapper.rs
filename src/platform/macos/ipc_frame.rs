@@ -146,6 +146,10 @@ pub fn encode(keys: &[NativeKey]) -> Vec<u8> {
 }
 
 /// Decode a complete frame buffer produced by [`encode`].
+//
+// Test-only helper: the production readers consume `decode_stream`, which
+// reads the frame header from the stream itself.
+#[cfg(test)]
 pub fn decode(buf: &[u8]) -> Result<Vec<NativeKey>, IpcFrameError> {
     let payload =
         frame::parse(buf, MAX_PAYLOAD_LEN).map_err(IpcFrameError::from)?;
