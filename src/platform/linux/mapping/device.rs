@@ -27,12 +27,17 @@ use std::{
 };
 
 use evdev::{Device, EventType, InputEvent, MiscCode, uinput::VirtualDevice};
-use log::{debug, error, trace, warn};
+use log::{debug, error, warn};
 
 use crate::{
     common::{hid_usage::HidUsage, modifier::ModifierRole},
-    daemon::{
-        engine::{Decision, MappingEngine, fmt_native_key, output_held_mask},
+    keymap_core::{
+        emission::{
+            ConsumedReleaseFate, EmitAction as PlanAction, InputFate,
+            emission_plan,
+        },
+        engine::MappingEngine,
+        logfmt::{self, Direction},
         mapping_cache::NativeKey,
     },
     platform::linux::hid_translate::{
@@ -266,84 +271,58 @@ pub(super) fn process_device_events(
         // (a key-down and a key-up), which share the same code and usage.
         // Without it the down and up are indistinguishable in the log and
         // look like the key was received twice.
-        let action = match value {
-            0 => "up",
-            1 => "down",
-            _ => "repeat",
+        let dir = match value {
+            0 => Direction::Up,
+            1 => Direction::Down,
+            _ => Direction::Repeat,
         };
-        // Both events share the same line, but the down (and repeats, which
-        // are downs for the engine) is the informative one and stays at
-        // `debug`; the key-up is less useful and is logged at `trace` so it
-        // stays out of the default debug output while remaining available.
-        if value == 0 {
-            trace!("recv {} {code} {action} -> {usage}", managed.path);
-        } else {
-            debug!("recv {} {code} {action} -> {usage}", managed.path);
-        }
+        // `recv` fires for every resolvable key; the wording and level are
+        // owned by `logfmt`, so the e2e debug-log grammar has one producing
+        // implementation.  The native field keeps the device path and key
+        // code.
+        logfmt::log_recv(format_args!("{} {code}", managed.path), dir, usage);
 
         // The engine decides the event's fate from its own bookkeeping
         // (pressed/swallowed keys, forwarded/consumed modifier masks, held
-        // output modifiers); this layer only executes the decision.  A repeat
-        // (value 2) is a key-down for this purpose: the engine deduplicates
-        // it against its pressed set.
-        match managed.engine.decide(
+        // output modifiers); the shared emission plan turns that decision into
+        // the ordered output actions and this layer only queues them for
+        // execution outside the lock.  A repeat (value 2) is a key-down for
+        // this purpose: the engine deduplicates it against its pressed set.
+        let decision = managed.engine.decide(
             code,
             usage,
             value != 0,
             Some(&managed.path),
             true,
-        ) {
+        );
+        let plan = emission_plan(&decision, ConsumedReleaseFate::Swallow);
+        match plan.input {
             // Unmapped (or the repeat of an unmapped key): forward the raw
-            // event to the virtual device.
-            Decision::Pass => {
-                if value == 0 {
-                    trace!("pass {} {code} {action} -> {usage}", managed.path);
-                } else {
-                    debug!("pass {} {code} {action} -> {usage}", managed.path);
-                }
+            // event to the virtual device, logged as a pass.
+            InputFate::Forward => {
+                logfmt::log_pass(
+                    format_args!("{} {code}", managed.path),
+                    dir,
+                    usage,
+                );
                 actions.push(EmitAction::Forward { code, value });
             }
-            // Mapped: release the trigger's modifiers first (clean tap),
-            // then emit the outputs.  An output whose base is itself a
-            // modifier key is held down on the virtual keyboard (not tapped)
-            // so the remapped modifier stays active for subsequent key
-            // presses; the matching release is emitted when the physical
-            // key-up arrives.
-            Decision::Emit { release, outputs } => {
-                if release != 0 {
-                    actions.push(EmitAction::ReleaseConsumed {
-                        consumed: release,
-                    });
-                }
-                for native_key in &outputs {
-                    debug!("emit {}", fmt_native_key(native_key));
-                    if output_held_mask(native_key).is_some() {
-                        actions.push(EmitAction::Hold {
-                            native_key: native_key.clone(),
-                        });
-                    } else {
-                        actions.push(EmitAction::Tap {
-                            native_key: native_key.clone(),
-                        });
-                    }
-                }
+            // A mapped key-up, or the physical release of a consumed modifier:
+            // swallow the event, logged as a swallow, releasing any held
+            // output bits the plan names.
+            InputFate::Swallow => {
+                logfmt::log_swal(
+                    format_args!("{} {code}", managed.path),
+                    dir,
+                    usage,
+                );
+                queue_plan_actions(&mut actions, plan.actions);
             }
-            // A mapped key-up: swallow the event and, for a remapped modifier
-            // key, release the output bits that have been held since the
-            // key-down.
-            Decision::Swallow { release } => {
-                trace!("swal {} {code} {action} -> {usage}", managed.path);
-                if release != 0 {
-                    actions.push(EmitAction::ReleaseConsumed {
-                        consumed: release,
-                    });
-                }
-            }
-            // A consumed modifier release: the virtual device already released
-            // the modifier when the trigger fired, so swallow the physical
-            // release.
-            Decision::ConsumedRelease => {
-                trace!("swal {} {code} {action} -> {usage}", managed.path);
+            // A mapped key: the input is swallowed silently (the `emit` lines
+            // stand for it) and its outputs — behind any clean-tap release —
+            // are queued for emission.
+            InputFate::Silent => {
+                queue_plan_actions(&mut actions, plan.actions)
             }
         }
     }
@@ -382,6 +361,25 @@ pub(super) fn emit_actions(
                 }
             }
         }
+    }
+}
+
+/// Translate the shared emission plan's actions onto this device's deferred
+/// execution actions.
+///
+/// The plan owns the `Decision` semantics (release-first, hold-vs-tap); this
+/// is a 1:1 type mapping onto the deferred queue executed later by
+/// [`emit_actions`], keeping the ordering intact.
+fn queue_plan_actions(actions: &mut Vec<EmitAction>, plan: Vec<PlanAction>) {
+    actions.reserve(plan.len());
+    for action in plan {
+        actions.push(match action {
+            PlanAction::ReleaseConsumed(consumed) => {
+                EmitAction::ReleaseConsumed { consumed }
+            }
+            PlanAction::Tap(native_key) => EmitAction::Tap { native_key },
+            PlanAction::Hold(native_key) => EmitAction::Hold { native_key },
+        });
     }
 }
 
@@ -927,6 +925,9 @@ fn release_consumed_modifiers(device: &mut VirtualDevice, consumed: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The event-processing layer matches on the plan, but these tests
+    // drive the engine directly and assert on its raw `Decision`s.
+    use crate::keymap_core::engine::Decision;
 
     // -----------------------------------------------------------------------
     // Initial-state bitmap parsing
@@ -971,7 +972,7 @@ mod tests {
 
         use parking_lot::RwLock;
 
-        use crate::daemon::{state::Lookup, test_lookup::TestLookup};
+        use crate::keymap_core::{lookup::Lookup, test_lookup::TestLookup};
 
         // Grab-time held keys: Return (28), LeftCtrl (29), and 729, which
         // the translation table cannot resolve.

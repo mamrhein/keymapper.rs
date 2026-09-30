@@ -31,10 +31,12 @@
 //! an evdev code on Linux, a `(scan, ext)` pair on Windows, a HID usage id on
 //! macOS). It depends only on the shared [`HidUsage`], [`NativeKey`], and
 //! [`Lookup`] types, so it is unit-testable in isolation with the
-//! [`TestLookup`](crate::daemon::test_lookup::TestLookup) harness.
+//! [`TestLookup`](crate::keymap_core::test_lookup::TestLookup) harness.
 //!
-//! [`MappingEngine::decide`] returns a [`Decision`] that the platform's
-//! emission layer interprets according to its own architecture. The `release`
+//! [`MappingEngine::decide`] returns a [`Decision`] that the shared
+//! [`emission`](crate::keymap_core::emission) layer turns into an ordered
+//! action list, which each platform then carries out with its own primitives.
+//! The `release`
 //! mask on [`Decision::Emit`] and [`Decision::Swallow`] is the clean-tap /
 //! held-output mechanism; a platform whose output device does not need it
 //! (macOS, where the virtual keyboard's modifier state is isolated from
@@ -50,15 +52,11 @@ use std::{
     sync::Arc,
 };
 
-use log::debug;
 use parking_lot::RwLock;
 
 use crate::{
-    common::{config::KeyEvent, hid_usage::HidUsage, modifier::ModifierRole},
-    daemon::{
-        mapping_cache::{NativeKey, compile_modifier_bits},
-        state::Lookup,
-    },
+    common::hid_usage::HidUsage,
+    keymap_core::{logfmt, lookup::Lookup, mapping_cache::NativeKey},
 };
 
 /// The outcome of deciding how to handle a single key event.
@@ -398,11 +396,7 @@ impl<K: Ord + Copy> MappingEngine<K> {
             // Mapped: remember the key was mapped so its release is swallowed,
             // and emit the mapped outputs via the emitter.
             Some(outputs) => {
-                debug!(
-                    "map {} -> [{}]",
-                    fmt_modifiers_and_key(lookup_modifiers, usage),
-                    fmt_native_keys(&outputs)
-                );
+                logfmt::log_map(lookup_modifiers, usage, &outputs);
                 self.tracker.swallowed_keys.insert(key);
 
                 // The trigger's modifiers were forwarded when pressed (or are
@@ -500,68 +494,13 @@ pub(crate) fn output_held_mask(native_key: &NativeKey) -> Option<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Debug formatting
-// ---------------------------------------------------------------------------
-
-/// The config canonical names of the modifier bits set in *mask*, in bit
-/// order. Empty when no modifier is held.
-fn modifier_names(mask: u8) -> Vec<&'static str> {
-    (0..8u8)
-        .filter(|&bit| (mask >> bit) & 1 == 1)
-        .filter_map(|bit| {
-            let role = ModifierRole::try_from_bit(bit)?;
-            HidUsage::keyboard(role.hid_id()).map(HidUsage::as_str)
-        })
-        .collect()
-}
-
-/// Render a modifier mask and a HID usage for debug logging: the held modifier
-/// names and the key's canonical name joined with `+`
-/// (e.g. `LeftControl+LeftShift+A`, or just `A` when no modifier is held).
-pub(crate) fn fmt_modifiers_and_key(mask: u8, key: HidUsage) -> String {
-    let mut parts = modifier_names(mask);
-    parts.push(key.as_str());
-    parts.join("+")
-}
-
-/// Render a [`NativeKey`] for debug logging: the held modifier names joined
-/// with `+` to the base key's canonical name (e.g. `LeftControl+LeftShift+A`,
-/// or just `A` when no modifier is held).
-#[inline(always)]
-pub(crate) fn fmt_native_key(key: &NativeKey) -> String {
-    fmt_modifiers_and_key(key.modifiers, key.usage)
-}
-
-/// Render a slice of [`NativeKey`]s as a comma-separated list for debug
-/// logging, reusing [`fmt_native_key`] so every site reads uniformly.
-pub(crate) fn fmt_native_keys(keys: &[NativeKey]) -> String {
-    keys.iter()
-        .map(fmt_native_key)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Render an output [`KeyEvent`] exactly as the daemon logs it in an `emit`
-/// line: compile its held modifiers to a bitmask and format the resulting
-/// [`NativeKey`] (e.g. `LeftCommand+A`, or just `A` when no modifier is held).
-///
-/// Public so the e2e harness can build its expected emit sequence from the
-/// config and compare it, string for string, against the daemon's log.
-pub fn fmt_key_event(event: &KeyEvent) -> String {
-    fmt_native_key(&NativeKey {
-        modifiers: compile_modifier_bits(&event.modifiers),
-        usage: event.base,
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::daemon::test_lookup::TestLookup;
+    use crate::keymap_core::test_lookup::TestLookup;
 
     // -----------------------------------------------------------------------
     // Key-fate tracking tests (tracker level)
@@ -1316,42 +1255,51 @@ mod tests {
         assert_eq!(down(&mut b, HidUsage::A), Decision::Pass);
     }
 
-    // -----------------------------------------------------------------------
-    // Debug-format tests
-    // -----------------------------------------------------------------------
-
-    /// The shared formatters render a modifier mask and a [`NativeKey`] in
-    /// the uniform `mods+Base` shape the e2e harness reads from the debug
-    /// log.
     #[test]
-    fn formatters_render_modifiers_and_keys() {
+    fn chord_output_carries_its_modifier_bit() {
+        // A bare modifier trigger whose output is itself a chord (`Cmd+A`):
+        // the engine emits a single 'A' key carrying the Command bit (bit 3),
+        // as a clean tap (release mask 0, since the bare CapsLock trigger
+        // forwards no modifiers of its own). Re-expressed from the old
+        // `simulate_mapping` seam in `daemon::state`.
+        let mut e = engine("- mappings:\n    CapsLock: Cmd+A");
         assert_eq!(
-            fmt_native_key(&NativeKey {
-                modifiers: 0,
-                usage: HidUsage::A
-            }),
-            "A"
+            down(&mut e, HidUsage::CapsLock),
+            Decision::Emit {
+                release: 0,
+                outputs: vec![NativeKey {
+                    modifiers: 1 << 3,
+                    usage: HidUsage::A,
+                }],
+            }
         );
         assert_eq!(
-            fmt_native_key(&NativeKey {
-                modifiers: 0b0000_0011,
-                usage: HidUsage::A
-            }),
-            "LeftControl+LeftShift+A"
-        );
-
-        assert_eq!(
-            fmt_native_keys(&[
-                NativeKey {
-                    modifiers: 0,
-                    usage: HidUsage::A
-                },
-                NativeKey {
-                    modifiers: 0b0000_0001,
-                    usage: HidUsage::A
-                }
-            ]),
-            "A, LeftControl+A"
+            up(&mut e, HidUsage::CapsLock),
+            Decision::Swallow { release: 0 }
         );
     }
+
+    #[test]
+    fn list_output_emits_each_key_in_order() {
+        // A list output (`[LeftControl, A]`) is emitted as two independent
+        // keys, in order. Re-expressed from the old `simulate_mapping` seam
+        // in `daemon::state`.
+        // The leading `LeftControl` in the list is a held modifier base, so
+        // the trigger's key-up releases it (release mask 1); the `A` is a
+        // clean tap emitted between them.
+        let mut e = engine("- mappings:\n    CapsLock: [LeftControl, A]");
+        assert_eq!(
+            down(&mut e, HidUsage::CapsLock),
+            Decision::Emit {
+                release: 0,
+                outputs: vec![nk(HidUsage::LeftControl), nk(HidUsage::A)],
+            }
+        );
+        assert_eq!(
+            up(&mut e, HidUsage::CapsLock),
+            Decision::Swallow { release: 1 }
+        );
+    }
+
+    // Debug-formatting coverage lives with the formatters in `logfmt`.
 }

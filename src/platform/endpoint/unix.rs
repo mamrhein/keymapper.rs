@@ -24,6 +24,9 @@
 //! The daemon therefore refuses to bind unless the socket's parent
 //! directory is owned by the current user, and creates it `0700` when it is
 //! missing (see [`prepare_socket_dir`]).
+//!
+//! The transport runs a daemon-supplied [`ConnectionHandler`] once per
+//! accepted, authorized connection; it never names the protocol above it.
 
 use std::{
     fs::Permissions,
@@ -37,7 +40,17 @@ use std::{
 
 use log::{debug, info, warn};
 
-use super::{IoStream, handle_connection};
+use super::{ConnectionHandler, Endpoint, IoStream};
+
+/// Peer-credential lookup, per OS: `SO_PEERCRED` on Linux, `getpeereid(2)`
+/// on macOS. Kept in separate files because the socket option and its struct
+/// differ per OS.
+#[cfg(target_os = "macos")]
+#[path = "peer_uid_macos.rs"]
+mod peer_uid;
+#[cfg(not(target_os = "macos"))]
+#[path = "peer_uid_linux.rs"]
+mod peer_uid;
 
 /// The application name, used in the fallback endpoint directory.
 const APP_NAME: &str = "keymapperd";
@@ -54,13 +67,16 @@ const SOCKET_NAME: &str = "keymapperd.sock";
 /// completes the exchange in milliseconds.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The unix control endpoint.
+pub(crate) struct UnixEndpoint;
+
 /// The control endpoint path.
 ///
 /// `$XDG_RUNTIME_DIR/keymapperd.sock` when the runtime dir is set (the normal
 /// case under a per-user systemd session); otherwise a per-user cache
 /// directory. Both the daemon and the CLI resolve this the same way from the
 /// same environment, so they always agree.
-pub(super) fn socket_path() -> PathBuf {
+fn socket_path() -> PathBuf {
     if let Some(rd) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(rd).join(SOCKET_NAME);
     }
@@ -160,40 +176,19 @@ fn bind_at(path: &Path) -> Result<UnixListener, String> {
     bound.map_err(|e| e.to_string())
 }
 
-/// Bind the endpoint and spawn the accept thread.
-pub fn start() {
-    let path = socket_path();
-    let listener = match bind_at(&path) {
-        Ok(listener) => listener,
-        Err(e) => {
-            // The control socket is a convenience; a bind failure must not
-            // stop the daemon. The level then stays at the env-var seed.
-            warn!(
-                "Control socket unavailable ({e}); runtime log-level control \
-                 is disabled"
-            );
-            return;
-        }
-    };
-    info!("Control socket listening on {}", path.display());
-
-    if let Err(e) = std::thread::Builder::new()
-        .name("control-socket".into())
-        .spawn(move || serve(listener))
-    {
-        warn!("Failed to spawn the control-socket thread: {e}");
-    }
-}
-
 /// Accept connections and serve one command per connection, applying the
 /// default [`IO_TIMEOUT`] to each accepted stream.
-fn serve(listener: UnixListener) {
-    serve_with_timeout(listener, IO_TIMEOUT);
+fn serve(listener: UnixListener, handler: ConnectionHandler) {
+    serve_with_timeout(listener, IO_TIMEOUT, handler);
 }
 
 /// Accept connections and serve one command per connection, applying
 /// *io_timeout* to each accepted stream.
-fn serve_with_timeout(listener: UnixListener, io_timeout: Duration) {
+fn serve_with_timeout(
+    listener: UnixListener,
+    io_timeout: Duration,
+    handler: ConnectionHandler,
+) {
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
@@ -216,11 +211,10 @@ fn serve_with_timeout(listener: UnixListener, io_timeout: Duration) {
         {
             continue;
         }
-        if let Err(e) = handle_connection(&mut stream) {
-            // The peer is a well-behaved CLI; a failure is almost always the
-            // peer closing early, so a debug note is enough.
-            debug!("control-socket connection ended: {e}");
-        }
+        // The handler owns the protocol and its own connection logging; the
+        // transport only recycles the stream (a fresh one per connection)
+        // afterward.
+        handler(&mut stream);
     }
 }
 
@@ -240,7 +234,7 @@ fn authorize_peer(
     stream: &UnixStream,
     current_uid: libc::uid_t,
 ) -> Result<(), String> {
-    let peer = peer_uid(stream)?;
+    let peer = peer_uid::peer_uid(stream)?;
     if peer == 0 || peer == current_uid {
         Ok(())
     } else {
@@ -250,99 +244,58 @@ fn authorize_peer(
     }
 }
 
-/// Return the uid of the connected peer, or an error if the kernel cannot
-/// report it (the caller then fails closed).
-#[cfg(not(target_os = "macos"))]
-fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
-    use std::{io, os::unix::io::AsRawFd};
-
-    // `SO_PEERCRED` is filled in by the kernel at connect time and cannot
-    // be forged by the peer.
-    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let status = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
-            &mut len,
-        )
-    };
-    if status != 0 {
-        return Err(format!(
-            "getsockopt(SO_PEERCRED): {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(cred.uid)
-}
-
-/// The macOS `struct xid` exchanged with `getpeereid(2)`.
-///
-/// macOS 27 changed the prototype from `(int, struct xid *)` to
-/// `(int, uid_t *, gid_t *)`. Passing the first and third fields of this
-/// struct as the two out-pointers is correct under both ABIs: the classic
-/// form writes all three fields through the first pointer, while the new
-/// form writes the euid and the gid to offsets 0 and 8. Only offset 0 is
-/// read back, so the call stays within the struct on every release.
-///
-/// (Same layout trick as the virtkbdd IPC server's `peer_uid`.)
-#[cfg(target_os = "macos")]
-#[repr(C)]
-struct Xid {
-    xi_uid: libc::uid_t,
-    xi_euid: libc::uid_t,
-    xi_gid: libc::gid_t,
-}
-
-/// Return the uid of the connected peer, via `getpeereid(2)`.
-///
-/// Offset 0 of [`Xid`] holds the effective uid on macOS 27+ and the real
-/// uid on earlier releases. For a normal user process such as keymapperd
-/// the two are equal, and it is the identity that matters here.
-#[cfg(target_os = "macos")]
-fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
-    use std::{io, os::unix::io::AsRawFd};
-
-    let mut xid = Xid {
-        xi_uid: 0,
-        xi_euid: 0,
-        xi_gid: 0,
-    };
-    let status = unsafe {
-        libc::getpeereid(stream.as_raw_fd(), &mut xid.xi_uid, &mut xid.xi_gid)
-    };
-    if status != 0 {
-        return Err(format!("getpeereid: {}", io::Error::last_os_error()));
-    }
-    Ok(xid.xi_uid)
-}
-
 /// Connect to the endpoint at *path* as a client.
 fn connect_at(path: &Path) -> std::io::Result<UnixStream> {
     UnixStream::connect(path)
 }
 
-/// Connect to the daemon's control endpoint as a client.
-pub(super) fn connect() -> std::io::Result<Box<dyn IoStream>> {
-    let stream = connect_at(&socket_path())?;
-    Ok(Box::new(stream))
-}
+impl Endpoint for UnixEndpoint {
+    /// Bind the endpoint and spawn the accept thread.
+    fn start(handler: ConnectionHandler) {
+        let path = socket_path();
+        let listener = match bind_at(&path) {
+            Ok(listener) => listener,
+            Err(e) => {
+                // The control socket is a convenience; a bind failure must not
+                // stop the daemon. The level then stays at the env-var seed.
+                warn!(
+                    "Control socket unavailable ({e}); runtime log-level \
+                     control is disabled"
+                );
+                return;
+            }
+        };
+        info!("Control socket listening on {}", path.display());
 
-/// Convert a failed client connection into a [`ControlError`] the CLI can
-/// turn into a clear "daemon not running / older than CLI" message.
-pub(super) fn connect_error(e: &std::io::Error) -> String {
-    match e.kind() {
-        std::io::ErrorKind::NotFound => "no daemon is running (or its \
-                                         control socket is not at the \
-                                         expected path)"
-            .to_string(),
-        std::io::ErrorKind::ConnectionRefused => "no daemon control socket \
-                                                  is listening (the daemon \
-                                                  may be older than this CLI)"
-            .to_string(),
-        _ => e.to_string(),
+        if let Err(e) = std::thread::Builder::new()
+            .name("control-socket".into())
+            .spawn(move || serve(listener, handler))
+        {
+            warn!("Failed to spawn the control-socket thread: {e}");
+        }
+    }
+
+    /// Connect to the daemon's control endpoint as a client.
+    fn connect() -> std::io::Result<Box<dyn IoStream>> {
+        let stream = connect_at(&socket_path())?;
+        Ok(Box::new(stream))
+    }
+
+    /// Convert a failed client connection into a message the CLI can turn
+    /// into a clear "daemon not running / older than CLI" hint.
+    fn connect_error(e: &std::io::Error) -> String {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => "no daemon is running (or its \
+                                             control socket is not at the \
+                                             expected path)"
+                .to_string(),
+            std::io::ErrorKind::ConnectionRefused => {
+                "no daemon control socket is listening (the daemon may be \
+                 older than this CLI)"
+                    .to_string()
+            }
+            _ => e.to_string(),
+        }
     }
 }
 
@@ -355,6 +308,21 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::common::frame;
+
+    /// The payload bound the round-trip tests frame with (mirrors the
+    /// protocol's `MAX_PAYLOAD`).
+    const MAX: usize = 256;
+
+    /// A serve-loop handler that echoes one request frame back as the reply.
+    /// It keeps the transport tests independent of the daemon protocol while
+    /// still exercising a full request/response round trip over the socket.
+    fn echo(io: &mut dyn IoStream) -> bool {
+        let Ok(command) = frame::read_payload(io, MAX) else {
+            return false;
+        };
+        frame::write_frame(io, &command).is_ok()
+    }
 
     /// Connect with a short retry, so a freshly bound (but not yet accepted)
     /// listener is reachable.
@@ -374,14 +342,12 @@ mod tests {
         }
     }
 
-    /// The full protocol over a real unix socket: a `serve` thread in a
-    /// background thread, a client that connects, sends a level change, and
-    /// reads the reply. This exercises framing, dispatch, and the atomic
-    /// level store.
+    /// The transport end to end over a real unix socket: a `serve` thread, a
+    /// client that connects and round-trips a frame. This exercises binding,
+    /// the accept loop, the owner-only auth gate, and the framed read/write;
+    /// the command dispatch on top of it is covered by `daemon::control`.
     #[test]
     fn control_socket_round_trip() {
-        use super::super::{logging, read_frame, write_frame};
-
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(SOCKET_NAME);
 
@@ -389,7 +355,7 @@ mod tests {
             Ok(listener) => listener,
             Err(e) => {
                 // Some sandboxes forbid unix domain sockets (EPERM); skip the
-                // live round trip there. The codec and dispatch logic are
+                // live round trip there. The auth and directory checks are
                 // covered by the other tests; the socket plumbing is verified
                 // in CI / on a host that allows the bind.
                 eprintln!(
@@ -400,7 +366,7 @@ mod tests {
         };
         // Detached: `serve` blocks on accept for the process lifetime, which
         // is fine for a test socket in a temp dir.
-        std::thread::spawn(move || serve(listener));
+        std::thread::spawn(move || serve(listener, echo));
 
         let mut stream =
             wait_for_socket(&path, Duration::from_secs(2)).unwrap();
@@ -410,12 +376,10 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
 
-        write_frame(&mut stream, "SET-LOG-LEVEL debug").unwrap();
-        let reply = read_frame(&mut stream).unwrap();
-        assert_eq!(reply, "OK debug");
-
-        // Restore the default level so other tests observe it.
-        logging::set_level(log::LevelFilter::Info);
+        let command = b"SET-LOG-LEVEL debug";
+        frame::write_frame(&mut stream, command).unwrap();
+        let reply = frame::read_payload(&mut stream, MAX).unwrap();
+        assert_eq!(reply, command);
     }
 
     /// A peer that connects and sends nothing must not wedge the
@@ -423,8 +387,6 @@ mod tests {
     /// closes the connection and serves the next client.
     #[test]
     fn idle_peer_does_not_wedge_the_server() {
-        use super::super::{logging, read_frame, write_frame};
-
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(SOCKET_NAME);
 
@@ -440,7 +402,7 @@ mod tests {
         };
         // A short timeout so the recycling is observed quickly.
         std::thread::spawn(move || {
-            serve_with_timeout(listener, Duration::from_millis(200))
+            serve_with_timeout(listener, Duration::from_millis(200), echo)
         });
 
         // A silent peer occupies the loop until its read times out.
@@ -452,12 +414,10 @@ mod tests {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        write_frame(&mut stream, "SET-LOG-LEVEL debug").unwrap();
-        let reply = read_frame(&mut stream).unwrap();
-        assert_eq!(reply, "OK debug");
-
-        // Restore the default level so other tests observe it.
-        logging::set_level(log::LevelFilter::Info);
+        let command = b"SET-LOG-LEVEL debug";
+        frame::write_frame(&mut stream, command).unwrap();
+        let reply = frame::read_payload(&mut stream, MAX).unwrap();
+        assert_eq!(reply, command);
     }
 
     /// The socket must be born owner-only even under a fully permissive
@@ -581,10 +541,16 @@ mod tests {
     #[test]
     fn connect_error_classifies() {
         let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
-        assert!(connect_error(&not_found).contains("no daemon is running"));
+        assert!(
+            <UnixEndpoint as Endpoint>::connect_error(&not_found)
+                .contains("no daemon is running")
+        );
 
         let refused =
             std::io::Error::from(std::io::ErrorKind::ConnectionRefused);
-        assert!(connect_error(&refused).contains("older"));
+        assert!(
+            <UnixEndpoint as Endpoint>::connect_error(&refused)
+                .contains("older")
+        );
     }
 }

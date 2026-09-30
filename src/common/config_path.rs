@@ -9,8 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-const APP_NAME: &str = "keymapperd";
-const CONFIG_FILE: &str = "config.yaml";
+use super::paths::{APP_DIR_NAME, CONFIG_FILE_NAME};
 
 /// Check whether a path is a symbolic link (does not follow the link).
 fn is_symlink(path: &Path) -> bool {
@@ -24,7 +23,7 @@ fn is_symlink(path: &Path) -> bool {
 /// This is the platform-specific application config directory plus the
 /// default file name.  The directory may not exist yet.
 pub fn default_config_path() -> Option<PathBuf> {
-    platform_config_dir().map(|d| d.join(CONFIG_FILE))
+    platform_config_dir().map(|d| d.join(CONFIG_FILE_NAME))
 }
 
 /// Search standard platform directories for the user configuration file.
@@ -40,7 +39,7 @@ pub fn default_config_path() -> Option<PathBuf> {
 /// location.
 pub fn find_config_path() -> Option<PathBuf> {
     for dir in search_dirs() {
-        let path = dir.join(CONFIG_FILE);
+        let path = dir.join(CONFIG_FILE_NAME);
         if path.is_file() && !is_symlink(&path) {
             return Some(path);
         }
@@ -59,7 +58,7 @@ pub fn find_config_path() -> Option<PathBuf> {
 /// - `Err("not found")` with search locations printed to stderr.
 /// - `Err(symlink message)` when the found file is a symbolic link.
 pub fn find_config_path_strict() -> Result<PathBuf, String> {
-    let candidate = |dir: &Path| dir.join(CONFIG_FILE);
+    let candidate = |dir: &Path| dir.join(CONFIG_FILE_NAME);
 
     for dir in search_dirs() {
         let path = candidate(&dir);
@@ -119,7 +118,7 @@ fn console_user_config_dir() -> Option<PathBuf> {
     Some(
         home.join("Library")
             .join("Application Support")
-            .join(APP_NAME),
+            .join(APP_DIR_NAME),
     )
 }
 
@@ -133,8 +132,8 @@ fn console_user_config_dir() -> Option<PathBuf> {
 /// user knows where to create their configuration.
 pub fn print_search_locations() {
     eprintln!(
-        "No configuration file found ({CONFIG_FILE}). Please create it in \
-         one of the following locations:"
+        "No configuration file found ({CONFIG_FILE_NAME}). Please create it \
+         in one of the following locations:"
     );
 
     // Drive off `search_dirs()` so the printed order can never drift from
@@ -152,7 +151,7 @@ pub fn print_search_locations() {
 /// directory (resolved by [`crate::platform::config_dir`]) plus the
 /// application name.  The directory may not exist yet.
 fn platform_config_dir() -> Option<PathBuf> {
-    crate::platform::config_dir().map(|d| d.join(APP_NAME))
+    crate::platform::config_dir().map(|d| d.join(APP_DIR_NAME))
 }
 
 // ---------------------------------------------------------------------------

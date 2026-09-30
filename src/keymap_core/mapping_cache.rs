@@ -10,11 +10,14 @@
 use std::{collections::HashSet, path::Path};
 
 use indexmap::IndexMap;
+use log::warn;
 use thiserror::Error;
 
-use super::config_io::{ConfigReadError, read_config_content};
 use crate::common::{
-    config::AppConfig, hid_usage::HidUsage, keyboard::KeyboardSpecifier,
+    config::AppConfig,
+    config_io::{ConfigReadError, read_config_content},
+    hid_usage::HidUsage,
+    keyboard::KeyboardSpecifier,
 };
 
 // ---------------------------------------------------------------------------
@@ -117,8 +120,23 @@ impl RuntimeLookupCache {
 
     /// Compile a lookup cache from a YAML config string.  Used by hot-reload
     /// to accept content read from an already-open file handle.
+    ///
+    /// Every successful parse is followed by the advisory [`AppConfig::check`]
+    /// pass, whose findings are logged at `warn`.  This is the same analysis
+    /// `keymapper config check` runs; surfacing it here means the component
+    /// that actually applies the rules reports mistakes (duplicate triggers,
+    /// circular pairs, empty groups, no-op mappings) instead of silently
+    /// hot-reloading a config the user edited after their last `check`.  A
+    /// diagnostic never blocks loading — they are advisories, not errors.
     pub fn compile_from_str(content: &str) -> Result<Self, CompileError> {
         let parsed = AppConfig::load_from_str(content)?;
+
+        // `{:?}` escapes the message: group names are user-supplied and could
+        // otherwise forge lines in the daemon log.
+        for diagnostic in parsed.check() {
+            warn!("Config diagnostic: {:?}", diagnostic.to_string());
+        }
+
         Ok(Self::compile_from_config(&parsed))
     }
 
@@ -206,8 +224,9 @@ fn compile_outputs(
 /// Compile modifier keys into a specific bitmask.
 ///
 /// Each modifier contributes its own specific bit (left vs right is
-/// preserved).  `pub(crate)` so the engine can render an output [`KeyEvent`]
-/// for debug logging (see `engine::fmt_key_event`).
+/// preserved).  `pub(crate)` so `logfmt` can render an output [`KeyEvent`]
+/// for the debug `emit` line (`logfmt::fmt_native_key`, and the test-only
+/// `logfmt::fmt_key_event`).
 pub(crate) fn compile_modifier_bits(modifiers: &[HidUsage]) -> u8 {
     let mut bits: u8 = 0;
     for usage in modifiers {
@@ -414,6 +433,25 @@ mod tests {
         let err =
             RuntimeLookupCache::compile_from_str("just a string").unwrap_err();
         assert!(matches!(err, CompileError::Parse(_)));
+    }
+
+    #[test]
+    fn compile_from_str_loads_despite_diagnostics() {
+        // A duplicate trigger across groups is a diagnostic (`check()` flags
+        // it), but diagnostics are advisory: `compile_from_str` logs them and
+        // still compiles the cache.  This pins that a warning-level finding
+        // never turns into a load error on the hot-reload path.
+        let yaml = r#"
+groups:
+  - mappings:
+      CapsLock: LeftControl
+  - mappings:
+      CapsLock: Tab
+"#;
+        let cache = RuntimeLookupCache::compile_from_str(yaml)
+            .expect("diagnostics must not block loading");
+        // Both mappings compiled into global rules.
+        assert_eq!(cache.global_rules().len(), 2);
     }
 
     // -----------------------------------------------------------------------

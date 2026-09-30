@@ -22,8 +22,8 @@
 //! socket is already proof of ownership. That supersedes the `daemon_token`
 //! removed in Phase 2.
 //!
-//! Wire format. A frame reuses the versioned length-prefix idea from the
-//! macOS emitter channel and carries a single UTF-8 command line with no
+//! Wire format. A frame uses the shared length-prefixed envelope from
+//! `common::frame` and carries a single UTF-8 command line with no
 //! terminating newline (the length prefix delimits it):
 //!
 //! ```text
@@ -34,38 +34,32 @@
 //! matching response frame holds the reply (`OK debug` or `ERROR <reason>`).
 //! A connection carries exactly one request/response pair, then the peer
 //! closes.
+//!
+//! Only the envelope is shared: the header codec, the version check, and the
+//! payload-size bound live in `common::frame`, consumed here and by the macOS
+//! emitter channel (macOS `ipc_frame`). This one still frames a
+//! UTF-8 command line while the emitter frames an encoded batch of keys, so
+//! the two payload formats — and the protocols above them — stay independent.
+//!
+//! This module is the platform-agnostic half of the control path: the framed
+//! protocol and command dispatch. The OS-specific transport — the unix socket
+//! and its `SO_PEERCRED`/`getpeereid` peer check, and the Windows named pipe
+//! and its ACL machinery — lives in [`crate::platform::endpoint`] behind the
+//! [`Endpoint`](crate::platform::endpoint::Endpoint) trait, which this module
+//! consumes. [`start`] hands a [`serve_connection`] callback to the transport,
+//! so the dependency arrow stays `daemon -> platform`: the transport runs the
+//! protocol but never names it.
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 
-use log::LevelFilter;
+use log::{LevelFilter, debug};
 use thiserror::Error;
 
 use super::logging;
-
-/// A stream that is both a [`Read`] and a [`Write`].
-///
-/// Rust forbids two non-auto traits in one object position, so a connected
-/// endpoint is boxed as `Box<dyn IoStream>`; the blanket impl lets any
-/// `Read + Write` type satisfy it.
-pub(crate) trait IoStream: Read + Write {}
-impl<T: Read + Write + ?Sized> IoStream for T {}
-
-#[cfg(unix)]
-mod unix;
-#[cfg(windows)]
-mod windows;
-
-#[cfg(unix)]
-pub use unix::start;
-#[cfg(unix)]
-use unix::{connect, connect_error};
-#[cfg(windows)]
-pub use windows::start;
-#[cfg(windows)]
-use windows::{connect, connect_error};
-
-/// The only supported frame version.
-const FRAME_VERSION: u8 = 1;
+use crate::{
+    common::frame::{self, FrameError},
+    platform::endpoint::{ControlEndpoint, Endpoint, IoStream},
+};
 
 /// Upper bound for a frame payload. A command or reply is at most a few dozen
 /// bytes; the bound guards against a corrupt length field from a hostile or
@@ -79,7 +73,7 @@ pub enum ControlError {
     #[error("frame too short: {0} bytes")]
     TooShort(usize),
 
-    /// The frame version is not [`FRAME_VERSION`].
+    /// The frame version is not the shared `common::frame` version.
     #[error("unsupported frame version {0}")]
     UnsupportedVersion(u8),
 
@@ -113,6 +107,24 @@ pub enum ControlError {
     Io(#[from] std::io::Error),
 }
 
+// The frame envelope errors come from the shared `common::frame` codec; fold
+// them into the matching control variants so the public error surface (and the
+// tests that assert on it) stay unchanged while framing has one definition.
+impl From<FrameError> for ControlError {
+    fn from(e: FrameError) -> Self {
+        match e {
+            FrameError::TooShort(n) => Self::TooShort(n),
+            FrameError::UnsupportedVersion(v) => Self::UnsupportedVersion(v),
+            FrameError::PayloadTooLarge(n) => Self::PayloadTooLarge(n),
+            FrameError::Truncated { need, have } => {
+                Self::Truncated { need, have }
+            }
+            FrameError::Eof => Self::Eof,
+            FrameError::Io(e) => Self::Io(e),
+        }
+    }
+}
+
 // `std::io::Error` is not comparable, so derive is off the table; compare the
 // structured variants field by field and treat any two I/O errors as equal.
 impl PartialEq for ControlError {
@@ -134,6 +146,53 @@ impl PartialEq for ControlError {
             _ => false,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Server side
+// ---------------------------------------------------------------------------
+
+/// Bind the platform control endpoint and serve framed requests until the
+/// process exits.
+///
+/// The bind and the accept loop are delegated to the platform transport
+/// ([`ControlEndpoint`]); binding is best-effort, so a failure is logged there
+/// and the daemon keeps running at the level it was seeded from. Each
+/// authorized connection is served by [`serve_connection`], which speaks the
+/// framed protocol defined in this module.
+pub fn start() {
+    ControlEndpoint::start(serve_connection);
+}
+
+/// Serve one authorized control connection.
+///
+/// Returns `true` on a completed exchange, so the transport may wait for the
+/// peer to drain the reply before tearing the connection down (see
+/// [`ConnectionHandler`](crate::platform::endpoint::ConnectionHandler)).
+fn serve_connection(io: &mut dyn IoStream) -> bool {
+    match handle_connection(io) {
+        Ok(()) => true,
+        Err(e) => {
+            // The peer is a well-behaved CLI; a failure is almost always the
+            // peer closing early, so a debug note is enough.
+            debug!("control-socket connection ended: {e}");
+            false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Client side
+// ---------------------------------------------------------------------------
+
+/// Connect to the running daemon's endpoint through the platform transport.
+fn connect() -> std::io::Result<Box<dyn IoStream>> {
+    ControlEndpoint::connect()
+}
+
+/// Classify a failed client connect into a message the CLI can show.
+fn connect_error(e: &std::io::Error) -> String {
+    ControlEndpoint::connect_error(e)
 }
 
 /// Connect to the running daemon's control endpoint and set its log level.
@@ -160,7 +219,11 @@ fn exchange<R: Read + Write>(
 /// Serve one connection: read a single request frame, dispatch it, and write
 /// the reply frame. A connection carries exactly one command, so the peer
 /// closes after the reply.
-pub(crate) fn handle_connection<R: Read + Write>(
+///
+/// Generic over the stream and `?Sized` so it runs both on a concrete
+/// transport stream and on the `dyn IoStream` the platform transport hands to
+/// [`serve_connection`].
+fn handle_connection<R: Read + Write + ?Sized>(
     io: &mut R,
 ) -> Result<(), ControlError> {
     let command = read_frame(io)?;
@@ -247,70 +310,39 @@ fn level_name(level: LevelFilter) -> &'static str {
 // Framing
 // ---------------------------------------------------------------------------
 
-/// Encode *payload* as a single frame.
+/// Encode *payload* as a single frame (truncated to [`MAX_PAYLOAD`]).
 ///
-/// The payload is truncated to [`MAX_PAYLOAD`] before framing. Commands and
-/// replies are far shorter than the bound, so this is defensive only.
-pub(crate) fn encode_frame(payload: &str) -> Vec<u8> {
+/// Test-only helper: production writes go through [`write_frame`], which
+/// truncates and frames inline. Kept here so the wire-layout and
+/// truncation tests pin the exact bytes.
+#[cfg(test)]
+fn encode_frame(payload: &str) -> Vec<u8> {
     let bytes = payload.as_bytes();
     let bytes = &bytes[..bytes.len().min(MAX_PAYLOAD)];
-
-    let mut frame = Vec::with_capacity(5 + bytes.len());
-    frame.push(FRAME_VERSION);
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-    frame
+    frame::encode(bytes)
 }
 
 /// Write one frame (encoding *payload*) to *writer*.
-pub(crate) fn write_frame<W: Write>(
+pub(crate) fn write_frame<W: Write + ?Sized>(
     writer: &mut W,
     payload: &str,
 ) -> Result<(), ControlError> {
-    let frame = encode_frame(payload);
-    writer.write_all(&frame)?;
-    writer.flush()?;
-    Ok(())
+    let bytes = payload.as_bytes();
+    let bytes = &bytes[..bytes.len().min(MAX_PAYLOAD)];
+    frame::write_frame(writer, bytes).map_err(ControlError::from)
 }
 
 /// Read and decode one frame from *reader*, returning the payload as a
 /// [`String`].
-pub(crate) fn read_frame<R: Read>(
+///
+/// The envelope is validated by the shared codec; this adds the UTF-8 check
+/// specific to the command channel.
+pub(crate) fn read_frame<R: Read + ?Sized>(
     reader: &mut R,
 ) -> Result<String, ControlError> {
-    let mut header = [0u8; 5];
-    read_exact_eof(reader, &mut header)?;
-
-    let version = header[0];
-    if version != FRAME_VERSION {
-        return Err(ControlError::UnsupportedVersion(version));
-    }
-
-    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]])
-        as usize;
-    if len > MAX_PAYLOAD {
-        return Err(ControlError::PayloadTooLarge(len));
-    }
-
-    let mut payload = vec![0u8; len];
-    read_exact_eof(reader, &mut payload)?;
+    let payload = frame::read_payload(reader, MAX_PAYLOAD)
+        .map_err(ControlError::from)?;
     String::from_utf8(payload).map_err(|_| ControlError::InvalidUtf8)
-}
-
-/// Read exactly `buf.len()` bytes, mapping a clean EOF to
-/// [`ControlError::Eof`] so a peer close is distinguishable from an I/O
-/// failure.
-fn read_exact_eof<R: Read>(
-    reader: &mut R,
-    buf: &mut [u8],
-) -> Result<(), ControlError> {
-    match reader.read_exact(buf) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-            Err(ControlError::Eof)
-        }
-        Err(e) => Err(ControlError::Io(e)),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +354,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::common::frame::FRAME_VERSION;
 
     #[test]
     fn frame_round_trips_a_command() {

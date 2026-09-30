@@ -179,6 +179,33 @@ mod tests {
         assert_eq!(cg_keycode_to_hid_usage(0xFFFF), None);
     }
 
+    /// Every CGKeyCode the table names must resolve to a usage the canonical
+    /// HID table defines. This pins the macOS table as a *projection* of
+    /// [`HidUsage::keyboard`]: if the shared table ever drops a usage this
+    /// platform maps to, the CG layer would silently hand back `None` and the
+    /// key would pass through the daemon unmapped — the drift F3 warns about.
+    #[test]
+    fn every_mapped_keycode_resolves_to_a_known_usage() {
+        let mapped: &[u16] = &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+            19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34,
+            35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+            51, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 65, 67, 69, 71, 75,
+            76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 96, 97, 98,
+            99, 100, 101, 103, 109, 111, 115, 116, 117, 118, 119, 120, 121,
+            122, 123, 124, 125, 126,
+        ];
+        for &code in mapped {
+            let id = cg_keycode_to_hid_usage(code)
+                .unwrap_or_else(|| panic!("CGKeyCode {code} not mapped"));
+            assert!(
+                keycode_to_hid_usage(code).is_some(),
+                "CGKeyCode {code} maps to HID id {id:#04x}, which the \
+                 canonical HidUsage table does not define"
+            );
+        }
+    }
+
     #[test]
     fn maps_numpad_keys() {
         assert_eq!(cg_keycode_to_hid_usage(65), Some(0x63)); // NumpadDecimal

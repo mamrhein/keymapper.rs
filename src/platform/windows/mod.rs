@@ -21,9 +21,18 @@ mod raw_worker;
 /// The daemon's hook proc matches on this tag to pass its own injections
 /// through without re-mapping them.  A distinctive value keeps it from
 /// colliding with tags other input sources may use.
-pub const INJECTED_TAG: usize = 0x4B_4D_50_01;
+///
+/// `pub(crate)` because it is a self-echo-suppression detail of the Windows
+/// capture path (read by `windows::mapping`); it was never a supported
+/// cross-platform export, only a dead public re-export (F5b).
+pub(crate) const INJECTED_TAG: usize = 0x4B_4D_50_01;
 
 pub use config_dir::config_dir;
-pub use key::{Key, keycode_to_hid_usage};
+// `Key` is part of the public surface only for the test harness (its
+// `from_hid_usage`/`as_native` drive the Windows injector); gate it
+// behind the same `test-util` feature as the rest of the harness surface.
+#[cfg(feature = "test-util")]
+pub use key::Key;
+pub use key::keycode_to_hid_usage;
 pub use keyboard::list_keyboards;
 pub use mapping::start_mapping;

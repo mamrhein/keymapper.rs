@@ -49,7 +49,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use log::{debug, info, trace};
+use log::info;
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
@@ -69,10 +69,12 @@ use crate::{
         keyboard::KeyboardSpecifier,
         modifier::ModifierRole,
     },
-    daemon::{
-        engine::{Decision, MappingEngine, fmt_native_key},
+    keymap_core::{
+        emission::{ConsumedReleaseFate, InputFate, emission_plan},
+        engine::{Decision, MappingEngine},
+        logfmt::{self, Direction},
+        lookup::Lookup,
         mapping_cache::NativeKey,
-        state::Lookup,
     },
 };
 
@@ -464,15 +466,11 @@ unsafe extern "C-unwind" fn tap_callback(
         return event.as_ptr();
     };
 
-    // Both directions share the line, but the down is the informative one
-    // and stays at `debug`; the key-up is less useful and is logged at
-    // `trace` so it stays out of the default debug output, as on linux.
-    let action = if is_down { "down" } else { "up" };
-    if is_down {
-        debug!("recv keycode={keycode} {action} -> {usage}");
-    } else {
-        trace!("recv keycode={keycode} {action} -> {usage}");
-    }
+    // The wording and level of the `recv`/`pass`/`swal` lines are owned by
+    // `logfmt`, so the e2e debug-log grammar has one producing implementation
+    // shared with the other backends.
+    let dir = Direction::from_is_down(is_down);
+    logfmt::log_recv(format_args!("keycode={keycode}"), dir, usage);
 
     // The virtual keyboard is a hardware-level device: the keys it emits
     // re-enter the HID pipeline and are re-received by this tap.  If the event
@@ -482,11 +480,7 @@ unsafe extern "C-unwind" fn tap_callback(
     // `Escape: Cmd+T` fire on the echo of an earlier `RightControl: Escape`,
     // and cyclic rules emit forever).
     if ctx.echo.matches(usage, is_down, Instant::now()) {
-        if is_down {
-            debug!("pass keycode={keycode} {action} -> {usage}");
-        } else {
-            trace!("pass keycode={keycode} {action} -> {usage}");
-        }
+        logfmt::log_pass(format_args!("keycode={keycode}"), dir, usage);
         return event.as_ptr();
     }
 
@@ -498,47 +492,37 @@ unsafe extern "C-unwind" fn tap_callback(
         e.decide(usage, usage, is_down, None, reachable)
     };
 
-    match decision {
-        Decision::Pass => {
-            if is_down {
-                debug!("pass keycode={keycode} {action} -> {usage}");
-            } else {
-                trace!("pass keycode={keycode} {action} -> {usage}");
-            }
+    // The shared emission plan owns the `Decision` semantics and logs each
+    // output's `emit` line.  macOS reads the plan only for the fate of the
+    // input event: its additive virtual keyboard taps every output (the plan's
+    // tap/hold split and release mask are inert here), and a consumed
+    // modifier's release passes through (see the module docs).  The mapped
+    // batch is delivered to the IPC client from the decision itself.
+    let plan = emission_plan(&decision, ConsumedReleaseFate::PassThrough);
+
+    match plan.input {
+        InputFate::Forward => {
+            logfmt::log_pass(format_args!("keycode={keycode}"), dir, usage);
             event.as_ptr()
         }
-        Decision::Emit {
-            release: _,
-            outputs,
-        } => {
-            for native_key in &outputs {
-                debug!("emit {}", fmt_native_key(native_key));
-            }
-            // The release mask is inert on macOS: the virtual keyboard's
-            // modifier state is isolated from physical typing, so there is
-            // nothing to release on the output device.  Fire-and-forget; drop
-            // the batch if the channel is full.
-            let sent = ctx.tx.try_send(outputs.clone()).is_ok();
-            if sent {
-                // Record the predicted echo so the re-received keys pass
-                // through without being re-decided.  Only record on a
-                // successful send: a dropped batch produces no echo.
-                ctx.echo.record(&outputs, Instant::now());
-            }
+        InputFate::Swallow => {
+            logfmt::log_swal(format_args!("keycode={keycode}"), dir, usage);
             std::ptr::null_mut()
         }
-        // The release mask is inert for the same reason.
-        Decision::Swallow { release: _ } => {
-            trace!("swal keycode={keycode} up -> {usage}");
+        // A mapped key: swallow the input (the `emit` lines stand for it) and
+        // hand the outputs to the IPC client as one batch.  Fire-and-forget;
+        // drop the batch if the channel is full.
+        InputFate::Silent => {
+            if let Decision::Emit { outputs, .. } = &decision {
+                let sent = ctx.tx.try_send(outputs.clone()).is_ok();
+                if sent {
+                    // Record the predicted echo so the re-received keys pass
+                    // through without being re-decided.  Only record on a
+                    // successful send: a dropped batch produces no echo.
+                    ctx.echo.record(outputs, Instant::now());
+                }
+            }
             std::ptr::null_mut()
-        }
-        // The physical release of a consumed modifier must reach the
-        // application: forwarded events never touch the virtual keyboard, so
-        // swallowing it would leave the modifier stuck.  It is therefore a
-        // pass, logged as one.
-        Decision::ConsumedRelease => {
-            trace!("pass keycode={keycode} up -> {usage}");
-            event.as_ptr()
         }
     }
 }

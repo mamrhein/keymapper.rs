@@ -7,16 +7,23 @@
 // $Source$
 // $Revision$
 
-//! Shared application identity queries, configuration parsing, path
-//! resolution, modifier definitions, and the HID-centric key identity
+//! Configuration parsing and hardened reading, path resolution, keyboard
+//! discovery types, modifier definitions, and the HID-centric key identity
 //! ([`HidUsage`]) used as the canonical key type across all platforms.
+//!
+//! Application-identity queries live in
+//! [`platform::app_identity`](crate::platform::app_identity), alongside the
+//! rest of the OS-specific code.
 
-pub mod app_identity;
 pub mod config;
+pub mod config_io;
 pub mod config_path;
+pub(crate) mod frame;
 pub mod hid_usage;
 pub mod keyboard;
 pub(crate) mod modifier;
+pub(crate) mod paths;
+pub(crate) mod ttl_value;
 
 pub use hid_usage::HidUsage;
 pub use keyboard::{

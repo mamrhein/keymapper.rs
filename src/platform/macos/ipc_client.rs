@@ -34,7 +34,7 @@ use std::{
 use log::{info, warn};
 
 use super::ipc_frame;
-use crate::daemon::mapping_cache::NativeKey;
+use crate::keymap_core::mapping_cache::NativeKey;
 
 /// Path of the virtkbdd IPC socket.
 const SOCKET_PATH: &str = "/var/run/virtkbdd/keymapperd.sock";

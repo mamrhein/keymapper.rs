@@ -355,3 +355,34 @@ pub fn virtkbdd_restart() -> Result<(), String> {
 
     Ok(())
 }
+
+// Secondary-service API. On macOS the service manager co-manages virtkbdd
+// (the root LaunchDaemon that owns the Karabiner virtual keyboard) alongside
+// keymapperd. These thin aliases expose it through the same names every
+// platform module exports, so `daemon_cmd`'s cross-platform handlers carry no
+// `#[cfg(target_os)]` branches.
+
+/// The secondary service co-managed on macOS: virtkbdd.
+pub fn secondary_name() -> Option<&'static str> {
+    Some("virtkbdd")
+}
+
+/// Whether the virtkbdd service is running.
+pub fn secondary_is_running() -> bool {
+    virtkbdd_is_running()
+}
+
+/// Start the virtkbdd service.
+pub fn secondary_start() -> Result<(), String> {
+    virtkbdd_start()
+}
+
+/// Stop the virtkbdd service.
+pub fn secondary_stop() -> Result<(), String> {
+    virtkbdd_stop()
+}
+
+/// Restart the virtkbdd service.
+pub fn secondary_restart() -> Result<(), String> {
+    virtkbdd_restart()
+}

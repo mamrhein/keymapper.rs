@@ -40,7 +40,7 @@ use super::{
 };
 use crate::{
     common::keyboard::{KeyboardSpecifier, filter_keyboards_by_specifiers},
-    daemon::{engine::MappingEngine, state::Lookup},
+    keymap_core::{engine::MappingEngine, lookup::Lookup},
     platform::linux::keyboard::build_keyboard_from_udev,
 };
 

@@ -7,7 +7,11 @@ description = "Test helpers (key injector) for the keymapper e2e test harness; d
 publish = false
 
 [dependencies]
-keymapper = { path = ".." }
+# The `test-util` feature un-gates the test-harness-only public surface this
+# crate consumes (`KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`, `Key`).
+# Enabling it here also turns the feature on for the root package's integration
+# tests (which depend on `test-util`) during a test build.
+keymapper = { path = "..", features = ["test-util"] }
 
 # Linux-specific kernel input bindings
 [target.'cfg(target_os = "linux")'.dependencies]

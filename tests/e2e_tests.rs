@@ -74,7 +74,7 @@ use common::E2eLock;
 use keymapper::{
     cli::daemon_cmd,
     common::{config::AppConfig, hid_usage::HidUsage},
-    daemon::engine::fmt_key_event,
+    keymap_core::logfmt::fmt_key_event,
 };
 #[cfg(target_os = "linux")]
 use log_capture::JournalLogSource;

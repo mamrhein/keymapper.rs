@@ -7,16 +7,20 @@
 // $Source$
 // $Revision$
 
-//! Daemon runtime: the unified mapping engine, mapping cache, state
-//! management, config hot-reload, and the control socket for runtime
-//! configuration of a running daemon.
+//! Daemon runtime: live state management, config hot-reload, and the
+//! control socket for runtime configuration of a running daemon.
+//!
+//! The cross-platform mapping engine and the compiled mapping cache are
+//! homed in [`crate::keymap_core`]; [`state::RuntimeState`] composes them
+//! with keyboard discovery and the focused-application tracker
+//! ([`focus::FocusTracker`]) into the runtime the platform backends drive.
+//!
+//! Layering: `daemon -> keymap_core -> common`, and `daemon -> platform`
+//! (which itself sits on `keymap_core`).  The daemon depends on the core
+//! and the platform layer, never the other way around.
 
-pub mod config_io;
 pub mod control;
-pub mod engine;
+mod focus;
 pub mod logging;
-pub mod mapping_cache;
 pub mod state;
-#[cfg(test)]
-pub(crate) mod test_lookup;
 pub mod watcher;

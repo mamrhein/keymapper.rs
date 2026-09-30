@@ -92,3 +92,33 @@ pub fn restart() -> Result<(), String> {
 
     Ok(())
 }
+
+// Secondary-service API. On Linux there is no service co-managed alongside
+// keymapperd: the virtual keyboard is a uinput device the daemon creates
+// in-process, not a separate unit. These no-op members let `daemon_cmd`'s
+// cross-platform handlers stay free of `#[cfg(target_os)]` branches.
+
+/// The name of the secondary service, or `None` on platforms without one.
+pub fn secondary_name() -> Option<&'static str> {
+    None
+}
+
+/// Whether the secondary service is running (always false on Linux).
+pub fn secondary_is_running() -> bool {
+    false
+}
+
+/// Start the secondary service (no-op on Linux).
+pub fn secondary_start() -> Result<(), String> {
+    Ok(())
+}
+
+/// Stop the secondary service (no-op on Linux).
+pub fn secondary_stop() -> Result<(), String> {
+    Ok(())
+}
+
+/// Restart the secondary service (no-op on Linux).
+pub fn secondary_restart() -> Result<(), String> {
+    Ok(())
+}

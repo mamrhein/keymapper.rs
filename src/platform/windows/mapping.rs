@@ -90,10 +90,14 @@ use crate::{
         hid_usage::HidUsage, keyboard::KeyboardSpecifier,
         modifier::ModifierRole,
     },
-    daemon::{
-        engine::{Decision, MappingEngine, fmt_native_key, output_held_mask},
+    keymap_core::{
+        emission::{
+            ConsumedReleaseFate, EmitAction, InputFate, emission_plan,
+        },
+        engine::{Decision, MappingEngine},
+        logfmt::{self, Direction},
+        lookup::Lookup,
         mapping_cache::NativeKey,
-        state::Lookup,
     },
 };
 
@@ -253,6 +257,25 @@ unsafe fn token_is_elevated(token: HANDLE) -> bool {
 // Modifier handling
 // ---------------------------------------------------------------------------
 
+/// Poll the eight physical modifier VK codes and pack the result into a
+/// modifier bitmask.
+///
+/// This is the modifier source for the standalone Consumer-Page path in the
+/// raw-input worker (`raw_worker`), which never receives a low-level keyboard
+/// hook event and so cannot consult the engine's authoritative
+/// `modifier_state` (the `MappingEngine` in `keymap_core::engine` builds
+/// that from
+/// hook events).
+///
+/// Invariant: the engine's `modifier_state` is authoritative for keys seen
+/// through the hook; this poll is only a fallback for the Consumer path.
+/// Because it reads live OS keyboard state at call time rather than state
+/// observed through the hook chain, the two can disagree within a narrow
+/// window — e.g. a modifier pressed while the hook chain was busy, or a
+/// transition not delivered to the hook (UIPI can suppress a lower-privilege
+/// hook under an elevated window). The divergence is accepted, not reconciled:
+/// for a Consumer event this poll is the best available approximation of the
+/// chord the user is holding.
 pub(super) fn extract_modifier_bits() -> u8 {
     let mut bits: u8 = 0;
     if unsafe { GetAsyncKeyState(Key::LeftControl.as_native() as i32) } < 0 {
@@ -559,15 +582,11 @@ extern "system" fn low_level_keyboard_proc(
         };
     };
 
-    // Both directions share the line, but the down is the informative one
-    // and stays at `debug`; the key-up is less useful and is logged at
-    // `trace` so it stays out of the default debug output, as on linux.
-    let action = if is_key_down { "down" } else { "up" };
-    if is_key_down {
-        debug!("recv vk={} {action} -> {usage}", vk_code.0);
-    } else {
-        trace!("recv vk={} {action} -> {usage}", vk_code.0);
-    }
+    // The wording and level of the `recv`/`pass`/`swal` lines are owned by
+    // `logfmt`, so the e2e debug-log grammar has one producing implementation
+    // shared with the other backends.
+    let dir = Direction::from_is_down(is_key_down);
+    logfmt::log_recv(format_args!("vk={}", vk_code.0), dir, usage);
 
     // Identify the source keyboard non-blockingly.  Raw input and the hook
     // do not deliver in a guaranteed order, so retry for a few milliseconds
@@ -614,62 +633,55 @@ extern "system" fn low_level_keyboard_proc(
     // input.
     if !matches!(decision, Decision::Pass) && foreground_is_elevated() {
         if is_key_down {
-            debug!("elevated fg: passing vk={} {action} unmapped", vk_code.0);
+            debug!("elevated fg: passing vk={} down unmapped", vk_code.0);
         } else {
-            trace!("elevated fg: passing vk={} {action} unmapped", vk_code.0);
+            trace!("elevated fg: passing vk={} up unmapped", vk_code.0);
         }
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
     }
 
-    match decision {
+    // The shared emission plan turns the decision into the ordered output
+    // actions and logs each output's `emit` line; this layer maps them onto
+    // the native `SendInput` primitives.  It is built only after the elevation
+    // guard, so a key passed through unmapped above never logs an `emit` line
+    // for output it did not produce.  On Windows a consumed modifier's release
+    // is swallowed (the synthetic key-up was already sent when the trigger
+    // fired).
+    let plan = emission_plan(&decision, ConsumedReleaseFate::Swallow);
+
+    match plan.input {
         // Unmapped (or the repeat of an unmapped key): let the event through.
-        Decision::Pass => {
-            if is_key_down {
-                debug!("pass vk={} {action} -> {usage}", vk_code.0);
-            } else {
-                trace!("pass vk={} {action} -> {usage}", vk_code.0);
-            }
-            unsafe {
+        InputFate::Forward => {
+            logfmt::log_pass(format_args!("vk={}", vk_code.0), dir, usage);
+            return unsafe {
                 CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
-            }
+            };
         }
-        // Mapped: release the trigger's modifiers first (clean tap), then
-        // emit the outputs.  An output whose base is itself a modifier key
-        // is held down (not tapped) so the remapped modifier stays active
-        // for subsequent key presses; the matching release is emitted when
-        // the physical key-up arrives.
-        Decision::Emit { release, outputs } => {
-            if release != 0 {
-                release_modifiers(release);
-            }
-            for native_key in &outputs {
-                debug!("emit {}", fmt_native_key(native_key));
-                if output_held_mask(native_key).is_some() {
-                    hold_modifier_output(native_key);
-                } else {
-                    emit_key_event(native_key);
-                }
-            }
-            LRESULT(1)
+        // A mapped key-up, or the physical release of a consumed modifier
+        // (whose synthetic key-up the output device already sent): swallow,
+        // and release any held output bits the plan names.
+        InputFate::Swallow => {
+            logfmt::log_swal(format_args!("vk={}", vk_code.0), dir, usage);
         }
-        // A mapped key-up: swallow the event and, for a remapped modifier
-        // key, release the output bits that have been held since the key-down.
-        Decision::Swallow { release } => {
-            trace!("swal vk={} up -> {usage}", vk_code.0);
-            if release != 0 {
-                release_modifiers(release);
-            }
-            LRESULT(1)
-        }
-        // A consumed modifier release: the synthetic key-up was already sent
-        // when the trigger fired, so swallow the physical release.
-        Decision::ConsumedRelease => {
-            trace!("swal vk={} up -> {usage}", vk_code.0);
-            LRESULT(1)
+        // A mapped key: swallow the input; the `emit` lines stand for it.
+        InputFate::Silent => {}
+    }
+
+    // Carry out the outputs the plan produced: the clean-tap release first
+    // (if any), then each output as a hold (its base is a modifier key, so it
+    // stays active for the presses that follow) or a tap.  Releasing the
+    // trigger's modifiers before the outputs is what keeps the output a clean
+    // tap.
+    for action in plan.actions {
+        match action {
+            EmitAction::ReleaseConsumed(mask) => release_modifiers(mask),
+            EmitAction::Tap(native_key) => emit_key_event(&native_key),
+            EmitAction::Hold(native_key) => hold_modifier_output(&native_key),
         }
     }
+    LRESULT(1)
 }
 
 /// Match a raw input event for *usage* against the device-identification
