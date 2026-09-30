@@ -79,6 +79,10 @@ pub enum InputFate {
 pub enum ConsumedReleaseFate {
     /// The output device already released the modifier when the trigger fired
     /// (Linux, Windows): swallow the physical release.
+    //
+    // Constructed only by the Linux and Windows backends, so it is never
+    // built on macOS, where this `pub(crate)` enum compiles.
+    #[allow(dead_code)]
     Swallow,
     /// Forwarded events never reach the output device (macOS): the physical
     /// release is the application's only source of truth, so it must pass

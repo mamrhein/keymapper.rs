@@ -253,6 +253,11 @@ impl<K: Ord + Copy> MappingEngine<K> {
     /// that launched the daemon), so re-emitting it would inject a second
     /// press; its repeats are swallowed and its release is forwarded, which
     /// balances the pre-grab key-down.
+    // The grab-time state sync that drives these bookkeeping methods is
+    // Linux-only (`platform::linux::mapping::device`); on the other hosts the
+    // methods stay dead unless allowed here.  Gated with `allow` rather than
+    // `cfg` because the unit tests below exercise them on every platform.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn note_held_key(&mut self, key: K, usage: HidUsage) {
         self.tracker.pressed_keys.insert(key);
         if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
@@ -270,6 +275,7 @@ impl<K: Ord + Copy> MappingEngine<K> {
     /// never reach [`decide`], so they are tracked by key code only: their
     /// auto-repeat tail is dropped and their release is forwarded like any
     /// other held key.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn note_stale_key(&mut self, key: K) {
         self.tracker.stale_keys.insert(key);
     }
@@ -277,11 +283,13 @@ impl<K: Ord + Copy> MappingEngine<K> {
     /// Whether *key* carries a stale mark from [`note_held_key`] or
     /// [`note_stale_key`]: its auto-repeats are dropped until the release
     /// clears the mark.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn has_stale_key(&self, key: K) -> bool {
         self.tracker.stale_keys.contains(&key)
     }
 
     /// Clear a key's stale mark on its release, which the caller forwards.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn clear_stale_key(&mut self, key: K) {
         self.tracker.stale_keys.remove(&key);
     }
@@ -294,6 +302,7 @@ impl<K: Ord + Copy> MappingEngine<K> {
     /// device, so nothing is re-emitted on the virtual device: the key
     /// leaves the pressed set, a modifier's lookup and forwarded bits are
     /// cleared, and a non-modifier's stale mark is dropped.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn unnote_held_key(&mut self, key: K, usage: HidUsage) {
         self.tracker.pressed_keys.remove(&key);
         if let Some(bit) = HidUsage::hid_usage_to_modifier_bit(usage) {
@@ -311,6 +320,7 @@ impl<K: Ord + Copy> MappingEngine<K> {
     /// False when its release was already delivered natively (see
     /// [`unnote_held_key`]): re-emitting the key-down would leave the
     /// modifier stuck on the virtual device.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn held_modifier_forwarded(&self, usage: HidUsage) -> bool {
         HidUsage::hid_usage_to_modifier_bit(usage).is_some_and(|bit| {
             self.tracker.forwarded_modifiers & (1 << bit) != 0
