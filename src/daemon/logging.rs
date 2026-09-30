@@ -11,7 +11,8 @@
 //!
 //! All daemon-side output goes through the `log` facade. The sink is an
 //! ftlog logger installed once per process by [`init`], writing to a
-//! platform-specific destination:
+//! platform-specific destination (provided by [`crate::platform::logging`], so
+//! this module holds no OS `#[cfg]` sink branches):
 //!
 //! - **Linux:** stderr, without an embedded timestamp (the journal adds one).
 //!   systemd forwards it to the journal.
@@ -49,8 +50,6 @@
 //!
 //! [`init`] is once per process: later calls are a no-op.
 
-#[cfg(not(target_os = "linux"))]
-use std::path::PathBuf;
 use std::{
     borrow::Cow,
     fmt,
@@ -63,8 +62,8 @@ use std::{
 /// socket) can name it without adding a direct `log` dependency.
 pub use log::LevelFilter;
 use log::{Level, Log, Metadata, Record, error, info};
-#[cfg(target_os = "linux")]
-use time::format_description::OwnedFormatItem;
+
+use crate::platform::logging::{LogSink, log_sink};
 
 /// The process name used in the fallback notice.
 const LOG_TAG: &str = "keymapperd";
@@ -183,92 +182,36 @@ fn install_platform_sink() -> Result<Box<dyn Log + Send + Sync>, String> {
     install_ftlog()
 }
 
-/// Build the ftlog sink: the platform destination, wrapped in the latency
-/// stripper, with the line format and (on Linux) the empty timestamp.
+/// Build the ftlog sink: the platform destination from
+/// [`crate::platform::logging`], wrapped in the latency stripper with the
+/// shared line format.
 fn install_ftlog() -> Result<Box<dyn Log + Send + Sync>, String> {
-    let root = platform_root()?;
-    build_ftlog(root)
+    let sink = log_sink()?;
+    build_ftlog(sink)
         .map(|logger| Box::new(logger) as Box<dyn Log + Send + Sync>)
 }
 
-/// The destination the ftlog logger writes to, per platform.
-///
-/// - **Linux:** stderr; systemd forwards it to the journal.
-/// - **macOS / Windows:** a rotating file appender (daily rotation, 7-day
-///   retention). The parent directory is created if absent because ftlog's
-///   appender does not create it.
-fn platform_root() -> Result<Box<dyn Write + Send>, String> {
-    #[cfg(target_os = "linux")]
-    {
-        Ok(Box::new(io::stderr()))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let path = log_file_path()?;
-        if let Some(parent) = path.parent() {
-            fs_err::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-
-        let appender = ftlog::appender::FileAppender::builder()
-            .path(&path)
-            .rotate(ftlog::appender::Period::Day)
-            .expire(ftlog::appender::Duration::days(7))
-            .build();
-        Ok(Box::new(appender))
-    }
-}
-
-/// The log file path on the file-based platforms (macOS, Windows).
-#[cfg(not(target_os = "linux"))]
-fn log_file_path() -> Result<PathBuf, String> {
-    // The directory layout (including the standardized `keymapperd` name) is
-    // owned by `common::paths`; only the per-process file name is decided
-    // here.
-    let dir = crate::common::paths::log_dir()?;
-    // Name the file after the running process so keymapperd and virtkbdd log
-    // to separate files.  Fall back to the historical name when the executable
-    // path cannot be resolved.
-    let file_name = std::env::current_exe()
-        .ok()
-        .and_then(|exe| {
-            exe.file_stem()
-                .map(|stem| format!("{}.log", stem.to_string_lossy()))
-        })
-        .unwrap_or_else(|| "keymapperd.log".to_string());
-    Ok(dir.join(file_name))
-}
-
-/// Build the ftlog logger writing to *root*.
+/// Build the ftlog logger writing to *sink*.
 ///
 /// The logger's own level is pinned to [`LevelFilter::Trace`] so it never
-/// filters on its own; the gate's atomic is the single level gate. On Linux
-/// the timestamp is empty (the journal adds one); on the file platforms
-/// ftlog's default `YYYY-MM-DD HH:MM:SS.mmm±HH` is used.
-fn build_ftlog(
-    root: impl Write + Send + 'static,
-) -> Result<ftlog::Logger, String> {
+/// filters on its own; the gate's atomic is the single level gate. The
+/// timestamp format comes from the platform sink: empty on Linux (the journal
+/// timestamps each line), ftlog's default `YYYY-MM-DD HH:MM:SS.mmm±HH` on the
+/// file platforms.
+fn build_ftlog(sink: LogSink) -> Result<ftlog::Logger, String> {
     let builder = ftlog::builder()
         .max_log_level(LevelFilter::Trace)
         .format(FtLogFormat);
 
-    #[cfg(target_os = "linux")]
-    let builder = builder.time_format(empty_time_format());
+    let builder = match sink.time_format {
+        Some(time_format) => builder.time_format(time_format),
+        None => builder,
+    };
 
     builder
-        .root(LatencyStrippingWriter { inner: root })
+        .root(LatencyStrippingWriter { inner: sink.root })
         .build()
         .map_err(|e| e.to_string())
-}
-
-/// An empty `time` format description, so ftlog writes no timestamp on
-/// Linux (the journal adds one).
-#[cfg(target_os = "linux")]
-fn empty_time_format() -> OwnedFormatItem {
-    // An empty description always parses (to an empty compound item that
-    // formats to the empty string).
-    time::format_description::parse_owned::<1>("")
-        .expect("an empty format description always parses")
 }
 
 /// The line body ftlog writes for every record: `{LEVEL} {target}: {message}`.
@@ -570,7 +513,11 @@ mod tests {
         let appender =
             ftlog::appender::FileAppender::builder().path(&path).build();
 
-        let logger = build_ftlog(appender).expect("ftlog logger");
+        let sink = LogSink {
+            root: Box::new(appender),
+            time_format: None,
+        };
+        let logger = build_ftlog(sink).expect("ftlog logger");
         install_gate(Box::new(logger));
 
         CURRENT_LEVEL.store(level_to_u8(LevelFilter::Info), Ordering::SeqCst);

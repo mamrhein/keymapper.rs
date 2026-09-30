@@ -48,6 +48,13 @@
 //! types; it must never depend on [`daemon`](crate::daemon) (the daemon
 //! orchestrates the platform backends, not the other way around).
 //!
+//! The same module also exports a `pub(crate)` [`logging`] facet — the
+//! OS-specific log destination (stderr/journal on Linux, a rotating file on
+//! macOS and Windows) consumed by [`crate::daemon::logging`] so the daemon
+//! holds no `#[cfg(target_os)]` sink branches. Like [`endpoint`] it is
+//! `pub(crate)`: only the daemon drives it, so it is not part of the public
+//! platform surface documented above.
+//!
 //! The `test-util` dev-dependency crate and `cli` may depend only on this
 //! surface, never on the `pub(crate)` internals of the platform
 //! module. Anything not re-exported here is private implementation
@@ -69,6 +76,16 @@ pub mod app_identity;
 /// drives it, so it is not part of the public platform surface documented
 /// above.
 pub(crate) mod endpoint;
+
+/// The OS-specific log destination behind the daemon's log sink.
+///
+/// The ftlog line format, level gate, and panic hook stay in
+/// [`crate::daemon::logging`]; this private facet owns only *where* the log
+/// bytes go and *whether* each line carries a timestamp, exposed through the
+/// `LogSink` factory that `daemon::logging` consumes. It is `pub(crate)`
+/// because only the daemon drives it, so it is not part of the public platform
+/// surface documented above.
+pub(crate) mod logging;
 
 #[cfg(target_os = "linux")]
 mod linux;
