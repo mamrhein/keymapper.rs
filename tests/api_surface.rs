@@ -19,9 +19,12 @@
 
 use std::path::PathBuf;
 
-#[cfg(target_os = "windows")]
+// Test-harness-only platform exports: public only under the `test-util`
+// feature (which the e2e build enables transitively via the `test-util`
+// crate).
+#[cfg(all(target_os = "windows", feature = "test-util"))]
 use keymapper::platform::Key;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "test-util"))]
 use keymapper::platform::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient};
 // Platform items that exist only on a single OS.
 #[cfg(target_os = "linux")]

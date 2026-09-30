@@ -21,11 +21,18 @@
 //!   `HidUsage` translation used by the `keys probe` CLI command)
 //! - linux: additionally `hid_translate` (the canonical `HidUsage` and
 //!   evdev-keycode tables) and `VIRTUAL_KEYBOARD_NAME`
-//! - macos: additionally `KarabinerClient`, `INJECTION_KEYBOARD_IDENTITY`,
-//!   `start_virtkbd` (the root virtkbdd daemon entry point), and
-//!   `console_user_home` (the console user's home directory, consumed by
-//!   `common::config_path` when running as root)
-//! - windows: additionally `Key`
+//! - macos: additionally `start_virtkbd` (the root virtkbdd daemon entry
+//!   point) and `console_user_home` (the console user's home directory,
+//!   consumed by `common::config_path` when running as root)
+//! - windows: (no platform-specific production export beyond the common set)
+//!
+//! Test-harness-only exports are gated behind the crate's `test-util` feature
+//! (enabled by the `test-util` dev-dependency crate and, transitively, by the
+//! `tests/` crate during a test build): `KarabinerClient` and
+//! `INJECTION_KEYBOARD_IDENTITY` on macOS, and `Key` on Windows.  With the
+//! feature off — as in a plain `cargo build` of the release binaries — they
+//! are not part of the public surface, so the "test-util sees the same code as
+//! the daemon" boundary is compiler-enforced rather than conventional.
 //!
 //! A uniform signature is not a uniform-behavior guarantee.  `list_keyboards`
 //! and `start_mapping` share one signature across platforms, but their
@@ -104,16 +111,17 @@ pub use linux::hid_translate;
 pub use linux::{
     VIRTUAL_KEYBOARD_NAME, keycode_to_hid_usage, list_keyboards, start_mapping,
 };
-#[cfg(target_os = "macos")]
-pub use macos::{
-    INJECTION_KEYBOARD_IDENTITY, KarabinerClient, keycode_to_hid_usage,
-    list_keyboards, start_mapping, start_virtkbd,
-};
+// Test-harness-only surface (see the module docs): only reachable with
+// the `test-util` feature on.
+#[cfg(all(target_os = "macos", feature = "test-util"))]
+pub use macos::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient};
 #[cfg(target_os = "macos")]
 pub use macos::{config_dir, console_user_home};
+#[cfg(target_os = "macos")]
+pub use macos::{
+    keycode_to_hid_usage, list_keyboards, start_mapping, start_virtkbd,
+};
+#[cfg(all(target_os = "windows", feature = "test-util"))]
+pub use windows::Key;
 #[cfg(target_os = "windows")]
-pub use windows::INJECTED_TAG;
-#[cfg(target_os = "windows")]
-pub use windows::config_dir;
-#[cfg(target_os = "windows")]
-pub use windows::{Key, keycode_to_hid_usage, list_keyboards, start_mapping};
+pub use windows::{keycode_to_hid_usage, list_keyboards, start_mapping};

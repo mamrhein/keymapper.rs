@@ -121,3 +121,11 @@ windows = {
 [target."cfg(unix)".dependencies]
 libc = "0.2"
 signal-hook = "0.4"
+
+[features]
+# Exposes the test-harness-only public surface — `platform::KarabinerClient`
+# and `platform::INJECTION_KEYBOARD_IDENTITY` (macOS), `platform::Key`
+# (Windows), and `keymap_core::logfmt::fmt_key_event` — that the `test-util`
+# crate and the e2e harness consume.  Off by default, so a plain `cargo build`
+# of the release binaries does not carry any test-only API.
+test-util = []

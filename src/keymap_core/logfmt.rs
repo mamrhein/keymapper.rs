@@ -42,9 +42,17 @@ use std::fmt::Arguments;
 
 use log::{Level, debug, trace};
 
+// `KeyEvent` and `compile_modifier_bits` are used only by the
+// test-harness `fmt_key_event` helper below, so they share its feature
+// gate.
+#[cfg(feature = "test-util")]
 use crate::{
-    common::{config::KeyEvent, hid_usage::HidUsage, modifier::ModifierRole},
-    keymap_core::mapping_cache::{NativeKey, compile_modifier_bits},
+    common::config::KeyEvent,
+    keymap_core::mapping_cache::compile_modifier_bits,
+};
+use crate::{
+    common::{hid_usage::HidUsage, modifier::ModifierRole},
+    keymap_core::mapping_cache::NativeKey,
 };
 
 /// The direction of a key event in the `recv`/`pass`/`swal` line.
@@ -226,8 +234,11 @@ pub(crate) fn fmt_native_keys(keys: &[NativeKey]) -> String {
 /// line: compile its held modifiers to a bitmask and format the resulting
 /// [`NativeKey`] (e.g. `LeftCommand+A`, or just `A` when no modifier is held).
 ///
-/// Public so the e2e harness can build its expected emit sequence from the
-/// config and compare it, string for string, against the daemon's log.
+/// Gated behind the `test-util` feature: it is public solely so the e2e
+/// harness can build its expected emit sequence from the config and compare
+/// it, string for string, against the daemon's log.  The daemon itself renders
+/// emits through [`fmt_native_key`].
+#[cfg(feature = "test-util")]
 pub fn fmt_key_event(event: &KeyEvent) -> String {
     fmt_native_key(&NativeKey {
         modifiers: compile_modifier_bits(&event.modifiers),
@@ -301,6 +312,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-util")]
     #[test]
     fn fmt_key_event_compiles_modifier_bits() {
         let event = KeyEvent {

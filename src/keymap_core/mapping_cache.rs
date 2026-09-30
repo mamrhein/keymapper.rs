@@ -225,8 +225,8 @@ fn compile_outputs(
 ///
 /// Each modifier contributes its own specific bit (left vs right is
 /// preserved).  `pub(crate)` so `logfmt` can render an output [`KeyEvent`]
-/// for the debug `emit` line (see
-/// [`crate::keymap_core::logfmt::fmt_key_event`]).
+/// for the debug `emit` line (`logfmt::fmt_native_key`, and the test-only
+/// `logfmt::fmt_key_event`).
 pub(crate) fn compile_modifier_bits(modifiers: &[HidUsage]) -> u8 {
     let mut bits: u8 = 0;
     for usage in modifiers {
