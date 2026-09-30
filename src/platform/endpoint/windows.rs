@@ -35,6 +35,11 @@
 //! `D:(A;;GA;;;<user-sid>)`, a single `ACCESS_ALLOWED` ACE granting the
 //! caller's SID generic all — converted by the Win32 security API, so the
 //! ACL byte layout is produced by the system rather than assembled by hand.
+//!
+//! The serve loop runs a daemon-supplied [`ConnectionHandler`] once per
+//! accepted connection; it never names the protocol above it. The reply is
+//! buffered in the pipe, so the transport waits for the client to drain it
+//! before disconnecting the single instance (see [`serve`]).
 
 use std::{
     io::{Read, Write},
@@ -84,7 +89,7 @@ use windows::{
     core::{PCWSTR, PWSTR},
 };
 
-use super::{IoStream, handle_connection};
+use super::{ConnectionHandler, Endpoint, IoStream};
 use crate::common::paths::local_app_data_dir;
 
 /// The control pipe name prefix. The daemon appends a per-run random nonce
@@ -145,6 +150,9 @@ const BUSY_RETRY_WAIT_MS: u32 = 100;
 /// CLI, which completes an exchange in milliseconds, while keeping the
 /// wedge time bounded.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The Windows control endpoint.
+pub(crate) struct WindowsEndpoint;
 
 /// A named-pipe handle owned by the control-socket thread.
 ///
@@ -572,47 +580,17 @@ fn publish_name(path: &Path, name: &str) -> Result<(), String> {
 ///
 /// `None` when the file is missing, unreadable, or does not name a pipe: a
 /// stale or foreign file must never redirect the CLI to an arbitrary
-/// object, and a missing name surfaces (via [`connect`]) as "no daemon".
+/// object, and a missing name surfaces (via [`Endpoint::connect`]) as "no
+/// daemon".
 fn resolve_published_name(path: &Path) -> Option<String> {
     let name = fs_err::read_to_string(path).ok()?;
     let name = name.trim();
     (!name.is_empty() && name.starts_with(PIPE_ROOT)).then(|| name.to_string())
 }
 
-/// Create the pipe and spawn the serve thread.
-///
-/// The pipe name carries a per-run random nonce (see [`pipe_name`]); once
-/// the endpoint is live, its exact name is published to [`publish_path`]
-/// so the CLI can discover it.
-pub fn start() {
-    let Some(name) = pipe_name() else {
-        warn!(
-            "Could not generate a control pipe nonce; runtime log-level \
-             control is disabled"
-        );
-        return;
-    };
-    if !start_with_name(&name) {
-        return;
-    }
-    let published = match publish_path() {
-        Some(path) => publish_name(&path, &name),
-        None => Err(format!(
-            "no local data directory (LOCALAPPDATA) for {}",
-            PUBLISH_FILE_NAME
-        )),
-    };
-    if let Err(e) = published {
-        warn!(
-            "The control endpoint is live but its name could not be \
-             published: {e}; the CLI will not find the running daemon"
-        );
-    }
-}
-
 /// Create the pipe at *name*, apply the owner-only DACL, and spawn the
 /// serve thread. Returns whether the control endpoint is live.
-fn start_with_name(name: &str) -> bool {
+fn start_with_name(name: &str, handler: ConnectionHandler) -> bool {
     let Some(sid) = current_user_sid() else {
         warn!(
             "Could not resolve the current user's SID; runtime log-level \
@@ -701,7 +679,7 @@ fn start_with_name(name: &str) -> bool {
     let handle = PipeHandle(pipe);
     if let Err(e) = std::thread::Builder::new()
         .name("control-socket".into())
-        .spawn(move || serve(handle))
+        .spawn(move || serve(handle, handler))
     {
         warn!("Failed to spawn the control-socket thread: {e}");
         return false;
@@ -711,7 +689,7 @@ fn start_with_name(name: &str) -> bool {
 
 /// Serve connections on a single pipe instance: connect, handle one command,
 /// wait for a client to close, disconnect, repeat.
-fn serve(handle: PipeHandle) {
+fn serve(handle: PipeHandle, handler: ConnectionHandler) {
     // One manual-reset event reused by every overlapped operation on this
     // instance (accept, read, write, close-wait); the serve loop runs one
     // operation at a time, so a single event suffices. The event lives as
@@ -732,15 +710,13 @@ fn serve(handle: PipeHandle) {
             continue;
         }
         let mut conn = Pipe { handle, event };
-        if let Err(e) = handle_connection(&mut conn) {
-            debug!("control-socket connection ended: {e}");
-        } else {
-            // The response sits in the pipe buffer; the client reads it at
-            // its own pace and closes afterwards.  Wait for that close
-            // before disconnecting, because `DisconnectNamedPipe` resets
-            // the instance and discards any unread data — disconnecting
-            // first would make the client's read fail with
-            // `ERROR_PIPE_NOT_CONNECTED`.
+        // The handler owns the protocol and its own connection logging. On a
+        // completed exchange the response sits in the pipe buffer; the client
+        // reads it at its own pace and closes afterwards. Wait for that close
+        // before disconnecting, because `DisconnectNamedPipe` resets the
+        // instance and discards any unread data — disconnecting first would
+        // make the client's read fail with `ERROR_PIPE_NOT_CONNECTED`.
+        if handler(&mut conn) {
             wait_for_client_close(&mut conn);
         }
         unsafe {
@@ -811,19 +787,6 @@ fn wait_for_client_close(conn: &mut Pipe) {
     }
 }
 
-/// Open the control pipe as a client.
-///
-/// The daemon's pipe name contains a per-run nonce, so the CLI does not
-/// guess a fixed name; it resolves the name from the daemon's publish file
-/// (see [`resolve_published_name`]). A missing or unparsable file is
-/// reported as [`std::io::ErrorKind::NotFound`], which [`connect_error`]
-/// renders like a missing daemon.
-pub(super) fn connect() -> std::io::Result<Box<dyn IoStream>> {
-    let path = publish_path().ok_or_else(no_endpoint_error)?;
-    let name = resolve_published_name(&path).ok_or_else(no_endpoint_error)?;
-    connect_to(&name)
-}
-
 /// The error for "no published control endpoint": no local data directory
 /// to look in, or no readable publish file in it.
 fn no_endpoint_error() -> std::io::Error {
@@ -887,22 +850,69 @@ fn open_pipe(name: &[u16]) -> std::io::Result<HANDLE> {
     Ok(handle)
 }
 
-/// Convert a failed client connection into a friendly message for the CLI.
-pub(super) fn connect_error(e: &std::io::Error) -> String {
-    match e.raw_os_error() {
-        Some(ERROR_FILE_NOT_FOUND) => "no daemon is running (or it published \
-                                       no control endpoint)"
-            .to_string(),
-        Some(ERROR_PIPE_BUSY) => {
-            "the daemon control pipe is busy; try again".to_string()
+impl Endpoint for WindowsEndpoint {
+    /// Create the pipe and spawn the serve thread.
+    ///
+    /// The pipe name carries a per-run random nonce (see [`pipe_name`]); once
+    /// the endpoint is live, its exact name is published to [`publish_path`]
+    /// so the CLI can discover it.
+    fn start(handler: ConnectionHandler) {
+        let Some(name) = pipe_name() else {
+            warn!(
+                "Could not generate a control pipe nonce; runtime log-level \
+                 control is disabled"
+            );
+            return;
+        };
+        if !start_with_name(&name, handler) {
+            return;
         }
-        // Covers `no_endpoint_error` (no publish file) and any other
-        // "not found" that means no reachable daemon.
-        _ if e.kind() == std::io::ErrorKind::NotFound => {
-            "no daemon is running (it published no control endpoint)"
-                .to_string()
+        let published = match publish_path() {
+            Some(path) => publish_name(&path, &name),
+            None => Err(format!(
+                "no local data directory (LOCALAPPDATA) for {}",
+                PUBLISH_FILE_NAME
+            )),
+        };
+        if let Err(e) = published {
+            warn!(
+                "The control endpoint is live but its name could not be \
+                 published: {e}; the CLI will not find the running daemon"
+            );
         }
-        _ => e.to_string(),
+    }
+
+    /// Open the control pipe as a client.
+    ///
+    /// The daemon's pipe name contains a per-run nonce, so the CLI does
+    /// not guess a fixed name; it resolves the name from the daemon's
+    /// publish file (see [`resolve_published_name`]). A missing or
+    /// unparsable file is reported as [`std::io::ErrorKind::NotFound`],
+    /// which [`Endpoint::connect_error`] renders like a missing daemon.
+    fn connect() -> std::io::Result<Box<dyn IoStream>> {
+        let path = publish_path().ok_or_else(no_endpoint_error)?;
+        let name =
+            resolve_published_name(&path).ok_or_else(no_endpoint_error)?;
+        connect_to(&name)
+    }
+
+    /// Convert a failed client connection into a friendly message for the CLI.
+    fn connect_error(e: &std::io::Error) -> String {
+        match e.raw_os_error() {
+            Some(ERROR_FILE_NOT_FOUND) => "no daemon is running (or it \
+                                           published no control endpoint)"
+                .to_string(),
+            Some(ERROR_PIPE_BUSY) => {
+                "the daemon control pipe is busy; try again".to_string()
+            }
+            // Covers `no_endpoint_error` (no publish file) and any other
+            // "not found" that means no reachable daemon.
+            _ if e.kind() == std::io::ErrorKind::NotFound => {
+                "no daemon is running (it published no control endpoint)"
+                    .to_string()
+            }
+            _ => e.to_string(),
+        }
     }
 }
 
@@ -912,14 +922,26 @@ pub(super) fn connect_error(e: &std::io::Error) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{read_frame, write_frame},
-        *,
-    };
+    use super::*;
+    use crate::common::frame;
 
     /// `ACCESS_ALLOWED_ACE_TYPE`, the ACE type byte our owner-only DACL uses
     /// (the `windows` crate exposes no named constant for it).
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    /// The payload bound the round-trip tests frame with (mirrors the
+    /// protocol's `MAX_PAYLOAD`).
+    const MAX: usize = 256;
+
+    /// A serve-loop handler that echoes one request frame back as the reply.
+    /// It keeps the transport tests independent of the daemon protocol while
+    /// still exercising a full request/response round trip over the pipe.
+    fn echo(io: &mut dyn IoStream) -> bool {
+        let Ok(command) = frame::read_payload(io, MAX) else {
+            return false;
+        };
+        frame::write_frame(io, &command).is_ok()
+    }
 
     /// The whole control-auth model rests on one property: the pipe's DACL
     /// grants access to *exactly* the current user and nobody else.  Apply
@@ -1009,7 +1031,7 @@ mod tests {
     /// The production path end to end: create the pipe without a security
     /// descriptor, apply the owner-only DACL, and serve.  A client of the
     /// same user (like the CLI) must be able to connect and round-trip a
-    /// command.  Before the two-step approach, `CreateNamedPipeW` with the
+    /// frame.  Before the two-step approach, `CreateNamedPipeW` with the
     /// descriptor failed on recent Windows builds and the pipe never came
     /// up.
     ///
@@ -1019,12 +1041,13 @@ mod tests {
     fn start_with_name_serves_the_owner() {
         let name =
             format!("\\\\.\\pipe\\keymapperd_prod_{}", std::process::id());
-        assert!(start_with_name(&name));
+        assert!(start_with_name(&name, echo));
         let mut conn = connect_to(&name).expect("the owner could not connect");
-        write_frame(&mut conn, "SET-LOG-LEVEL info")
-            .expect("the write failed");
-        let reply = read_frame(&mut conn).expect("the read failed");
-        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+        let command = b"SET-LOG-LEVEL info";
+        frame::write_frame(&mut conn, command).expect("the write failed");
+        let reply =
+            frame::read_payload(&mut conn, MAX).expect("the read failed");
+        assert_eq!(reply, command);
     }
 
     /// The client must close its handle on drop, so the daemon's single pipe
@@ -1073,16 +1096,17 @@ mod tests {
         let handle = PipeHandle(pipe);
         std::thread::Builder::new()
             .name("control-socket".into())
-            .spawn(move || serve(handle))
+            .spawn(move || serve(handle, echo))
             .expect("failed to spawn the serve thread");
 
         // First exchange (like the e2e probe): connect, round-trip a frame,
         // and drop the connection.
         let mut first = connect_to(&name).expect("the first connect failed");
-        write_frame(&mut first, "SET-LOG-LEVEL info")
+        frame::write_frame(&mut first, b"ping")
             .expect("the first write failed");
-        let reply = read_frame(&mut first).expect("the first read failed");
-        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+        let reply = frame::read_payload(&mut first, MAX)
+            .expect("the first read failed");
+        assert_eq!(reply, b"ping");
         drop(first);
 
         // Second exchange from the same process (like the e2e phase): this
@@ -1090,10 +1114,11 @@ mod tests {
         // and the serve loop disconnected the instance.
         let mut second =
             connect_to(&name).expect("the pipe instance was not released");
-        write_frame(&mut second, "SET-LOG-LEVEL info")
+        frame::write_frame(&mut second, b"pong")
             .expect("the second write failed");
-        let reply = read_frame(&mut second).expect("the second read failed");
-        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+        let reply = frame::read_payload(&mut second, MAX)
+            .expect("the second read failed");
+        assert_eq!(reply, b"pong");
     }
 
     /// Pipe names are unpredictable: the fixed prefix plus a fresh 32-
@@ -1113,7 +1138,7 @@ mod tests {
 
     /// The discovery channel end to end (with a temp publish file instead
     /// of the real `%LOCALAPPDATA%` one): publish the live pipe's name,
-    /// resolve it back, and round-trip a command through the resolved
+    /// resolve it back, and round-trip a frame through the resolved
     /// name.
     ///
     /// The serve thread is intentionally left running; it dies with the
@@ -1124,17 +1149,18 @@ mod tests {
         let path = dir.path().join(PUBLISH_FILE_NAME);
         let name =
             format!("\\\\.\\pipe\\keymapperd_disc_{}", std::process::id());
-        assert!(start_with_name(&name));
+        assert!(start_with_name(&name, echo));
         publish_name(&path, &name).expect("publishing failed");
         let resolved =
             resolve_published_name(&path).expect("discovery failed");
         assert_eq!(resolved, name);
         let mut conn =
             connect_to(&resolved).expect("the owner could not connect");
-        write_frame(&mut conn, "SET-LOG-LEVEL info")
-            .expect("the write failed");
-        let reply = read_frame(&mut conn).expect("the read failed");
-        assert!(reply.starts_with("OK "), "unexpected reply: {reply}");
+        let command = b"SET-LOG-LEVEL info";
+        frame::write_frame(&mut conn, command).expect("the write failed");
+        let reply =
+            frame::read_payload(&mut conn, MAX).expect("the read failed");
+        assert_eq!(reply, command);
     }
 
     /// A missing, empty, or foreign publish file must never yield a name:
@@ -1167,7 +1193,7 @@ mod tests {
             Ok(_) => panic!("a dead name must not connect"),
             Err(e) => e,
         };
-        let msg = connect_error(&err);
+        let msg = <WindowsEndpoint as Endpoint>::connect_error(&err);
         assert!(
             msg.contains("no daemon is running"),
             "unexpected message: {msg}"
@@ -1177,11 +1203,16 @@ mod tests {
     #[test]
     fn connect_error_classifies() {
         let e = std::io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND);
-        assert!(connect_error(&e).contains("no daemon is running"));
-        let e = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY);
-        assert!(connect_error(&e).contains("busy"));
         assert!(
-            connect_error(&no_endpoint_error())
+            <WindowsEndpoint as Endpoint>::connect_error(&e)
+                .contains("no daemon is running")
+        );
+        let e = std::io::Error::from_raw_os_error(ERROR_PIPE_BUSY);
+        assert!(
+            <WindowsEndpoint as Endpoint>::connect_error(&e).contains("busy")
+        );
+        assert!(
+            <WindowsEndpoint as Endpoint>::connect_error(&no_endpoint_error())
                 .contains("no daemon is running")
         );
     }

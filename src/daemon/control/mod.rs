@@ -40,36 +40,26 @@
 //! emitter channel (macOS `ipc_frame`). This one still frames a
 //! UTF-8 command line while the emitter frames an encoded batch of keys, so
 //! the two payload formats — and the protocols above them — stay independent.
+//!
+//! This module is the platform-agnostic half of the control path: the framed
+//! protocol and command dispatch. The OS-specific transport — the unix socket
+//! and its `SO_PEERCRED`/`getpeereid` peer check, and the Windows named pipe
+//! and its ACL machinery — lives in [`crate::platform::endpoint`] behind the
+//! [`Endpoint`](crate::platform::endpoint::Endpoint) trait, which this module
+//! consumes. [`start`] hands a [`serve_connection`] callback to the transport,
+//! so the dependency arrow stays `daemon -> platform`: the transport runs the
+//! protocol but never names it.
 
 use std::io::{Read, Write};
 
-use log::LevelFilter;
+use log::{LevelFilter, debug};
 use thiserror::Error;
 
 use super::logging;
-use crate::common::frame::{self, FrameError};
-
-/// A stream that is both a [`Read`] and a [`Write`].
-///
-/// Rust forbids two non-auto traits in one object position, so a connected
-/// endpoint is boxed as `Box<dyn IoStream>`; the blanket impl lets any
-/// `Read + Write` type satisfy it.
-pub(crate) trait IoStream: Read + Write {}
-impl<T: Read + Write + ?Sized> IoStream for T {}
-
-#[cfg(unix)]
-mod unix;
-#[cfg(windows)]
-mod windows;
-
-#[cfg(unix)]
-pub use unix::start;
-#[cfg(unix)]
-use unix::{connect, connect_error};
-#[cfg(windows)]
-pub use windows::start;
-#[cfg(windows)]
-use windows::{connect, connect_error};
+use crate::{
+    common::frame::{self, FrameError},
+    platform::endpoint::{ControlEndpoint, Endpoint, IoStream},
+};
 
 /// Upper bound for a frame payload. A command or reply is at most a few dozen
 /// bytes; the bound guards against a corrupt length field from a hostile or
@@ -158,6 +148,53 @@ impl PartialEq for ControlError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Server side
+// ---------------------------------------------------------------------------
+
+/// Bind the platform control endpoint and serve framed requests until the
+/// process exits.
+///
+/// The bind and the accept loop are delegated to the platform transport
+/// ([`ControlEndpoint`]); binding is best-effort, so a failure is logged there
+/// and the daemon keeps running at the level it was seeded from. Each
+/// authorized connection is served by [`serve_connection`], which speaks the
+/// framed protocol defined in this module.
+pub fn start() {
+    ControlEndpoint::start(serve_connection);
+}
+
+/// Serve one authorized control connection.
+///
+/// Returns `true` on a completed exchange, so the transport may wait for the
+/// peer to drain the reply before tearing the connection down (see
+/// [`ConnectionHandler`](crate::platform::endpoint::ConnectionHandler)).
+fn serve_connection(io: &mut dyn IoStream) -> bool {
+    match handle_connection(io) {
+        Ok(()) => true,
+        Err(e) => {
+            // The peer is a well-behaved CLI; a failure is almost always the
+            // peer closing early, so a debug note is enough.
+            debug!("control-socket connection ended: {e}");
+            false
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Client side
+// ---------------------------------------------------------------------------
+
+/// Connect to the running daemon's endpoint through the platform transport.
+fn connect() -> std::io::Result<Box<dyn IoStream>> {
+    ControlEndpoint::connect()
+}
+
+/// Classify a failed client connect into a message the CLI can show.
+fn connect_error(e: &std::io::Error) -> String {
+    ControlEndpoint::connect_error(e)
+}
+
 /// Connect to the running daemon's control endpoint and set its log level.
 ///
 /// Returns the daemon's reply string (e.g. `OK debug`). A
@@ -182,7 +219,11 @@ fn exchange<R: Read + Write>(
 /// Serve one connection: read a single request frame, dispatch it, and write
 /// the reply frame. A connection carries exactly one command, so the peer
 /// closes after the reply.
-pub(crate) fn handle_connection<R: Read + Write>(
+///
+/// Generic over the stream and `?Sized` so it runs both on a concrete
+/// transport stream and on the `dyn IoStream` the platform transport hands to
+/// [`serve_connection`].
+fn handle_connection<R: Read + Write + ?Sized>(
     io: &mut R,
 ) -> Result<(), ControlError> {
     let command = read_frame(io)?;
@@ -282,7 +323,7 @@ fn encode_frame(payload: &str) -> Vec<u8> {
 }
 
 /// Write one frame (encoding *payload*) to *writer*.
-pub(crate) fn write_frame<W: Write>(
+pub(crate) fn write_frame<W: Write + ?Sized>(
     writer: &mut W,
     payload: &str,
 ) -> Result<(), ControlError> {
@@ -296,7 +337,7 @@ pub(crate) fn write_frame<W: Write>(
 ///
 /// The envelope is validated by the shared codec; this adds the UTF-8 check
 /// specific to the command channel.
-pub(crate) fn read_frame<R: Read>(
+pub(crate) fn read_frame<R: Read + ?Sized>(
     reader: &mut R,
 ) -> Result<String, ControlError> {
     let payload = frame::read_payload(reader, MAX_PAYLOAD)

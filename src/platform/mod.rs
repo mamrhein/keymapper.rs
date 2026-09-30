@@ -60,6 +60,16 @@
 /// the daemon (`keymapperd`) and the CLI (`keymapper appnames`).
 pub mod app_identity;
 
+/// The OS-specific transport behind the daemon's runtime control endpoint.
+///
+/// The framed control protocol stays in [`crate::daemon::control`]; this
+/// private facet owns only the unix socket and Windows named-pipe transports
+/// and their kernel-credential auth, exposed through the `Endpoint` trait that
+/// `daemon::control` consumes. It is `pub(crate)` because only the daemon
+/// drives it, so it is not part of the public platform surface documented
+/// above.
+pub(crate) mod endpoint;
+
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]

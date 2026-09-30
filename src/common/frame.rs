@@ -107,7 +107,10 @@ pub(crate) fn encode(payload: &[u8]) -> Vec<u8> {
 }
 
 /// Write one frame (encoding *payload*) to *writer*, flushing when done.
-pub(crate) fn write_frame<W: Write>(
+///
+/// `?Sized` so a boxed `dyn` stream (the control endpoint's connected
+/// transport) can be framed directly, not just a concrete reader/writer.
+pub(crate) fn write_frame<W: Write + ?Sized>(
     writer: &mut W,
     payload: &[u8],
 ) -> Result<(), FrameError> {
@@ -155,7 +158,7 @@ pub(crate) fn parse(
 /// hostile or buggy peer.  A clean stream close before a full frame (partial
 /// header or partial payload) is reported as [`FrameError::Eof`], keeping a
 /// peer close distinguishable from an I/O failure.
-pub(crate) fn read_payload<R: Read>(
+pub(crate) fn read_payload<R: Read + ?Sized>(
     reader: &mut R,
     max_payload: usize,
 ) -> Result<Vec<u8>, FrameError> {
@@ -181,7 +184,7 @@ pub(crate) fn read_payload<R: Read>(
 /// Read exactly `buf.len()` bytes, mapping a clean EOF to
 /// [`FrameError::Eof`] so a peer close is distinguishable from an I/O
 /// failure.
-fn read_exact_eof<R: Read>(
+fn read_exact_eof<R: Read + ?Sized>(
     reader: &mut R,
     buf: &mut [u8],
 ) -> Result<(), FrameError> {
