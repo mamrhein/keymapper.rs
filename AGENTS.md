@@ -97,5 +97,3 @@ Follow the git commit message style.
 - Respond directly with the code block.
 - Plan the logic in maximum 3 bullet points before writing the code.
 - Do not repeat your explanations.
-
-Here's a thinking process: Analyze User Input:
