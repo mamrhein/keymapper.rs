@@ -93,8 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // The active-app source queries the platform directly; the state struct
-    // keeps it as a closure so tests can supply a fixed value.
+    // The active-app source queries the platform directly; the runtime's
+    // focus tracker keeps it as a closure so tests can supply a fixed
+    // value.
     let active_app_source: Box<dyn Fn() -> String + Send + Sync> =
         Box::new(app_identity::get_active_app_name);
 

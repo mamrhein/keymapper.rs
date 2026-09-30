@@ -23,6 +23,7 @@ pub mod hid_usage;
 pub mod keyboard;
 pub(crate) mod modifier;
 pub(crate) mod paths;
+pub(crate) mod ttl_value;
 
 pub use hid_usage::HidUsage;
 pub use keyboard::{
