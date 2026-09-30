@@ -222,21 +222,10 @@ fn platform_root() -> Result<Box<dyn Write + Send>, String> {
 /// The log file path on the file-based platforms (macOS, Windows).
 #[cfg(not(target_os = "linux"))]
 fn log_file_path() -> Result<PathBuf, String> {
-    let dir = if cfg!(windows) {
-        // The config lives in %APPDATA%; the logs go to %LOCALAPPDATA%.
-        dirs::data_local_dir()
-            .ok_or_else(|| {
-                "no local data directory (LOCALAPPDATA) available".to_string()
-            })?
-            .join("keymapperd")
-            .join("logs")
-    } else {
-        dirs::home_dir()
-            .ok_or_else(|| "no home directory available".to_string())?
-            .join("Library")
-            .join("Logs")
-            .join("keymapper")
-    };
+    // The directory layout (including the standardized `keymapperd` name) is
+    // owned by `common::paths`; only the per-process file name is decided
+    // here.
+    let dir = crate::common::paths::log_dir()?;
     // Name the file after the running process so keymapperd and virtkbdd log
     // to separate files.  Fall back to the historical name when the executable
     // path cannot be resolved.

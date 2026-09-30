@@ -85,6 +85,7 @@ use windows::{
 };
 
 use super::{IoStream, handle_connection};
+use crate::common::paths::local_app_data_dir;
 
 /// The control pipe name prefix. The daemon appends a per-run random nonce
 /// (see [`pipe_name`]), so the full name is unpredictable: a same-user
@@ -100,11 +101,11 @@ const PIPE_ROOT: &str = r"\\.\pipe\";
 /// characters).
 const NONCE_BYTES: usize = 16;
 
-/// The daemon's directory under `%LOCALAPPDATA%` (shared with the log
-/// directory).
-const APP_DIR_NAME: &str = "keymapperd";
-
 /// The file that publishes the daemon's live pipe name to the CLI.
+///
+/// The containing `%LOCALAPPDATA%\keymapperd` directory is owned by
+/// [`common::paths`] and shared with the log directory (see
+/// [`local_app_data_dir`]).
 const PUBLISH_FILE_NAME: &str = "control.pipe";
 
 /// The pipe's input and output buffer sizes (bytes).
@@ -526,11 +527,7 @@ fn pipe_name() -> Option<String> {
 /// `%LOCALAPPDATA%\keymapperd\control.pipe`. Both sides resolve it the
 /// same way from the environment, so they always agree.
 fn publish_path() -> Option<PathBuf> {
-    Some(
-        dirs::data_local_dir()?
-            .join(APP_DIR_NAME)
-            .join(PUBLISH_FILE_NAME),
-    )
+    Some(local_app_data_dir()?.join(PUBLISH_FILE_NAME))
 }
 
 /// Publish *name* (the pipe the daemon is serving) at *path*.

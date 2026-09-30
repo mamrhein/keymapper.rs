@@ -172,6 +172,36 @@ pub fn restart() -> Result<(), String> {
     start()
 }
 
+// Secondary-service API. Windows has no service co-managed alongside
+// keymapperd (the virtual keyboard is a driver, not a supervised process).
+// These no-op members let `daemon_cmd`'s cross-platform handlers stay free of
+// `#[cfg(target_os)]` branches.
+
+/// The name of the secondary service, or `None` on platforms without one.
+pub fn secondary_name() -> Option<&'static str> {
+    None
+}
+
+/// Whether the secondary service is running (always false on Windows).
+pub fn secondary_is_running() -> bool {
+    false
+}
+
+/// Start the secondary service (no-op on Windows).
+pub fn secondary_start() -> Result<(), String> {
+    Ok(())
+}
+
+/// Stop the secondary service (no-op on Windows).
+pub fn secondary_stop() -> Result<(), String> {
+    Ok(())
+}
+
+/// Restart the secondary service (no-op on Windows).
+pub fn secondary_restart() -> Result<(), String> {
+    Ok(())
+}
+
 /// After a successful spawn, wait briefly and confirm the daemon is still
 /// alive.
 fn verify_start(spawn_result: Result<(), String>) -> Result<(), String> {

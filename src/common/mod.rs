@@ -18,9 +18,11 @@
 pub mod config;
 pub mod config_io;
 pub mod config_path;
+pub(crate) mod frame;
 pub mod hid_usage;
 pub mod keyboard;
 pub(crate) mod modifier;
+pub(crate) mod paths;
 
 pub use hid_usage::HidUsage;
 pub use keyboard::{

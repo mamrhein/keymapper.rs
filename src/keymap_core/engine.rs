@@ -1255,5 +1255,51 @@ mod tests {
         assert_eq!(down(&mut b, HidUsage::A), Decision::Pass);
     }
 
+    #[test]
+    fn chord_output_carries_its_modifier_bit() {
+        // A bare modifier trigger whose output is itself a chord (`Cmd+A`):
+        // the engine emits a single 'A' key carrying the Command bit (bit 3),
+        // as a clean tap (release mask 0, since the bare CapsLock trigger
+        // forwards no modifiers of its own). Re-expressed from the old
+        // `simulate_mapping` seam in `daemon::state`.
+        let mut e = engine("- mappings:\n    CapsLock: Cmd+A");
+        assert_eq!(
+            down(&mut e, HidUsage::CapsLock),
+            Decision::Emit {
+                release: 0,
+                outputs: vec![NativeKey {
+                    modifiers: 1 << 3,
+                    usage: HidUsage::A,
+                }],
+            }
+        );
+        assert_eq!(
+            up(&mut e, HidUsage::CapsLock),
+            Decision::Swallow { release: 0 }
+        );
+    }
+
+    #[test]
+    fn list_output_emits_each_key_in_order() {
+        // A list output (`[LeftControl, A]`) is emitted as two independent
+        // keys, in order. Re-expressed from the old `simulate_mapping` seam
+        // in `daemon::state`.
+        // The leading `LeftControl` in the list is a held modifier base, so
+        // the trigger's key-up releases it (release mask 1); the `A` is a
+        // clean tap emitted between them.
+        let mut e = engine("- mappings:\n    CapsLock: [LeftControl, A]");
+        assert_eq!(
+            down(&mut e, HidUsage::CapsLock),
+            Decision::Emit {
+                release: 0,
+                outputs: vec![nk(HidUsage::LeftControl), nk(HidUsage::A)],
+            }
+        );
+        assert_eq!(
+            up(&mut e, HidUsage::CapsLock),
+            Decision::Swallow { release: 1 }
+        );
+    }
+
     // Debug-formatting coverage lives with the formatters in `logfmt`.
 }

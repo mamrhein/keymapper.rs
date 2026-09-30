@@ -23,21 +23,22 @@
 //! fields.  The codec is hand-rolled and trivially testable, so no external
 //! serialization dependency is introduced.
 //!
-//! The daemon control socket (`daemon::control`) uses the same
-//! `[u8 version][u32 LE len][payload]` shape for its single-line command
-//! payloads.  The two codecs are intentionally kept separate so the emitter
-//! and control protocols can evolve independently.
+//! The `[u8 version][u32 LE len][payload]` envelope is shared with the daemon
+//! control socket (`daemon::control`) through `common::frame`; only the
+//! key-batch payload format below is specific to this channel, so the emitter
+//! and control protocols can evolve independently above the envelope.
 
-use std::io::{ErrorKind, Read};
+use std::io::Read;
 
 use thiserror::Error;
 
 use crate::{
-    common::hid_usage::HidUsage, keymap_core::mapping_cache::NativeKey,
+    common::{
+        frame::{self, FrameError},
+        hid_usage::HidUsage,
+    },
+    keymap_core::mapping_cache::NativeKey,
 };
-
-/// The only supported frame version.
-const FRAME_VERSION: u8 = 1;
 
 /// Upper bound for a single frame's payload.  Legitimate payloads are at most
 /// 328 bytes; the bound guards against corrupt length fields.
@@ -53,7 +54,7 @@ pub enum IpcFrameError {
     #[error("frame too short: {0} bytes")]
     TooShort(usize),
 
-    /// The frame version is not [`FRAME_VERSION`].
+    /// The frame version is not the shared `common::frame` version.
     #[error("unsupported frame version {0}")]
     UnsupportedVersion(u8),
 
@@ -110,48 +111,44 @@ impl PartialEq for IpcFrameError {
     }
 }
 
+// The frame envelope errors come from the shared `common::frame` codec; fold
+// them into the matching IPC variants so the public error surface (and the
+// tests that assert on it) stay unchanged while framing has one definition.
+impl From<FrameError> for IpcFrameError {
+    fn from(e: FrameError) -> Self {
+        match e {
+            FrameError::TooShort(n) => Self::TooShort(n),
+            FrameError::UnsupportedVersion(v) => Self::UnsupportedVersion(v),
+            FrameError::PayloadTooLarge(n) => Self::PayloadTooLarge(n),
+            FrameError::Truncated { need, have } => {
+                Self::Truncated { need, have }
+            }
+            FrameError::Eof => Self::Eof,
+            FrameError::Io(e) => Self::Io(e),
+        }
+    }
+}
+
 /// Encode a batch of keys as a single frame.
 ///
 /// Batches longer than [`MAX_KEYS_PER_FRAME`] are truncated to the bound; the
 /// tap callback never produces such a batch, so this is defensive only.
 pub fn encode(keys: &[NativeKey]) -> Vec<u8> {
     let key_count = keys.len().min(MAX_KEYS_PER_FRAME);
-    let payload_len = 4 + key_count * 5;
 
-    let mut frame = Vec::with_capacity(5 + payload_len);
-    frame.push(FRAME_VERSION);
-    frame.extend_from_slice(&(payload_len as u32).to_le_bytes());
-    frame.extend_from_slice(&(key_count as u32).to_le_bytes());
+    let mut payload = Vec::with_capacity(4 + key_count * 5);
+    payload.extend_from_slice(&(key_count as u32).to_le_bytes());
     for key in keys.iter().take(key_count) {
-        frame.push(key.modifiers);
-        frame.extend_from_slice(&key.usage.code().to_le_bytes());
+        payload.push(key.modifiers);
+        payload.extend_from_slice(&key.usage.code().to_le_bytes());
     }
-    frame
+    frame::encode(&payload)
 }
 
 /// Decode a complete frame buffer produced by [`encode`].
-pub fn decode(frame: &[u8]) -> Result<Vec<NativeKey>, IpcFrameError> {
-    let (version, rest) =
-        frame.split_first().ok_or(IpcFrameError::TooShort(0))?;
-    if *version != FRAME_VERSION {
-        return Err(IpcFrameError::UnsupportedVersion(*version));
-    }
-    if rest.len() < 4 {
-        return Err(IpcFrameError::TooShort(frame.len()));
-    }
-
-    let payload_len =
-        u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
-    if payload_len > MAX_PAYLOAD_LEN {
-        return Err(IpcFrameError::PayloadTooLarge(payload_len));
-    }
+pub fn decode(buf: &[u8]) -> Result<Vec<NativeKey>, IpcFrameError> {
     let payload =
-        rest.get(4..4 + payload_len)
-            .ok_or(IpcFrameError::Truncated {
-                need: 4 + payload_len,
-                have: rest.len(),
-            })?;
-
+        frame::parse(buf, MAX_PAYLOAD_LEN).map_err(IpcFrameError::from)?;
     decode_payload(payload)
 }
 
@@ -161,40 +158,9 @@ pub fn decode(frame: &[u8]) -> Result<Vec<NativeKey>, IpcFrameError> {
 pub fn decode_stream<R: Read>(
     reader: &mut R,
 ) -> Result<Vec<NativeKey>, IpcFrameError> {
-    let mut header = [0u8; 5];
-    read_exact_eof(reader, &mut header)?;
-
-    let payload_len =
-        u32::from_le_bytes([header[1], header[2], header[3], header[4]])
-            as usize;
-    if payload_len > MAX_PAYLOAD_LEN {
-        return Err(IpcFrameError::PayloadTooLarge(payload_len));
-    }
-
-    let mut payload = vec![0u8; payload_len];
-    read_exact_eof(reader, &mut payload)?;
-
-    let mut frame = Vec::with_capacity(5 + payload_len);
-    frame.extend_from_slice(&header);
-    frame.extend_from_slice(&payload);
-
-    decode(&frame)
-}
-
-/// Read exactly `buf.len()` bytes, mapping a clean EOF to
-/// [`IpcFrameError::Eof`] so the server can distinguish a peer close from a
-/// real I/O failure.
-fn read_exact_eof<R: Read>(
-    reader: &mut R,
-    buf: &mut [u8],
-) -> Result<(), IpcFrameError> {
-    match reader.read_exact(buf) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-            Err(IpcFrameError::Eof)
-        }
-        Err(e) => Err(IpcFrameError::Io(e)),
-    }
+    let payload = frame::read_payload(reader, MAX_PAYLOAD_LEN)
+        .map_err(IpcFrameError::from)?;
+    decode_payload(&payload)
 }
 
 /// Decode the payload portion of a frame (after the 5-byte header).
@@ -245,6 +211,7 @@ fn decode_payload(payload: &[u8]) -> Result<Vec<NativeKey>, IpcFrameError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::frame::FRAME_VERSION;
 
     fn key(modifiers: u8, usage: HidUsage) -> NativeKey {
         NativeKey { modifiers, usage }

@@ -22,10 +22,9 @@
 //! socket is already proof of ownership. That supersedes the `daemon_token`
 //! removed in Phase 2.
 //!
-//! Wire format. A frame reuses the versioned length-prefix idea from the
-//! macOS emitter channel (`platform::macos::ipc_frame`) and carries a single
-//! UTF-8 command line with no terminating newline (the length prefix
-//! delimits it):
+//! Wire format. A frame uses the shared length-prefixed envelope from
+//! `common::frame` and carries a single UTF-8 command line with no
+//! terminating newline (the length prefix delimits it):
 //!
 //! ```text
 //! [u8 version = 1][u32 LE payload_len][payload]
@@ -36,18 +35,19 @@
 //! A connection carries exactly one request/response pair, then the peer
 //! closes.
 //!
-//! The two codecs share this framing shape but are intentionally kept
-//! separate: this one frames a UTF-8 command line, whereas `ipc_frame` frames
-//! an encoded batch of mapped-output keys. Keeping them apart lets the control
-//! and emitter protocols evolve independently without a shared codec binding
-//! them.
+//! Only the envelope is shared: the header codec, the version check, and the
+//! payload-size bound live in `common::frame`, consumed here and by the macOS
+//! emitter channel (macOS `ipc_frame`). This one still frames a
+//! UTF-8 command line while the emitter frames an encoded batch of keys, so
+//! the two payload formats — and the protocols above them — stay independent.
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{Read, Write};
 
 use log::LevelFilter;
 use thiserror::Error;
 
 use super::logging;
+use crate::common::frame::{self, FrameError};
 
 /// A stream that is both a [`Read`] and a [`Write`].
 ///
@@ -71,9 +71,6 @@ pub use windows::start;
 #[cfg(windows)]
 use windows::{connect, connect_error};
 
-/// The only supported frame version.
-const FRAME_VERSION: u8 = 1;
-
 /// Upper bound for a frame payload. A command or reply is at most a few dozen
 /// bytes; the bound guards against a corrupt length field from a hostile or
 /// buggy peer.
@@ -86,7 +83,7 @@ pub enum ControlError {
     #[error("frame too short: {0} bytes")]
     TooShort(usize),
 
-    /// The frame version is not [`FRAME_VERSION`].
+    /// The frame version is not the shared `common::frame` version.
     #[error("unsupported frame version {0}")]
     UnsupportedVersion(u8),
 
@@ -118,6 +115,24 @@ pub enum ControlError {
     /// An underlying I/O error while reading or writing the stream.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+// The frame envelope errors come from the shared `common::frame` codec; fold
+// them into the matching control variants so the public error surface (and the
+// tests that assert on it) stay unchanged while framing has one definition.
+impl From<FrameError> for ControlError {
+    fn from(e: FrameError) -> Self {
+        match e {
+            FrameError::TooShort(n) => Self::TooShort(n),
+            FrameError::UnsupportedVersion(v) => Self::UnsupportedVersion(v),
+            FrameError::PayloadTooLarge(n) => Self::PayloadTooLarge(n),
+            FrameError::Truncated { need, have } => {
+                Self::Truncated { need, have }
+            }
+            FrameError::Eof => Self::Eof,
+            FrameError::Io(e) => Self::Io(e),
+        }
+    }
 }
 
 // `std::io::Error` is not comparable, so derive is off the table; compare the
@@ -254,19 +269,16 @@ fn level_name(level: LevelFilter) -> &'static str {
 // Framing
 // ---------------------------------------------------------------------------
 
-/// Encode *payload* as a single frame.
+/// Encode *payload* as a single frame (truncated to [`MAX_PAYLOAD`]).
 ///
-/// The payload is truncated to [`MAX_PAYLOAD`] before framing. Commands and
-/// replies are far shorter than the bound, so this is defensive only.
-pub(crate) fn encode_frame(payload: &str) -> Vec<u8> {
+/// Test-only helper: production writes go through [`write_frame`], which
+/// truncates and frames inline. Kept here so the wire-layout and
+/// truncation tests pin the exact bytes.
+#[cfg(test)]
+fn encode_frame(payload: &str) -> Vec<u8> {
     let bytes = payload.as_bytes();
     let bytes = &bytes[..bytes.len().min(MAX_PAYLOAD)];
-
-    let mut frame = Vec::with_capacity(5 + bytes.len());
-    frame.push(FRAME_VERSION);
-    frame.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    frame.extend_from_slice(bytes);
-    frame
+    frame::encode(bytes)
 }
 
 /// Write one frame (encoding *payload*) to *writer*.
@@ -274,50 +286,22 @@ pub(crate) fn write_frame<W: Write>(
     writer: &mut W,
     payload: &str,
 ) -> Result<(), ControlError> {
-    let frame = encode_frame(payload);
-    writer.write_all(&frame)?;
-    writer.flush()?;
-    Ok(())
+    let bytes = payload.as_bytes();
+    let bytes = &bytes[..bytes.len().min(MAX_PAYLOAD)];
+    frame::write_frame(writer, bytes).map_err(ControlError::from)
 }
 
 /// Read and decode one frame from *reader*, returning the payload as a
 /// [`String`].
+///
+/// The envelope is validated by the shared codec; this adds the UTF-8 check
+/// specific to the command channel.
 pub(crate) fn read_frame<R: Read>(
     reader: &mut R,
 ) -> Result<String, ControlError> {
-    let mut header = [0u8; 5];
-    read_exact_eof(reader, &mut header)?;
-
-    let version = header[0];
-    if version != FRAME_VERSION {
-        return Err(ControlError::UnsupportedVersion(version));
-    }
-
-    let len = u32::from_le_bytes([header[1], header[2], header[3], header[4]])
-        as usize;
-    if len > MAX_PAYLOAD {
-        return Err(ControlError::PayloadTooLarge(len));
-    }
-
-    let mut payload = vec![0u8; len];
-    read_exact_eof(reader, &mut payload)?;
+    let payload = frame::read_payload(reader, MAX_PAYLOAD)
+        .map_err(ControlError::from)?;
     String::from_utf8(payload).map_err(|_| ControlError::InvalidUtf8)
-}
-
-/// Read exactly `buf.len()` bytes, mapping a clean EOF to
-/// [`ControlError::Eof`] so a peer close is distinguishable from an I/O
-/// failure.
-fn read_exact_eof<R: Read>(
-    reader: &mut R,
-    buf: &mut [u8],
-) -> Result<(), ControlError> {
-    match reader.read_exact(buf) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
-            Err(ControlError::Eof)
-        }
-        Err(e) => Err(ControlError::Io(e)),
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +313,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+    use crate::common::frame::FRAME_VERSION;
 
     #[test]
     fn frame_round_trips_a_command() {

@@ -26,29 +26,38 @@ mod windows;
 // `is_running` stays public (the e2e harness probes it). The lifecycle
 // operations are aliased so the command functions below can share the verb
 // names (`start`, `stop`, `restart`) without colliding with them.
+// Each platform module exports the same surface — the keymapperd lifecycle
+// (`is_running`/`start`/`stop`/`restart`) plus an optional secondary service
+// (`secondary_*`) — so the handlers below never branch on `target_os`.
 #[cfg(target_os = "linux")]
 pub use linux::is_running;
 #[cfg(target_os = "linux")]
 use linux::{
-    restart as restart_service, start as start_service, stop as stop_service,
+    restart as restart_service, secondary_is_running, secondary_name,
+    secondary_restart, secondary_start, secondary_stop,
+    start as start_service, stop as stop_service,
 };
 #[cfg(target_os = "macos")]
 pub use macos::is_running;
 #[cfg(target_os = "macos")]
 use macos::{
-    restart as restart_service, start as start_service, stop as stop_service,
-    virtkbdd_is_running, virtkbdd_restart, virtkbdd_start, virtkbdd_stop,
+    restart as restart_service, secondary_is_running, secondary_name,
+    secondary_restart, secondary_start, secondary_stop,
+    start as start_service, stop as stop_service,
 };
 #[cfg(target_os = "windows")]
 pub use windows::is_running;
 #[cfg(target_os = "windows")]
 use windows::{
-    restart as restart_service, start as start_service, stop as stop_service,
+    restart as restart_service, secondary_is_running, secondary_name,
+    secondary_restart, secondary_start, secondary_stop,
+    start as start_service, stop as stop_service,
 };
 
 use crate::daemon::{control, logging::LevelFilter};
 
-/// Report whether keymapperd (and, on macOS, virtkbdd) is running.
+/// Report whether keymapperd (and the platform's secondary service, where
+/// there is one) is running.
 pub fn status() {
     if is_running() {
         println!("keymapperd is running");
@@ -57,11 +66,9 @@ pub fn status() {
     }
 
     // On macOS the service manager also owns virtkbdd; report it as well.
-    #[cfg(target_os = "macos")]
-    if virtkbdd_is_running() {
-        println!("virtkbdd is running");
-    } else {
-        println!("virtkbdd is not running");
+    if let Some(name) = secondary_name() {
+        let state = if secondary_is_running() { "" } else { "not " };
+        println!("{name} is {state}running");
     }
 }
 
@@ -76,10 +83,11 @@ pub fn start() -> Result<(), Box<dyn std::error::Error>> {
 
     // On macOS the service manager also owns virtkbdd; bring it up even when
     // keymapperd was already running.
-    #[cfg(target_os = "macos")]
-    if !virtkbdd_is_running() {
-        virtkbdd_start()?;
-        println!("virtkbdd started");
+    if let Some(name) = secondary_name()
+        && !secondary_is_running()
+    {
+        secondary_start()?;
+        println!("{name} started");
     }
 
     Ok(())
@@ -96,10 +104,11 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
 
     // On macOS the service manager also owns virtkbdd; stop it even when
     // keymapperd was not running.
-    #[cfg(target_os = "macos")]
-    if virtkbdd_is_running() {
-        virtkbdd_stop()?;
-        println!("virtkbdd stopped");
+    if let Some(name) = secondary_name()
+        && secondary_is_running()
+    {
+        secondary_stop()?;
+        println!("{name} stopped");
     }
 
     Ok(())
@@ -111,10 +120,9 @@ pub fn restart() -> Result<(), Box<dyn std::error::Error>> {
     println!("keymapperd restarted");
 
     // On macOS the service manager also owns virtkbdd.
-    #[cfg(target_os = "macos")]
-    {
-        virtkbdd_restart()?;
-        println!("virtkbdd restarted");
+    if let Some(name) = secondary_name() {
+        secondary_restart()?;
+        println!("{name} restarted");
     }
 
     Ok(())
