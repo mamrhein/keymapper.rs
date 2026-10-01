@@ -37,11 +37,6 @@ pub(crate) const CONFIG_FILE_NAME: &str = "config.yaml";
 #[cfg(windows)]
 pub(crate) const LOG_DIR_NAME: &str = "logs";
 
-/// The file that publishes the daemon's live control-pipe name to the CLI
-/// (Windows).
-#[cfg(windows)]
-pub(crate) const CONTROL_PUBLISH_FILE_NAME: &str = "control.pipe";
-
 /// The daemon's directory under the per-user local app-data root
 /// (`%LOCALAPPDATA%\keymapperd`), shared by the log directory and the
 /// control-pipe publish file so both sides resolve the same location.
