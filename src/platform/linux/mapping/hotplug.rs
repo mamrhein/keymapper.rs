@@ -31,7 +31,6 @@ use parking_lot::{Mutex, RwLock};
 use udev::{Enumerator, MonitorBuilder};
 
 use super::{
-    VIRTUAL_KEYBOARD_NAME,
     device::{
         ManagedDevice, capture_held_keys, drain_pending_events,
         native_release_window,
@@ -41,7 +40,11 @@ use super::{
 use crate::{
     common::keyboard::{KeyboardSpecifier, filter_keyboards_by_specifiers},
     keymap_core::{engine::MappingEngine, lookup::Lookup},
-    platform::linux::keyboard::build_keyboard_from_udev,
+    platform::{
+        LinuxBackend,
+        backend::KeySource as _,
+        linux::{capture::KeyScanner, keyboard::build_keyboard_from_udev},
+    },
 };
 
 /// Minimum delay before the supervisor restarts a monitor that exited
@@ -332,7 +335,9 @@ fn handle_device_add(
     // Skip the daemon's own virtual output device, which udev also tags as
     // a keyboard.  Grabbing it would feed the daemon's emitted events back
     // into its input loop, causing them to be re-emitted indefinitely.
-    if kb.name == VIRTUAL_KEYBOARD_NAME {
+    // The predicate is the contract's echo-suppression policy
+    // (`KeySource::is_output_device`).
+    if LinuxBackend.is_output_device(&kb.name) {
         return;
     }
 
@@ -378,7 +383,7 @@ fn handle_device_add(
         device,
         path: kb.device.clone(),
         engine: MappingEngine::new(Arc::clone(lookup)),
-        pending_scan: None,
+        scanner: KeyScanner::new(),
         // The hot-plug thread cannot reach the virtual device, so the event
         // loop re-emits the held modifiers' key-downs on the device's first
         // event.

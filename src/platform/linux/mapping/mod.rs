@@ -18,6 +18,11 @@
 //! The heavy lifting is split across three submodules: `epoll` wraps the raw
 //! epoll FFI, `device` holds the per-device state and event processing, and
 //! `hotplug` runs the udev add/remove monitor.
+//!
+//! This module also implements the emission half of the cross-platform
+//! device-I/O contract ([`crate::platform::backend`]): [`LinuxEmitter`]
+//! owns the uinput output device, its release-mask policy, and the
+//! execution of the deferred [`OutputAction`]s.
 
 mod device;
 mod epoll;
@@ -34,8 +39,9 @@ use std::{
 };
 
 use device::{
-    ManagedDevice, capture_held_keys, drain_pending_events, emit_actions,
-    native_release_window, plan_initial_state, process_device_events,
+    ManagedDevice, capture_held_keys, drain_pending_events, emit_key_event,
+    forward_key_event, hold_modifier_output, native_release_window,
+    plan_initial_state, process_device_events, release_consumed_modifiers,
     sync_initial_state,
 };
 use epoll::{EpollFd, epoll_add, epoll_wait_raw};
@@ -49,12 +55,15 @@ use signal_hook::{
     flag::register,
 };
 
-use super::keyboard::discover_and_open_keyboards;
+use super::{capture::KeyScanner, keyboard::discover_and_open_keyboards};
 use crate::{
     common::keyboard::{
         KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
     },
-    keymap_core::{engine::MappingEngine, lookup::Lookup},
+    keymap_core::{
+        emission::ConsumedReleaseFate, engine::MappingEngine, lookup::Lookup,
+    },
+    platform::backend::{Emitter, OutputAction},
 };
 
 /// Name of the daemon's own uinput output device.
@@ -63,6 +72,69 @@ use crate::{
 /// grab the device; the daemon itself never grabs it (see `handle_device_add`
 /// in the `hotplug` submodule).
 pub const VIRTUAL_KEYBOARD_NAME: &str = "CrossPlatform_Virtual_Keyboard";
+
+// ---------------------------------------------------------------------------
+// Emission (the `Emitter` half of the platform contract)
+// ---------------------------------------------------------------------------
+
+/// The Linux output device: the daemon's uinput virtual keyboard.
+///
+/// The [`Emitter`] impl is the single home of the platform's emission
+/// semantics: the release-mask policy and the execution of the deferred
+/// [`OutputAction`]s against the virtual device.
+pub(super) struct LinuxEmitter<'a> {
+    device: &'a mut VirtualDevice,
+}
+
+impl<'a> LinuxEmitter<'a> {
+    fn new(device: &'a mut VirtualDevice) -> Self {
+        Self { device }
+    }
+}
+
+impl Emitter for LinuxEmitter<'_> {
+    /// The uinput device already released a consumed modifier when the
+    /// trigger fired (its clean-tap release went out first), so the
+    /// physical release of that modifier is swallowed.
+    const CONSUMED_RELEASE: ConsumedReleaseFate = ConsumedReleaseFate::Swallow;
+
+    fn emit(&mut self, action: &OutputAction) {
+        match action {
+            OutputAction::Forward { native, value } => {
+                forward_key_event(self.device, *native, *value);
+            }
+            OutputAction::ReleaseConsumed { consumed } => {
+                release_consumed_modifiers(self.device, *consumed);
+            }
+            OutputAction::Tap { native_key } => {
+                if let Err(e) = emit_key_event(self.device, native_key) {
+                    error!("Emit error: {e}");
+                }
+            }
+            OutputAction::Hold { native_key } => {
+                if let Err(e) = hold_modifier_output(self.device, native_key) {
+                    error!("Emit error: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Execute a batch of output actions produced by [`process_device_events`]
+/// or [`plan_initial_state`] against the virtual output device.
+///
+/// Runs **outside** the managed-device lock: the sub-event pacing sleeps
+/// (see `EMIT_SPACING` in the `device` submodule) happen here rather than
+/// in the critical section, so a mapped burst no longer stalls the
+/// hot-plug thread or the other devices' events.  The actions are
+/// replayed in the exact order they were decided, so the emitted key
+/// sequence is unchanged.
+fn emit_actions(device: &mut VirtualDevice, actions: &[OutputAction]) {
+    let mut emitter = LinuxEmitter::new(device);
+    for action in actions {
+        emitter.emit(action);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // evdev event loop (epoll-based, multi-device)
@@ -109,7 +181,7 @@ pub fn start_mapping(
             device,
             path: kb.device,
             engine: MappingEngine::new(Arc::clone(&lookup)),
-            pending_scan: None,
+            scanner: KeyScanner::new(),
             // Synced inline below, before the event loop starts.
             pending_initial_state: false,
             pending_held_modifiers: Vec::new(),

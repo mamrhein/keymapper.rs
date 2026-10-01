@@ -15,10 +15,12 @@
 //! shared with the daemon: the probe must be able to observe raw input while
 //! the daemon is *not* capturing, and on Linux the daemon grabs each device
 //! exclusively, so a second reader could not share it anyway.  What *is*
-//! shared is the decode step — every platform routes through
-//! [`crate::platform::keycode_to_hid_usage`] — so a native key code's
-//! canonical name has exactly one definition per platform and cannot drift
-//! from the daemon's.
+//! shared is the decode path: on Linux the probe runs the platform
+//! contract's read-only observe mode (`KeySource::observe`), whose scanner
+//! is the one the daemon's capture feeds, and macOS and Windows route
+//! through [`crate::platform::keycode_to_hid_usage`] — so a native key
+//! code's canonical name has exactly one definition per platform and
+//! cannot drift from the daemon's.
 
 #[cfg(target_os = "linux")]
 mod linux;

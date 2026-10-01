@@ -55,12 +55,18 @@
 //! types; it must never depend on [`daemon`](crate::daemon) (the daemon
 //! orchestrates the platform backends, not the other way around).
 //!
-//! The same module also exports a `pub(crate)` [`logging`] facet — the
-//! OS-specific log destination (stderr/journal on Linux, a rotating file on
-//! macOS and Windows) consumed by [`crate::daemon::logging`] so the daemon
-//! holds no `#[cfg(target_os)]` sink branches. Like [`endpoint`] it is
-//! `pub(crate)`: only the daemon drives it, so it is not part of the public
-//! platform surface documented above.
+//! The same module also exports two `pub(crate)` facets.  [`logging`] is
+//! the OS-specific log destination (stderr/journal on Linux, a rotating
+//! file on macOS and Windows) consumed by [`crate::daemon::logging`] so
+//! the daemon holds no `#[cfg(target_os)]` sink branches.  [`backend`] is
+//! the cross-platform device-I/O contract (`KeySource`/`Emitter`:
+//! enumerate, observe, emit, suppress-echo, release-mask policy);
+//! Linux implements it (`LinuxBackend`, `LinuxEmitter`) and its
+//! `list_keyboards`/`start_mapping` exports above drive the contract —
+//! macOS and Windows port in follow-up increments (architecture review
+//! Phase 3, one platform at a time).  Like [`endpoint`] both facets are
+//! `pub(crate)`: only the daemon and the CLI drive them, so they are not
+//! part of the public platform surface documented above.
 //!
 //! The `test-util` dev-dependency crate and `cli` may depend only on this
 //! surface, never on the `pub(crate)` internals of the platform
@@ -73,6 +79,18 @@
 /// two-function interface over per-OS implementations and is consumed by
 /// the daemon (`keymapperd`) and the CLI (`keymapper appnames`).
 pub mod app_identity;
+
+/// The cross-platform device-I/O contract (`KeySource`/`Emitter`).
+///
+/// Names the five responsibilities every capture backend has — enumerate,
+/// observe, emit, suppress-echo, release-mask policy — so per-platform
+/// backends are judged against a contract instead of an example.  Linux
+/// implements it (`platform::linux::backend::LinuxBackend`,
+/// `platform::linux::mapping::LinuxEmitter`); macOS and Windows land in
+/// follow-up increments, which is why the module is `allow(dead_code)`
+/// off Linux until they do.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) mod backend;
 
 /// The OS-specific transport behind the daemon's runtime control endpoint.
 ///
@@ -103,6 +121,8 @@ mod windows;
 
 // Only the public API surface is re-exported.  Internal helpers (signal
 // handlers, static flags) stay private to the platform module.
+#[cfg(target_os = "linux")]
+pub(crate) use linux::LinuxBackend;
 #[cfg(target_os = "linux")]
 pub use linux::config_dir;
 #[cfg(target_os = "linux")]
