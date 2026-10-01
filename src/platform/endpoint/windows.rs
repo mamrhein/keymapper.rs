@@ -43,7 +43,7 @@
 
 use std::{
     io::{Read, Write},
-    os::windows::io::AsRawHandle,
+    os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -52,26 +52,26 @@ use log::{debug, info, warn};
 use windows::{
     Win32::{
         Foundation::{
-            BOOL, CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
+            CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
             ERROR_PIPE_CONNECTED, GENERIC_ALL, GetLastError, HANDLE, HLOCAL,
             LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
-            ACCESS_ALLOWED_ACE, ACL,
+            ACL,
             Authorization::{
                 ConvertSidToStringSidW,
                 ConvertStringSecurityDescriptorToSecurityDescriptorW,
-                GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
+                SE_KERNEL_OBJECT, SetSecurityInfo,
             },
             Cryptography::ProcessPrng,
-            DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
+            DACL_SECURITY_INFORMATION, GetLengthSid,
             GetSecurityDescriptorDacl, GetTokenInformation,
             PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
             CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
             FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING,
-            PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+            PIPE_ACCESS_DUPLEX, ReadFile, WRITE_DAC, WriteFile,
         },
         System::{
             IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
@@ -86,7 +86,7 @@ use windows::{
             },
         },
     },
-    core::{PCWSTR, PWSTR},
+    core::{BOOL, PCWSTR, PWSTR},
 };
 
 use super::{ConnectionHandler, Endpoint, IoStream};
@@ -434,6 +434,13 @@ fn current_user_sid() -> Option<Vec<u32>> {
 /// bytes and the mismatched-arity `SetSecurityInfo` declaration this code
 /// used to carry.
 ///
+/// The object type is `SE_KERNEL_OBJECT`, not `SE_FILE_OBJECT`: a named-pipe
+/// handle is a kernel object with no file generic mapping, so under
+/// `SE_FILE_OBJECT` the system tries to map the ACE's `GENERIC_ALL` mask
+/// through that (empty) mapping and rejects the call with
+/// `ERROR_INVALID_PARAMETER`. `SE_KERNEL_OBJECT` stores the mask verbatim and
+/// is accepted for the pipe handle as well as for the publish file.
+///
 /// Returns the Win32 error code, or 0 on success.  A non-zero result means
 /// the caller must fail closed and never expose the handle.
 fn apply_owner_only_dacl(handle: HANDLE, sid: &[u32]) -> u32 {
@@ -492,7 +499,7 @@ fn apply_owner_only_dacl(handle: HANDLE, sid: &[u32]) -> u32 {
         } else {
             SetSecurityInfo(
                 handle,
-                SE_FILE_OBJECT,
+                SE_KERNEL_OBJECT,
                 DACL_SECURITY_INFORMATION,
                 None,
                 None,
@@ -503,7 +510,7 @@ fn apply_owner_only_dacl(handle: HANDLE, sid: &[u32]) -> u32 {
         };
         // The descriptor was allocated by
         // `ConvertStringSecurityDescriptorToSecurityDescriptorW`.
-        let _ = LocalFree(Some(HLOCAL(sd.0 as *mut core::ffi::c_void)));
+        let _ = LocalFree(Some(HLOCAL(sd.0)));
         code
     }
 }
@@ -554,10 +561,15 @@ fn publish_name(path: &Path, name: &str) -> Result<(), String> {
         fs_err::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    let mut file = fs_err::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
+    // The DACL is applied to this handle right after creation, so it must
+    // carry `WRITE_DAC`; the plain write access `fs_err` requests by default
+    // does not include it and the descriptor application would fail with
+    // `ERROR_ACCESS_DENIED`. The generic-all mask already implies
+    // `WRITE_DAC`; the flag is set explicitly for clarity.
+    let mut opts = fs_err::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    opts.options_mut().access_mode(GENERIC_ALL.0 | WRITE_DAC.0);
+    let mut file = opts
         .open(path)
         .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
     // Harden before writing: the file only ever holds the name while it
@@ -603,6 +615,9 @@ fn start_with_name(name: &str, handler: ConnectionHandler) -> bool {
     // The pipe is created without a security descriptor; the owner-only DACL
     // is applied right afterwards. Passing the descriptor to
     // `CreateNamedPipeW` directly is rejected on recent Windows builds.
+    // `WRITE_DAC` is requested in `openMode` because `SetSecurityInfo` needs
+    // it on the handle: without it the DACL application fails closed with
+    // `ERROR_ACCESS_DENIED`.
     let (pipe, code) = {
         let mut attempts = 0;
         loop {
@@ -611,6 +626,7 @@ fn start_with_name(name: &str, handler: ConnectionHandler) -> bool {
                     PCWSTR(wide_name.as_ptr()),
                     FILE_FLAGS_AND_ATTRIBUTES(
                         PIPE_ACCESS_DUPLEX.0
+                            | WRITE_DAC.0
                             | FILE_FLAG_FIRST_PIPE_INSTANCE.0
                             | FILE_FLAG_OVERLAPPED.0,
                     ),
@@ -922,12 +938,25 @@ impl Endpoint for WindowsEndpoint {
 
 #[cfg(test)]
 mod tests {
+    use windows::Win32::Security::{
+        ACCESS_ALLOWED_ACE, Authorization::GetSecurityInfo, EqualSid, GetAce,
+    };
+
     use super::*;
     use crate::common::frame;
 
     /// `ACCESS_ALLOWED_ACE_TYPE`, the ACE type byte our owner-only DACL uses
     /// (the `windows` crate exposes no named constant for it).
     const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+
+    /// The access mask the kernel records for our `GENERIC_ALL` ACE.  When
+    /// `SetSecurityInfo` writes the DACL it maps `GENERIC_ALL` through the
+    /// object's generic mapping, so a named pipe (a file object) stores the
+    /// equivalent concrete full-control mask
+    /// `STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x1FF` (`FILE_ALL_ACCESS`)
+    /// rather than the generic bit.  The test checks what the kernel
+    /// recorded, so it expects this mapped mask.
+    const FULL_CONTROL: u32 = 0x001F_01FF;
 
     /// The payload bound the round-trip tests frame with (mirrors the
     /// protocol's `MAX_PAYLOAD`).
@@ -961,7 +990,7 @@ mod tests {
         let pipe = unsafe {
             CreateNamedPipeW(
                 PCWSTR(wide.as_ptr()),
-                FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0),
+                FILE_FLAGS_AND_ATTRIBUTES(PIPE_ACCESS_DUPLEX.0 | WRITE_DAC.0),
                 NAMED_PIPE_MODE(
                     PIPE_TYPE_BYTE.0
                         | PIPE_READMODE_BYTE.0
@@ -980,25 +1009,43 @@ mod tests {
         let code = apply_owner_only_dacl(pipe, &sid);
         assert_eq!(code, 0, "applying the owner-only DACL failed");
 
-        // Read the stored DACL back from the object.  Windows allocates the
-        // returned ACL, so it is released with `LocalFree` at the end.
-        let mut dacl: *mut ACL = core::ptr::null_mut();
+        // Read the stored security descriptor back from the object.  Windows
+        // allocates the combined descriptor, so it is released with
+        // `LocalFree` at the end.  The DACL is taken from that descriptor
+        // with `GetSecurityDescriptorDacl` rather than from the separate ACL
+        // out-parameter: for a named-pipe (kernel) handle the stand-alone ACL
+        // pointer is not a separately-owned allocation, and freeing it
+        // directly corrupts the process heap.
+        let mut sd = PSECURITY_DESCRIPTOR::default();
         let err = unsafe {
             GetSecurityInfo(
                 pipe,
-                SE_FILE_OBJECT,
+                SE_KERNEL_OBJECT,
                 DACL_SECURITY_INFORMATION,
                 None,
                 None,
-                Some(&mut dacl),
                 None,
                 None,
+                Some(&mut sd),
             )
         };
         assert_eq!(err.0, 0, "GetSecurityInfo failed");
-        assert!(!dacl.is_null(), "the pipe has no DACL");
+        assert!(!sd.0.is_null(), "the pipe has no security descriptor");
 
         unsafe {
+            let mut present = BOOL::default();
+            let mut defaulted = BOOL::default();
+            let mut dacl: *mut ACL = core::ptr::null_mut();
+            GetSecurityDescriptorDacl(
+                sd,
+                &mut present,
+                &mut dacl,
+                &mut defaulted,
+            )
+            .expect("could not read the pipe's DACL");
+            assert!(present.as_bool(), "the pipe has no DACL");
+            assert!(!dacl.is_null(), "the pipe has no DACL");
+
             let acl = &*dacl;
             assert_eq!(acl.AceCount, 1, "expected exactly one ACE");
 
@@ -1009,7 +1056,7 @@ mod tests {
                 ace.Header.AceType, ACCESS_ALLOWED_ACE_TYPE,
                 "expected an ACCESS_ALLOWED ACE"
             );
-            assert_eq!(ace.Mask, GENERIC_ALL.0, "wrong ACE mask");
+            assert_eq!(ace.Mask, FULL_CONTROL, "wrong ACE mask");
 
             // The SID follows the ACE's fixed part, starting at `SidStart`.
             let ace_sid =
@@ -1020,12 +1067,13 @@ mod tests {
                 EqualSid(ace_sid, user_sid).is_ok(),
                 "the single ACE was not granted to the current user"
             );
+
+            // The DACL points into the descriptor; only the descriptor
+            // itself is owned and released here.
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
         }
 
-        unsafe {
-            let _ = LocalFree(Some(HLOCAL(dacl as *mut core::ffi::c_void)));
-            let _ = CloseHandle(pipe);
-        }
+        let _ = unsafe { CloseHandle(pipe) };
     }
 
     /// The production path end to end: create the pipe without a security

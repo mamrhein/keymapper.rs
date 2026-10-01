@@ -124,4 +124,6 @@ pub use macos::{
 #[cfg(all(target_os = "windows", feature = "test-util"))]
 pub use windows::Key;
 #[cfg(target_os = "windows")]
-pub use windows::{keycode_to_hid_usage, list_keyboards, start_mapping};
+pub use windows::{
+    config_dir, keycode_to_hid_usage, list_keyboards, start_mapping,
+};
