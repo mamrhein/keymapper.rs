@@ -35,12 +35,13 @@
 //! the daemon" boundary is compiler-enforced rather than conventional.
 //!
 //! A uniform signature is not a uniform-behavior guarantee.  `list_keyboards`
-//! and `start_mapping` share one signature across platforms, but their
-//! behavior diverges: `keyboard_filter` is honored on Linux, ignored on macOS
-//! (lookups pass `device_id = None`), and treated as a global no-op on
-//! Windows; and the empty/no-hardware result differs per platform (Linux and
-//! Windows return `Err`, macOS returns a placeholder).  Each platform's own
-//! `list_keyboards`/`start_mapping` docs are the authority on these rules.
+//! and `start_mapping` share one signature across platforms.  `list_keyboards`
+//! behavior is uniform (architecture review F8): `Ok` carries the discovered
+//! keyboards and may be empty, `Err` means the enumeration itself failed.
+//! `start_mapping` behavior still diverges: `keyboard_filter` is honored on
+//! Linux, ignored on macOS (lookups pass `device_id = None`), and treated as
+//! a global no-op on Windows.  Each platform's own `list_keyboards`/
+//! `start_mapping` docs are the authority on these rules.
 //!
 //! On top of the capture/injection backends, this module also exports
 //! [`app_identity`] — the active-application query used by the daemon's

@@ -128,8 +128,11 @@ pub(crate) enum OutputAction {
 pub(crate) trait KeySource {
     /// Enumerate the keyboard devices this platform can observe.
     ///
-    /// The empty/no-hardware semantics are currently per-platform
-    /// (architecture review F8, tracked as its own Phase 3 item).
+    /// Empty semantics are uniform on every platform (architecture review
+    /// F8): a successful enumeration that finds no keyboards returns
+    /// `Ok(vec![])` — an empty registry is a valid runtime state the daemon
+    /// tolerates by starting inactive — and `Err` is reserved for a failed
+    /// enumeration.
     fn list_keyboards(&self) -> Result<Vec<KeyboardInfo>, Box<dyn Error>>;
 
     /// Whether a device with this name is the daemon's own emission

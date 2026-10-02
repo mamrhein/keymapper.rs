@@ -189,20 +189,6 @@ fn parse_hex_u32(s: &str) -> Option<u32> {
 }
 
 // ---------------------------------------------------------------------------
-// Fallback: minimal keyboard list when ioreg fails
-// ---------------------------------------------------------------------------
-
-fn fallback_keyboards() -> Vec<KeyboardInfo> {
-    vec![KeyboardInfo::new(
-        "System Keyboard".into(),
-        "Apple".into(),
-        "built-in".into(),
-        "system".into(), // intercept all keyboards globally
-        Some("Internal".to_string()),
-    )]
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -216,16 +202,16 @@ fn fallback_keyboards() -> Vec<KeyboardInfo> {
 /// `"0x00120000"`) which uniquely identifies the physical attachment point
 /// (USB port, Bluetooth connection).  This value can be compared against the
 /// device ID field of `CGEvent` to filter events from specific keyboards.
+///
+/// Empty semantics are uniform across platforms (architecture review F8): a
+/// successful `ioreg` run that lists no keyboards returns `Ok(vec![])` — an
+/// earlier implementation fabricated a "System Keyboard" placeholder here,
+/// leaking a fake device id into the registry; `Err` is reserved for a failed
+/// enumeration (here: `ioreg` failing to run or answering with an error).
 pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 {
     let output = run_ioreg()?;
-    let keyboards = parse_ioreg_output(&output);
-
-    if keyboards.is_empty() {
-        return Ok(fallback_keyboards());
-    }
-
-    Ok(keyboards)
+    Ok(parse_ioreg_output(&output))
 }
 
 #[cfg(test)]
@@ -328,6 +314,10 @@ mod tests {
 
     #[test]
     fn list_keyboards_returns_keyboard_info_vec() {
+        // Uniform empty semantics (F8): a successful `ioreg` run that lists
+        // no keyboards yields `Ok(vec![])` (never a placeholder entry), so an
+        // `Err` here can only mean `ioreg` failed — and such an error carries
+        // a message.
         let result = list_keyboards();
         assert!(
             result.is_ok() || !result.unwrap_err().to_string().is_empty(),
