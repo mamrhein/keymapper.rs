@@ -24,6 +24,11 @@
 //! are tapped rather than held (a remapped modifier therefore does not modify
 //! subsequent physical keys), and a consumed modifier's physical release is
 //! passed through, because forwarded events never touch the virtual keyboard.
+//! These emission semantics are the [`Emitter`] impl's [`CONSUMED_RELEASE`]
+//! policy, the single definition of the platform's release-mask meaning.
+//!
+//! [`Emitter`]: crate::platform::backend::Emitter
+//! [`CONSUMED_RELEASE`]: crate::platform::backend::Emitter::CONSUMED_RELEASE
 //!
 //! Because the DriverKit virtual keyboard is a hardware-level device, the keys
 //! it emits re-enter the HID pipeline and are re-received by this tap.  An
@@ -36,6 +41,13 @@
 //! WindowServer connection, which a root daemon cannot have.  It needs the
 //! Input Monitoring and Accessibility TCC grants; without them, tap creation
 //! fails and a clear, actionable error is logged.
+//!
+//! This module also implements the emission half of the cross-platform
+//! device-I/O contract ([`crate::platform::backend`]): [`MacOsEmitter`]
+//! owns the virtkbdd batch sender and the [`EchoTracker`], and the tap
+//! callback drives its capture decode through the shared
+//! `capture::KeyScanner` — the same scanner the read-only observe pump
+//! feeds, so probe and daemon cannot drift.
 
 use std::{
     collections::VecDeque,
@@ -52,8 +64,7 @@ use std::{
 use log::info;
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventSource,
-    CGEventSourceStateID, CGEventTapLocation, CGEventTapOptions,
+    CGEvent, CGEventMask, CGEventTapLocation, CGEventTapOptions,
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 use parking_lot::{Mutex, RwLock};
@@ -62,7 +73,7 @@ use signal_hook::{
     flag::register,
 };
 
-use super::{ipc_client::IpcClient, keycode::keycode_to_hid_usage};
+use super::{capture::KeyScanner, ipc_client::IpcClient};
 use crate::{
     common::{
         hid_usage::{HidUsage, PAGE_KEYBOARD},
@@ -76,6 +87,7 @@ use crate::{
         lookup::Lookup,
         mapping_cache::NativeKey,
     },
+    platform::backend::{Emitter, OutputAction},
 };
 
 /// Start keyboard input capture via a CGEventTap.
@@ -108,13 +120,6 @@ pub fn start_mapping(
     // CGEvents cannot be correlated with an IOKit device.
     let engine = MappingEngine::new(lookup);
 
-    // Seed the CapsLock previous-state tracker with the current alpha-shift
-    // state, so the first CapsLock event is classified against reality rather
-    // than an assumption.
-    let prev_alpha_shift =
-        CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState)
-            .contains(CGEventFlags::MaskAlphaShift);
-
     // Build the tap context.  The callback is a plain function pointer, so all
     // state travels through the refcon; the context is a local that stays
     // alive for the run loop's duration, and its address is passed as the
@@ -124,11 +129,13 @@ pub fn start_mapping(
     // run loop starts, so this is race-free).
     let mut ctx = TapContext {
         engine: Mutex::new(engine),
-        tx: ipc.sender(),
+        emitter: MacOsEmitter {
+            tx: ipc.sender(),
+            echo: EchoTracker::new(),
+        },
         reachable: ipc.reachable_flag(),
         tap_port: std::ptr::null(),
-        prev_alpha_shift,
-        echo: EchoTracker::new(),
+        scanner: KeyScanner::new(),
     };
     let refcon = &mut ctx as *mut TapContext as *mut c_void;
 
@@ -193,38 +200,6 @@ fn run_event_loop(shutdown: &Arc<AtomicBool>) {
     }
 
     info!("Shutdown signal received. Cleaning up...");
-}
-
-/// Compute the down/up state of a `FlagsChanged` event for one of the eight
-/// held modifiers, from its usage and flag mask.
-///
-/// The state is read from the modifier's flag: set means down, cleared means
-/// up.  Returns `None` for usages that are not held modifiers (CapsLock is a
-/// toggle key and is handled separately by [`capslock_is_down`], as are Fn,
-/// etc.).
-fn flags_changed_state(usage: HidUsage, flags: CGEventFlags) -> Option<bool> {
-    HidUsage::hid_usage_to_modifier_bit(usage).map(|bit| match bit {
-        0 | 4 => flags.contains(CGEventFlags::MaskControl),
-        1 | 5 => flags.contains(CGEventFlags::MaskShift),
-        2 | 6 => flags.contains(CGEventFlags::MaskAlternate),
-        _ => flags.contains(CGEventFlags::MaskCommand), // 3 | 7
-    })
-}
-
-/// Classify a CapsLock `FlagsChanged` event as a press or a release.
-///
-/// CapsLock is a toggle key with no modifier bit: the alpha-shift flag stays
-/// set after the physical release, so the event's own mask cannot say whether
-/// it is a press or a release (a release with caps on looks exactly like a
-/// press with caps off).  Only the change between consecutive events can:
-/// a press toggles the state, a release leaves it unchanged.  *prev* is the
-/// alpha-shift state seen on the previous CapsLock event (or at startup);
-/// it is updated to the current state.
-fn capslock_is_down(flags: CGEventFlags, prev: &mut bool) -> bool {
-    let alpha_shift = flags.contains(CGEventFlags::MaskAlphaShift);
-    let is_down = alpha_shift != *prev;
-    *prev = alpha_shift;
-    is_down
 }
 
 /// A single predicted echo event: a keyboard-page usage and its down/up state.
@@ -382,26 +357,86 @@ fn modifier_usage(bit: u8) -> Option<HidUsage> {
         .and_then(|role| HidUsage::keyboard(role.hid_id()))
 }
 
-/// The state shared with the CGEventTap callback via its refcon.
-struct TapContext {
-    /// The mapping engine, guarded because `decide` takes `&mut self`.
-    engine: Mutex<MappingEngine<HidUsage>>,
+/// The macOS output device: the DriverKit virtual keyboard behind the
+/// virtkbdd IPC channel.
+///
+/// The [`Emitter`] impl is the single home of the platform's emission
+/// semantics.  It differs structurally from the Linux one: macOS emits
+/// *batches* (one IPC frame per engine decision) rather than individual
+/// key events, because the batch doubles as the [`EchoTracker`]'s
+/// prediction unit — recording the whole predicted sequence at once is
+/// what keeps a multi-output mapping's echo matched in order.
+/// [`MacOsEmitter::emit`] therefore acts on a single [`OutputAction`],
+/// while the tap callback delivers mapped outputs through
+/// [`MacOsEmitter::emit_batch`].
+pub(super) struct MacOsEmitter {
     /// The virtkbdd batch sender (fire-and-forget).
     tx: mpsc::SyncSender<Vec<NativeKey>>,
-    /// The virtkbdd reachability flag.
-    reachable: Arc<AtomicBool>,
-    /// The tap's mach port, so the callback can re-enable a disabled tap.
-    /// Set after `tap_create`, before the run loop starts.
-    tap_port: *const CFMachPort,
-    /// The alpha-shift (caps lock) flag state as of the last CapsLock event,
-    /// or at startup when there was none yet.  Touched only on the main
-    /// run-loop thread (the tap callback), so no synchronization is needed.
-    prev_alpha_shift: bool,
     /// Predicts and matches the echo of keys emitted through the virtual
     /// keyboard, so they pass through the tap without being re-decided by the
     /// engine.  Touched only on the main run-loop thread, so no
     /// synchronization is needed.
     echo: EchoTracker,
+}
+
+impl Emitter for MacOsEmitter {
+    /// The virtual keyboard's modifier state is isolated from physical
+    /// typing: a consumed modifier's physical release is passed through
+    /// because forwarded events never reach the virtual keyboard, which
+    /// never held the modifier in the first place.
+    const CONSUMED_RELEASE: ConsumedReleaseFate =
+        ConsumedReleaseFate::PassThrough;
+
+    fn emit(&mut self, action: &OutputAction) {
+        match action {
+            // Unmapped keys pass through the tap natively; the virtual
+            // keyboard never sees them.
+            OutputAction::Forward { .. } => {}
+            // The release mask is inert on this platform (see
+            // `CONSUMED_RELEASE`).
+            OutputAction::ReleaseConsumed { .. } => {}
+            // macOS taps every output, including modifier-key outputs:
+            // a remapped modifier must not modify subsequent physical
+            // keys, so a `Hold` is delivered as a `Tap` (see the module
+            // docs).
+            OutputAction::Tap { native_key }
+            | OutputAction::Hold { native_key } => {
+                self.emit_batch(std::slice::from_ref(native_key));
+            }
+        }
+    }
+}
+
+impl MacOsEmitter {
+    /// Deliver one mapped-output batch to virtkbdd and record its
+    /// predicted echo.
+    ///
+    /// Fire-and-forget; a dropped batch (channel full) produces no echo,
+    /// so nothing is recorded.
+    fn emit_batch(&mut self, outputs: &[NativeKey]) {
+        if self.tx.try_send(outputs.to_vec()).is_ok() {
+            self.echo.record(outputs, Instant::now());
+        }
+    }
+}
+
+/// The state shared with the CGEventTap callback via its refcon.
+struct TapContext {
+    /// The mapping engine, guarded because `decide` takes `&mut self`.
+    engine: Mutex<MappingEngine<HidUsage>>,
+    /// The platform emitter: virtkbdd batch sender and echo tracker.
+    emitter: MacOsEmitter,
+    /// The virtkbdd reachability flag.
+    reachable: Arc<AtomicBool>,
+    /// The tap's mach port, so the callback can re-enable a disabled tap.
+    /// Set after `tap_create`, before the run loop starts.
+    tap_port: *const CFMachPort,
+    /// Decodes raw CGEvents into [`CapturedKey`]s for the engine, sharing
+    /// the decode step with the read-only observe pump.  Touched only on
+    /// the main run-loop thread, so no synchronization is needed.
+    ///
+    /// [`CapturedKey`]: crate::platform::backend::CapturedKey
+    scanner: KeyScanner,
 }
 
 /// The CGEventTap callback.
@@ -430,41 +465,22 @@ unsafe extern "C-unwind" fn tap_callback(
         return event.as_ptr();
     }
 
-    let cg_event = unsafe { event.as_ref() };
-    let keycode = CGEvent::integer_value_field(
-        Some(cg_event),
-        CGEventField::KeyboardEventKeycode,
-    ) as u16;
-
-    let (usage, is_down) = match event_type {
-        CGEventType::KeyDown => (keycode_to_hid_usage(keycode), true),
-        CGEventType::KeyUp => (keycode_to_hid_usage(keycode), false),
-        // Modifier presses arrive here, not as key-down/key-up.  Resolve the
-        // usage from the keycode; `is_down` is read from the event's flag
-        // mask, except for CapsLock, a toggle key whose press/release is
-        // classified from the change against the previous state.
-        CGEventType::FlagsChanged => {
-            let Some(usage) = keycode_to_hid_usage(keycode) else {
-                return event.as_ptr(); // Fn, etc.: no HID equivalent.
-            };
-            let flags = CGEvent::flags(Some(cg_event));
-            let is_down = if usage == HidUsage::CapsLock {
-                capslock_is_down(flags, &mut ctx.prev_alpha_shift)
-            } else {
-                let Some(is_down) = flags_changed_state(usage, flags) else {
-                    return event.as_ptr();
-                };
-                is_down
-            };
-            (Some(usage), is_down)
-        }
-        _ => return event.as_ptr(),
-    };
-
-    // No keyboard-page HID equivalent (media keys, F13+): pass through.
-    let Some(usage) = usage else {
+    // Decode through the shared scanner: keycode to HID usage, direction
+    // from the event type (with the CapsLock toggle quirk).  Events it
+    // cannot classify (mouse events, Fn's flags-changed) and keycodes
+    // with no HID equivalent (media keys, F13+) pass through untouched.
+    let Some(captured) =
+        ctx.scanner.on_event(event_type, unsafe { event.as_ref() })
+    else {
         return event.as_ptr();
     };
+    let Some(usage) = captured.usage else {
+        return event.as_ptr();
+    };
+    // macOS auto-repeat arrives as repeated key-downs, so the only
+    // directions are down and up.
+    let is_down = captured.direction() != Direction::Up;
+    let keycode = captured.native;
 
     // The wording and level of the `recv`/`pass`/`swal` lines are owned by
     // `logfmt`, so the e2e debug-log grammar has one producing implementation
@@ -479,7 +495,7 @@ unsafe extern "C-unwind" fn tap_callback(
     // so it must reach the app, but it must not be re-mapped (which would make
     // `Escape: Cmd+T` fire on the echo of an earlier `RightControl: Escape`,
     // and cyclic rules emit forever).
-    if ctx.echo.matches(usage, is_down, Instant::now()) {
+    if ctx.emitter.echo.matches(usage, is_down, Instant::now()) {
         logfmt::log_pass(format_args!("keycode={keycode}"), dir, usage);
         return event.as_ptr();
     }
@@ -495,10 +511,11 @@ unsafe extern "C-unwind" fn tap_callback(
     // The shared emission plan owns the `Decision` semantics and logs each
     // output's `emit` line.  macOS reads the plan only for the fate of the
     // input event: its additive virtual keyboard taps every output (the plan's
-    // tap/hold split and release mask are inert here), and a consumed
-    // modifier's release passes through (see the module docs).  The mapped
-    // batch is delivered to the IPC client from the decision itself.
-    let plan = emission_plan(&decision, ConsumedReleaseFate::PassThrough);
+    // tap/hold split and release mask are inert here, matching the
+    // [`MacOsEmitter`] impl), and a consumed modifier's release passes through
+    // per the [`Emitter::CONSUMED_RELEASE`] policy.  The mapped batch is
+    // delivered through the emitter from the decision itself.
+    let plan = emission_plan(&decision, MacOsEmitter::CONSUMED_RELEASE);
 
     match plan.input {
         InputFate::Forward => {
@@ -510,17 +527,10 @@ unsafe extern "C-unwind" fn tap_callback(
             std::ptr::null_mut()
         }
         // A mapped key: swallow the input (the `emit` lines stand for it) and
-        // hand the outputs to the IPC client as one batch.  Fire-and-forget;
-        // drop the batch if the channel is full.
+        // hand the outputs to the emitter as one batch.
         InputFate::Silent => {
             if let Decision::Emit { outputs, .. } = &decision {
-                let sent = ctx.tx.try_send(outputs.clone()).is_ok();
-                if sent {
-                    // Record the predicted echo so the re-received keys pass
-                    // through without being re-decided.  Only record on a
-                    // successful send: a dropped batch produces no echo.
-                    ctx.echo.record(outputs, Instant::now());
-                }
+                ctx.emitter.emit_batch(outputs);
             }
             std::ptr::null_mut()
         }
@@ -535,60 +545,20 @@ unsafe extern "C-unwind" fn tap_callback(
 mod tests {
     use super::*;
 
-    /// A held modifier's state is read from its flag: set means down,
-    /// cleared means up.  Right-side modifiers share the flag with their
-    /// left-side twin.
+    /// The release-mask policy pinned at the contract's single definition
+    /// site (F2b): a consumed modifier's physical release passes through,
+    /// because the virtual keyboard's modifier state is isolated from
+    /// physical typing — swallowing the physical release would leave the
+    /// *system* modifier state stuck.
+    ///
+    /// (The flag-mask and CapsLock direction logic these tests used to
+    /// cover moved to the shared `capture::KeyScanner` and is pinned
+    /// there.)
     #[test]
-    fn modifier_state_from_flag_mask() {
+    fn emitter_declares_pass_through_consumed_release() {
         assert_eq!(
-            flags_changed_state(
-                HidUsage::LeftControl,
-                CGEventFlags::MaskControl
-            ),
-            Some(true)
-        );
-        assert_eq!(
-            flags_changed_state(HidUsage::LeftControl, CGEventFlags::empty()),
-            Some(false)
-        );
-        assert_eq!(
-            flags_changed_state(HidUsage::RightShift, CGEventFlags::MaskShift),
-            Some(true)
-        );
-        assert_eq!(
-            flags_changed_state(HidUsage::RightAlt, CGEventFlags::empty()),
-            Some(false)
-        );
-    }
-
-    /// CapsLock is a toggle key: the alpha-shift flag stays set after the
-    /// physical release, so only the change between consecutive events
-    /// distinguishes a press from a release.  A state change is a press; an
-    /// unchanged state is a release, regardless of the flag's value.
-    #[test]
-    fn capslock_press_release_from_state_change() {
-        // Starting with caps off: the press sets the flag (down), the release
-        // leaves it set (up), the next press clears it (down).
-        let mut prev = false;
-        assert!(capslock_is_down(CGEventFlags::MaskAlphaShift, &mut prev));
-        assert!(!capslock_is_down(CGEventFlags::MaskAlphaShift, &mut prev));
-        assert!(capslock_is_down(CGEventFlags::empty(), &mut prev));
-        assert!(!capslock_is_down(CGEventFlags::empty(), &mut prev));
-
-        // Starting with caps on: the first press clears the flag (down), and
-        // the release leaves it cleared (up).
-        let mut prev = true;
-        assert!(capslock_is_down(CGEventFlags::empty(), &mut prev));
-        assert!(!capslock_is_down(CGEventFlags::empty(), &mut prev));
-    }
-
-    /// A usage that is neither a held modifier nor CapsLock is not mappable
-    /// via `FlagsChanged`.
-    #[test]
-    fn non_modifier_usage_is_not_mappable() {
-        assert_eq!(
-            flags_changed_state(HidUsage::A, CGEventFlags::empty()),
-            None
+            MacOsEmitter::CONSUMED_RELEASE,
+            ConsumedReleaseFate::PassThrough
         );
     }
 

@@ -131,6 +131,8 @@ pub use linux::hid_translate;
 pub use linux::{
     VIRTUAL_KEYBOARD_NAME, keycode_to_hid_usage, list_keyboards, start_mapping,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use macos::MacOsBackend;
 // Test-harness-only surface (see the module docs): only reachable with
 // the `test-util` feature on.
 #[cfg(all(target_os = "macos", feature = "test-util"))]

@@ -8,182 +8,84 @@
 // $Revision$
 
 //! macOS implementation of `keymapper keys probe`.
+//!
+//! The probe runs standalone (the daemon must not be capturing), but it
+//! no longer mirrors the daemon's capture logic: it drives the platform
+//! contract's read-only observe mode ([`KeySource::observe`]), whose
+//! passive CGEventTap decodes with the very same [`KeyScanner`] the
+//! daemon's tap callback feeds — the keycode-to-usage decode and the
+//! modifier/CapsLock direction classification therefore have exactly one
+//! implementation on macOS.
+//!
+//! Unlike the other platforms, the tap is session-global: a CGEventTap
+//! sees every keyboard and CGEvents expose no originating device (F7a),
+//! so the discovered [`KeyboardInfo`] is printed for context but selects
+//! nothing.
+//!
+//! [`KeyboardInfo`]: crate::common::keyboard::KeyboardInfo
+//! [`KeyScanner`]: crate::platform::macos::capture::KeyScanner
+//! [`KeySource::observe`]: crate::platform::backend::KeySource::observe
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-use objc2_core_foundation::{
-    CFMachPort, CFRunLoop, kCFRunLoopCommonModes, kCFRunLoopDefaultMode,
+use crate::{
+    common::keyboard::KeyboardInfo,
+    keymap_core::logfmt::Direction,
+    platform::{
+        MacOsBackend,
+        backend::{CapturedKey, KeySource as _},
+    },
 };
-use objc2_core_graphics::{
-    CGEvent, CGEventField, CGEventFlags, CGEventTapLocation,
-    CGEventTapOptions, CGEventTapPlacement, CGEventType, CGKeyCode,
-};
 
-use crate::platform::keycode_to_hid_usage;
-
-/// Probe for key presses using a CGEventTap.
+/// Probe for key presses through the platform contract's read-only
+/// observe mode.
 pub fn probe() {
-    let mask: u64 = (1u64 << CGEventType::KeyDown.0)
-        | (1u64 << CGEventType::KeyUp.0)
-        | (1u64 << CGEventType::FlagsChanged.0);
+    let backend = MacOsBackend;
 
-    let tap = unsafe {
-        CGEvent::tap_create(
-            CGEventTapLocation::HIDEventTap,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            mask,
-            Some(probe_callback),
-            std::ptr::null_mut(),
-        )
-    };
+    // Discover keyboards for the header.  Failure or emptiness does not
+    // stop the probe: the observe tap does not depend on the
+    // enumeration (the tap is session-global), and the platform's
+    // `list_keyboards` may answer with the placeholder entry on `ioreg`
+    // failure (F8).
+    let keyboards = backend.list_keyboards().ok();
+    let kb = keyboards
+        .as_deref()
+        .and_then(<[_]>::first)
+        .cloned()
+        .unwrap_or_else(|| {
+            KeyboardInfo::new(
+                "Keyboard".into(),
+                String::new(),
+                String::new(),
+                "session".into(),
+                None,
+            )
+        });
 
-    let Some(tap) = tap else {
-        eprintln!(
-            "Failed to create event tap. Verify Accessibility privileges?"
-        );
-        std::process::exit(1);
-    };
-
-    let Some(run_loop_source) =
-        CFMachPort::new_run_loop_source(None, Some(&tap), 0)
-    else {
-        eprintln!("Failed to create run loop source.");
-        std::process::exit(1);
-    };
-
-    let run_loop = CFRunLoop::current().expect("no current run loop");
-
-    run_loop
-        .add_source(Some(&run_loop_source), unsafe { kCFRunLoopCommonModes });
-
-    CGEvent::tap_enable(&tap, true);
-
+    println!("Probing {} ({})\n", kb.name, kb.device);
     println!("Press keys to see their names and codes.");
-    println!("Press Control+Escape to exit.\n");
+    println!("Press Control+C to exit.\n");
 
-    // Poll the run loop in default mode until Control+Escape triggers loop
-    // termination. `kCFRunLoopCommonModes` is a pseudo-mode that cannot be
-    // passed to CFRunLoopRunInMode; `kCFRunLoopDefaultMode` is a member of the
-    // common modes set and receives the tap events.
-    loop {
-        CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, 0.5, true);
-
-        // Check for shutdown signal set by the callback.
-        if should_exit() {
-            break;
-        }
-    }
-
-    CGEvent::tap_enable(&tap, false);
-}
-
-/// Event-tap callback that prints key info and checks for the exit
-/// condition (Control+Escape).
-unsafe extern "C-unwind" fn probe_callback(
-    _proxy: objc2_core_graphics::CGEventTapProxy,
-    event_type: CGEventType,
-    event: core::ptr::NonNull<objc2_core_graphics::CGEvent>,
-    _user_info: *mut std::ffi::c_void,
-) -> *mut objc2_core_graphics::CGEvent {
-    let keycode: CGKeyCode = unsafe {
-        CGEvent::integer_value_field(
-            Some(event.as_ref()),
-            CGEventField::KeyboardEventKeycode,
-        )
-    } as CGKeyCode;
-
-    let flags = unsafe { CGEvent::flags(Some(event.as_ref())) };
-
-    if event_type == CGEventType::KeyDown {
-        // Check for Control+Escape exit condition.
-        if keycode == ESCAPE_KEYCODE
-            && flags.contains(CGEventFlags::MaskControl)
-        {
-            request_exit();
-            return event.as_ptr();
-        }
-
-        // Print the key information for non-modifier keys. Modifier keyDown
-        // events may fire alongside flagsChanged; when both arrive we let
-        // flagsChanged handle it (it fires first and carries the keycode too).
-        if !is_modifier_keycode(keycode) {
-            let (name, code_str) = cg_keycode_to_description(keycode);
-
-            println!("{name}: {code_str}");
-        }
-    } else if event_type == CGEventType::FlagsChanged {
-        handle_flags_changed(keycode, flags);
-    }
-
-    // Pass the event through (don't consume it).
-    event.as_ptr()
-}
-
-/// CGKeyCode for Escape (0x35). Used to detect Control+Escape exit.
-const ESCAPE_KEYCODE: u16 = 53;
-
-/// Check whether a keycode corresponds to a modifier key.
-fn is_modifier_keycode(code: u16) -> bool {
-    let modifier_codes = [
-        // Standard modifier CGKeyCodes:
-        59, // LeftControl
-        62, // RightControl
-        56, // LeftShift
-        60, // RightShift
-        58, // LeftAlt (Option)
-        61, // RightAlt (Right Option)
-        55, // LeftCommand
-        54, // RightCommand
-        57, // CapsLock
-    ];
-    modifier_codes.contains(&code)
-}
-
-/// Convert a CGKeyCode to a human-readable (name, code) pair.
-///
-/// Uses HID usage codes as the primary display format. Falls back to
-/// raw CGKeyCode for unrecognized keys.
-fn cg_keycode_to_description(code: u16) -> (String, String) {
-    // Try to convert CGKeyCode to a HID usage.
-    if let Some(hu) = keycode_to_hid_usage(code) {
-        return (hu.as_str().to_string(), format!("0x{:02X}", hu.id()));
-    }
-
-    (format!("Unknown({code})"), format!("{code}"))
-}
-
-/// Handle flags-changed events. The event carries the native keycode of the
-/// modifier that changed, allowing left/right distinction even though event
-/// flags alone cannot differentiate them.
-///
-/// Only down-events are reported; releases are silent.
-fn handle_flags_changed(keycode: u16, current: CGEventFlags) {
-    let prev = PREV_FLAGS.swap(current.bits(), Ordering::SeqCst);
-
-    // Only print when the modifier is pressed (flag transitions from unset to
-    // set). Releases are silent, matching non-modifier key behaviour.
-    let is_down = current.bits() > prev;
-
-    if is_down {
-        let (name, code_str) = cg_keycode_to_description(keycode);
-        println!("{name}: {code_str}");
+    // The observe pump creates the tap (the only fatal step), then
+    // delivers every decoded key event until the process is terminated.
+    if let Err(e) = backend.observe(&kb, &mut |key| {
+        print_captured(&key);
+    }) {
+        eprintln!("Failed to create event tap: {e}");
+        std::process::exit(1);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Exit signalling between the callback thread and the main poll loop
-// ---------------------------------------------------------------------------
-
-static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-/// Previous modifier flags from the last flagsChanged event.
-static PREV_FLAGS: AtomicU64 = AtomicU64::new(0);
-
-fn request_exit() {
-    EXIT_REQUESTED.store(true, Ordering::SeqCst);
-}
-
-fn should_exit() -> bool {
-    EXIT_REQUESTED.load(Ordering::SeqCst)
+/// Print one decoded key event, key-downs only (presses and modifier
+/// presses).
+fn print_captured(key: &CapturedKey) {
+    if key.direction() != Direction::Down {
+        return;
+    }
+    let (name, code_str) = match key.usage {
+        Some(u) => (u.as_str().to_string(), format!("0x{:02X}", u.id())),
+        None => (
+            format!("Unknown({})", key.native),
+            format!("{}", key.native),
+        ),
+    };
+    println!("{name}: {code_str}");
 }
