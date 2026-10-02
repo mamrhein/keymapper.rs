@@ -60,13 +60,14 @@
 //! file on macOS and Windows) consumed by [`crate::daemon::logging`] so
 //! the daemon holds no `#[cfg(target_os)]` sink branches.  [`backend`] is
 //! the cross-platform device-I/O contract (`KeySource`/`Emitter`:
-//! enumerate, observe, emit, suppress-echo, release-mask policy);
-//! Linux implements it (`LinuxBackend`, `LinuxEmitter`) and its
-//! `list_keyboards`/`start_mapping` exports above drive the contract —
-//! macOS and Windows port in follow-up increments (architecture review
-//! Phase 3, one platform at a time).  Like [`endpoint`] both facets are
-//! `pub(crate)`: only the daemon and the CLI drive them, so they are not
-//! part of the public platform surface documented above.
+//! enumerate, observe, emit, suppress-echo, release-mask policy); all
+//! three platforms implement it
+//! (`LinuxBackend`/`MacOsBackend`/`WindowsBackend`,
+//! `LinuxEmitter`/`MacOsEmitter`/`WindowsEmitter`) and their
+//! `list_keyboards`/`start_mapping` exports above drive the contract.
+//! Like [`endpoint`] both facets are `pub(crate)`: only the daemon and
+//! the CLI drive them, so they are not part of the public platform
+//! surface documented above.
 //!
 //! The `test-util` dev-dependency crate and `cli` may depend only on this
 //! surface, never on the `pub(crate)` internals of the platform
@@ -84,11 +85,12 @@ pub mod app_identity;
 ///
 /// Names the five responsibilities every capture backend has — enumerate,
 /// observe, emit, suppress-echo, release-mask policy — so per-platform
-/// backends are judged against a contract instead of an example.  Linux
-/// implements it (`platform::linux::backend::LinuxBackend`,
-/// `platform::linux::mapping::LinuxEmitter`); macOS and Windows land in
-/// follow-up increments, which is why the module is `allow(dead_code)`
-/// off Linux until they do.
+/// backends are judged against a contract instead of an example.  All
+/// three platforms implement it (`platform::<os>::backend::*Backend` as
+/// `KeySource`, `platform::<os>::mapping::*Emitter` as `Emitter`); the
+/// `allow(dead_code)` off Linux covers the contract surfaces the macOS
+/// batch delivery keeps inert (its `Emitter::emit` arm and the action
+/// variants it never constructs).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod backend;
 
@@ -145,6 +147,8 @@ pub use macos::{
 };
 #[cfg(all(target_os = "windows", feature = "test-util"))]
 pub use windows::Key;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::WindowsBackend;
 #[cfg(target_os = "windows")]
 pub use windows::{
     config_dir, keycode_to_hid_usage, list_keyboards, start_mapping,

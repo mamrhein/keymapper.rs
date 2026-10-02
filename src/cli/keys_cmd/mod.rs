@@ -11,21 +11,18 @@
 //! `probe` waits for physical key presses and reports their canonical names.
 //!
 //! `probe` runs standalone; the capture mechanism is the platform
-//! contract's read-only observe mode wherever the platform has ported
-//! (Linux: an un-grabbed evdev read, macOS: a passive `CGEventTap`), and
-//! a platform-owned capture loop until it does (Windows: a
-//! `WH_KEYBOARD_LL` hook).  The probe must be able to observe raw input
-//! while the daemon is *not* capturing, and on Linux the daemon grabs
-//! each device exclusively, so a second reader could not share it
-//! anyway.  Where a platform has ported, the decode path is shared as
-//! well: the observe scanner is the one the daemon's capture feeds, and
-//! until Windows ports its probe routes through
-//! [`crate::platform::keycode_to_hid_usage`] — so a native key code's
-//! canonical name has exactly one definition per platform and cannot
-//! drift from the daemon's.  (Linux's probe is intentionally
+//! contract's read-only observe mode on every platform (Linux: an
+//! un-grabbed evdev read, macOS: a passive `CGEventTap`, Windows: a
+//! pass-through `WH_KEYBOARD_LL` hook).  The probe must be able to
+//! observe raw input while the daemon is *not* capturing, and on Linux
+//! the daemon grabs each device exclusively, so a second reader could
+//! not share it anyway.  The decode path is shared as well: the observe
+//! scanner is the one the daemon's capture feeds, so a native key
+//! code's canonical name has exactly one definition per platform and
+//! cannot drift from the daemon's.  (Linux's probe is intentionally
 //! single-device and ignores `--keyboard`, a pre-existing quirk
-//! preserved on port; macOS' tap is session-global, so its `--keyboard`
-//! has never selected a device.)
+//! preserved on port; the macOS tap and the Windows hook are
+//! session-global, so their `--keyboard` has never selected a device.)
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -266,7 +263,7 @@ fn print_group(name: &str, keys: &[HidUsage]) {
 }
 
 /// Wait for key presses and print the canonical name and native code for
-/// each pressed key. Exits when Control+Escape is pressed.
+/// each pressed key. Runs until the process is terminated (Ctrl+C).
 #[cfg(target_os = "macos")]
 pub fn probe() {
     macos::probe()

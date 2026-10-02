@@ -310,10 +310,10 @@ List all connected keyboard devices, printing each keyboard's name, vendor, mode
 
 Key introspection tools.
 
-| Subcommand | Description                                                                                    |
-| ---------- | ---------------------------------------------------------------------------------------------- |
-| `list`     | Print all key names recognised in the configuration file                                       |
-| `probe`    | Wait for physical key presses and print each key's name and code. Press Control+Escape to exit |
+| Subcommand | Description                                                                               |
+| ---------- | ----------------------------------------------------------------------------------------- |
+| `list`     | Print all key names recognised in the configuration file                                  |
+| `probe`    | Wait for physical key presses and print each key's name and code. Press Control+C to exit |
 
 ### `keymapper daemon`
 
