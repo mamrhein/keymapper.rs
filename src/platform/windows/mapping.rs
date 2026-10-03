@@ -39,6 +39,16 @@
 //! 2. **Raw worker thread** — Consumes the raw input channel, maintains the
 //!    device-identification buffer, and processes standalone Consumer Control
 //!    events, which never reach the hook.
+//!
+//! The emission half of the cross-platform device-I/O contract
+//! ([`crate::platform::backend`]): [`WindowsEmitter`] owns the release-mask
+//! policy ([`CONSUMED_RELEASE`]) and maps the contract's [`OutputAction`]s
+//! onto the `SendInput` primitives below.  The capture half ([`KeySource`])
+//! is [`super::backend::WindowsBackend`], and the hook-event decode shared
+//! with the read-only observe mode is [`super::capture::KeyScanner`].
+//!
+//! [`CONSUMED_RELEASE`]: crate::platform::backend::Emitter::CONSUMED_RELEASE
+//! [`KeySource`]: crate::platform::backend::KeySource
 
 use std::sync::{
     Arc,
@@ -95,9 +105,13 @@ use crate::{
             ConsumedReleaseFate, EmitAction, InputFate, emission_plan,
         },
         engine::{Decision, MappingEngine},
-        logfmt::{self, Direction},
+        logfmt,
         lookup::Lookup,
         mapping_cache::NativeKey,
+    },
+    platform::{
+        backend::{Emitter, OutputAction},
+        windows::capture,
     },
 };
 
@@ -488,6 +502,47 @@ fn hold_modifier_output(native_key: &NativeKey) {
 }
 
 // ---------------------------------------------------------------------------
+// Emitter (the contract's output side)
+// ---------------------------------------------------------------------------
+
+/// The Windows output device: the OS input stack behind `SendInput`.
+///
+/// The [`Emitter`] impl is the single home of the platform's emission
+/// semantics.  It differs structurally from the Linux one: there is no
+/// output-device object to own (injections go through the OS input
+/// stack, not a held handle), so the type is a unit and the impl maps
+/// the contract's [`OutputAction`]s onto the `SendInput` helpers
+/// above.
+pub(super) struct WindowsEmitter;
+
+impl Emitter for WindowsEmitter {
+    /// The `SendInput` path already released a consumed modifier when
+    /// the trigger fired (its clean-tap release went out first), so
+    /// the physical release of that modifier is swallowed.
+    const CONSUMED_RELEASE: ConsumedReleaseFate = ConsumedReleaseFate::Swallow;
+
+    fn emit(&mut self, action: &OutputAction) {
+        match action {
+            // Windows forwarding is *not swallowing* the physical
+            // event in the hook (`CallNextHookEx`), not a re-injection:
+            // a `SendInput` here would duplicate the event, so the
+            // capture path handles the forward itself and this arm is
+            // inert for hook decisions.
+            OutputAction::Forward { .. } => {}
+            OutputAction::ReleaseConsumed { consumed } => {
+                release_modifiers(*consumed);
+            }
+            OutputAction::Tap { native_key } => {
+                emit_key_event(native_key);
+            }
+            OutputAction::Hold { native_key } => {
+                hold_modifier_output(native_key);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Deferred emission
 // ---------------------------------------------------------------------------
 
@@ -533,12 +588,17 @@ pub(super) fn queue_emission(outputs: Vec<NativeKey>) {
 
 /// Emit all queued outputs via `SendInput`.  The main message loop calls
 /// this from the loop body, after the hook chain has completed, so the
-/// `SendInput` is issued with the input queue idle.
+/// `SendInput` is issued with the input queue idle.  Consumer outputs
+/// are self-contained taps, so each is delivered as the contract's
+/// [`OutputAction::Tap`] through [`WindowsEmitter`].
 fn drain_and_emit_emissions() {
     let pending = std::mem::take(&mut *PENDING_EMISSIONS.lock());
+    let mut emitter = WindowsEmitter;
     for outputs in pending {
         for native_key in &outputs {
-            emit_key_event(native_key);
+            emitter.emit(&OutputAction::Tap {
+                native_key: native_key.clone(),
+            });
         }
     }
 }
@@ -572,11 +632,13 @@ extern "system" fn low_level_keyboard_proc(
 
     let is_key_down = matches!(w_param.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
 
-    // Derive the HID identity of the key — the lookup key space of the
-    // compiled rules.  `None` for virtual-key codes without a `HidUsage`
-    // (e.g. Print Screen); such keys always pass through.
-    let Some(usage) = Key::from_native(vk_code.0).map(Key::to_hid_usage)
-    else {
+    // Decode through the shared scanner (which also feeds the read-only
+    // observe mode), so the VK-to-usage decode and the direction
+    // classification have exactly one implementation on Windows.  A
+    // virtual-key code without a `HidUsage` (e.g. Print Screen)
+    // captures with `usage: None`; such keys always pass through.
+    let captured = capture::SCANNER.on_event(vk_code.0, is_key_down);
+    let Some(usage) = captured.usage else {
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
@@ -585,7 +647,7 @@ extern "system" fn low_level_keyboard_proc(
     // The wording and level of the `recv`/`pass`/`swal` lines are owned by
     // `logfmt`, so the e2e debug-log grammar has one producing implementation
     // shared with the other backends.
-    let dir = Direction::from_is_down(is_key_down);
+    let dir = captured.direction();
     logfmt::log_recv(format_args!("vk={}", vk_code.0), dir, usage);
 
     // Identify the source keyboard non-blockingly.  Raw input and the hook
@@ -643,13 +705,14 @@ extern "system" fn low_level_keyboard_proc(
     }
 
     // The shared emission plan turns the decision into the ordered output
-    // actions and logs each output's `emit` line; this layer maps them onto
-    // the native `SendInput` primitives.  It is built only after the elevation
-    // guard, so a key passed through unmapped above never logs an `emit` line
-    // for output it did not produce.  On Windows a consumed modifier's release
-    // is swallowed (the synthetic key-up was already sent when the trigger
-    // fired).
-    let plan = emission_plan(&decision, ConsumedReleaseFate::Swallow);
+    // actions and logs each output's `emit` line; the emitter below maps
+    // them onto the native `SendInput` primitives.  It is built only after
+    // the elevation guard, so a key passed through unmapped above never
+    // logs an `emit` line for output it did not produce.  On Windows a
+    // consumed modifier's release is swallowed (the synthetic key-up was
+    // already sent when the trigger fired) — the release-mask policy the
+    // [`WindowsEmitter`] impl defines.
+    let plan = emission_plan(&decision, WindowsEmitter::CONSUMED_RELEASE);
 
     match plan.input {
         // Unmapped (or the repeat of an unmapped key): let the event through.
@@ -669,17 +732,20 @@ extern "system" fn low_level_keyboard_proc(
         InputFate::Silent => {}
     }
 
-    // Carry out the outputs the plan produced: the clean-tap release first
-    // (if any), then each output as a hold (its base is a modifier key, so it
-    // stays active for the presses that follow) or a tap.  Releasing the
-    // trigger's modifiers before the outputs is what keeps the output a clean
-    // tap.
+    // Carry out the outputs the plan produced through the contract's
+    // emitter: the clean-tap release first (if any), then each output as
+    // a hold (its base is a modifier key, so it stays active for the
+    // presses that follow) or a tap.  Releasing the trigger's modifiers
+    // before the outputs is what keeps the output a clean tap.
+    let mut emitter = WindowsEmitter;
     for action in plan.actions {
-        match action {
-            EmitAction::ReleaseConsumed(mask) => release_modifiers(mask),
-            EmitAction::Tap(native_key) => emit_key_event(&native_key),
-            EmitAction::Hold(native_key) => hold_modifier_output(&native_key),
-        }
+        emitter.emit(&match action {
+            EmitAction::ReleaseConsumed(mask) => {
+                OutputAction::ReleaseConsumed { consumed: mask }
+            }
+            EmitAction::Tap(native_key) => OutputAction::Tap { native_key },
+            EmitAction::Hold(native_key) => OutputAction::Hold { native_key },
+        });
     }
     LRESULT(1)
 }
@@ -816,6 +882,17 @@ mod tests {
         let (scan, extended) = scan_code_and_extended(VIRTUAL_KEY(0x41));
         assert!(!extended);
         assert_ne!(scan, 0);
+    }
+
+    /// The platform's release-mask meaning has exactly one definition,
+    /// at this constant (the hook proc reads it from here rather than
+    /// hardcoding a fate at the `emission_plan` call site).
+    #[test]
+    fn emitter_declares_swallow_consumed_release() {
+        assert_eq!(
+            WindowsEmitter::CONSUMED_RELEASE,
+            ConsumedReleaseFate::Swallow
+        );
     }
 
     #[test]

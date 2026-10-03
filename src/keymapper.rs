@@ -107,7 +107,7 @@ enum KeysCommands {
 
     /// Wait for physical key presses and print each key's name and code.
     ///
-    /// Press Control+Escape to exit.
+    /// Press Control+C to exit.
     Probe,
 }
 

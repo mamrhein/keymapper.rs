@@ -37,15 +37,19 @@
 //!   instead of every backend hardcoding a [`ConsumedReleaseFate`] at its call
 //!   site.
 //!
-//! Porting status: Linux implements the contract
-//! (`platform::linux::backend::LinuxBackend` as [`KeySource`],
-//! `platform::linux::mapping::LinuxEmitter` as [`Emitter`]).  macOS and
-//! Windows land in follow-up increments — one platform at a time, so the
-//! contract is shaped by three real implementations rather than one plus
-//! two stubs.  Until a platform ports, the uniform
-//! `list_keyboards`/`start_mapping` exports in [`crate::platform`]
-//! remain the cross-platform surface the daemon binary and CLI consume;
-//! on Linux those exports are thin shims that drive this contract.
+//! Porting status: all three platforms implement the contract —
+//! Linux (`platform::linux::backend::LinuxBackend` as [`KeySource`],
+//! `platform::linux::mapping::LinuxEmitter` as [`Emitter`]), macOS
+//! (`platform::macos::backend::MacOsBackend`,
+//! `platform::macos::mapping::MacOsEmitter`), and Windows
+//! (`platform::windows::backend::WindowsBackend`,
+//! `platform::windows::mapping::WindowsEmitter`) — one platform per
+//! increment, so the contract was shaped by three real
+//! implementations rather than one plus two stubs.  On every platform
+//! the uniform `list_keyboards`/`start_mapping` exports in
+//! [`crate::platform`] are thin shims that drive this contract, so the
+//! trait — not a parallel set of free functions — is the definition of
+//! the platform boundary the daemon binary and CLI consume.
 
 use std::{error::Error, sync::Arc};
 
@@ -124,8 +128,11 @@ pub(crate) enum OutputAction {
 pub(crate) trait KeySource {
     /// Enumerate the keyboard devices this platform can observe.
     ///
-    /// The empty/no-hardware semantics are currently per-platform
-    /// (architecture review F8, tracked as its own Phase 3 item).
+    /// Empty semantics are uniform on every platform (architecture review
+    /// F8): a successful enumeration that finds no keyboards returns
+    /// `Ok(vec![])` — an empty registry is a valid runtime state the daemon
+    /// tolerates by starting inactive — and `Err` is reserved for a failed
+    /// enumeration.
     fn list_keyboards(&self) -> Result<Vec<KeyboardInfo>, Box<dyn Error>>;
 
     /// Whether a device with this name is the daemon's own emission

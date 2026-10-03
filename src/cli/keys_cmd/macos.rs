@@ -42,9 +42,7 @@ pub fn probe() {
 
     // Discover keyboards for the header.  Failure or emptiness does not
     // stop the probe: the observe tap does not depend on the
-    // enumeration (the tap is session-global), and the platform's
-    // `list_keyboards` may answer with the placeholder entry on `ioreg`
-    // failure (F8).
+    // enumeration (the tap is session-global).
     let keyboards = backend.list_keyboards().ok();
     let kb = keyboards
         .as_deref()

@@ -121,17 +121,14 @@ pub(super) fn build_keyboard_from_udev(
 /// user seat.  Devices that also support absolute (pointer) events are
 /// excluded because they are typically pointing devices that happen to
 /// announce keyboard capabilities (e.g. touchpads with integrated buttons).
+///
+/// Empty semantics are uniform across platforms (architecture review F8): a
+/// successful scan that finds no keyboards returns `Ok(vec![])`; `Err` is
+/// reserved for a failed enumeration (here: a udev scan error).
 pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 {
     let results = enumerate_keyboards()?;
-    let keyboards: Vec<KeyboardInfo> =
-        results.into_iter().map(|(info, _)| info).collect();
-
-    if keyboards.is_empty() {
-        return Err("No keyboard devices found.".into());
-    }
-
-    Ok(keyboards)
+    Ok(results.into_iter().map(|(info, _)| info).collect())
 }
 
 /// Enumerate and open all keyboard devices for the current seat.
@@ -168,13 +165,27 @@ mod tests {
 
     #[test]
     fn list_keyboards_returns_keyboard_info_vec() {
-        // On systems without keyboards this returns an error; on systems with
-        // keyboards it returns a non-empty vec.  We only assert the type is
-        // well-formed by calling it and checking the result shape.
+        // Uniform empty semantics (F8): a system without keyboards yields
+        // `Ok(vec![])`, so an `Err` here can only mean the udev scan itself
+        // failed — and such an error carries a message.
         let result = list_keyboards();
         assert!(
             result.is_ok() || !result.unwrap_err().to_string().is_empty(),
             "should produce either a result or an error message"
         );
+    }
+
+    #[test]
+    fn empty_enumeration_is_not_an_error() {
+        // The pre-F8 implementation turned an empty scan into
+        // `Err("No keyboard devices found.")`; the unified contract says an
+        // empty enumeration is `Ok(vec![])`, so that message must never
+        // appear on the error path.
+        if let Err(e) = list_keyboards() {
+            assert!(
+                !e.to_string().contains("No keyboard devices found"),
+                "an empty enumeration must not be an error, got: {e}"
+            );
+        }
     }
 }

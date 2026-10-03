@@ -60,15 +60,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // signature — threading the already-opened devices through would require
     // a platform-specific `start_mapping`.
     //
-    // `unwrap_or_default()` is an accepted trade-off, not an oversight.  The
-    // empty / `Err` semantics of `list_keyboards` diverge per platform (Linux
-    // and Windows return `Err` on an empty enumeration; macOS returns a
-    // placeholder), and a failed enumeration must not abort daemon startup, so
-    // it degrades to an empty registry and the mapping loop simply stays
-    // inactive.  Surfacing a failed enumeration at the right log level per
-    // platform is a behavior change tracked for Phase 3 (architecture review
-    // F8/F8b), out of scope for this doc-only pass.
-    let all_keyboards = list_keyboards().unwrap_or_default();
+    // Enumeration semantics are uniform across platforms (architecture
+    // review F8): `Ok` may be empty (no keyboards found), `Err` means the
+    // enumeration itself failed.  Neither case may abort daemon startup, so
+    // both leave the registry empty and are surfaced at error level (F8b);
+    // the mapping runtime degrades gracefully either way — the hot-plug
+    // monitor picks devices up as they appear on Linux, and the capture
+    // tap/hook is session-global on macOS and Windows.
+    let all_keyboards = match list_keyboards() {
+        Ok(keyboards) => {
+            if keyboards.is_empty() {
+                error!(
+                    "No keyboard devices found; starting with an empty \
+                     device registry."
+                );
+            }
+            keyboards
+        }
+        Err(e) => {
+            error!(
+                "Keyboard enumeration failed: {e}; starting with an empty \
+                 device registry."
+            );
+            Vec::new()
+        }
+    };
 
     // Determine which keyboards to actually grab based on the global filter.
     // Only matching keyboards are captured; others work normally.

@@ -11,6 +11,7 @@
 
 use std::ptr;
 
+use log::debug;
 use windows::Win32::{
     Devices::{
         DeviceAndDriverInstallation::{
@@ -432,6 +433,12 @@ impl Drop for PreparsedDataGuard {
 /// The `device` field contains the device interface path (e.g.
 /// `\\?\hid#vid_046d+pid_c345#...`) which can be passed to `CreateFileW`
 /// to open a handle for raw input filtering.
+///
+/// Empty semantics are uniform across platforms (architecture review F8): a
+/// successful enumeration that finds no keyboards returns `Ok(vec![])`; the
+/// interface-count diagnostics that used to ride on the empty-case error
+/// message are logged instead.  `Err` is reserved for a failed enumeration
+/// (here: SetupAPI failing to build the device info set).
 pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
 {
     let guid = hid_class_guid();
@@ -450,8 +457,7 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
     let _guard = SetupDiGuard(h_dev_info);
 
     let mut keyboards = Vec::new();
-    // Track diagnostics for a useful error message when no keyboards are
-    // found.
+    // Track diagnostics for the debug log when no keyboards are found.
     let mut total_interfaces = 0u32;
     let mut open_failed = 0u32;
     let mut not_keyboard = 0u32;
@@ -721,12 +727,11 @@ pub fn list_keyboards() -> Result<Vec<KeyboardInfo>, Box<dyn std::error::Error>>
     }
 
     if keyboards.is_empty() {
-        return Err(format!(
+        debug!(
             "No keyboard devices found. ({total_interfaces} HID interface(s) \
              enumerated, {open_failed} failed to open, {not_keyboard} not a \
              keyboard)",
-        )
-        .into());
+        );
     }
 
     Ok(keyboards)

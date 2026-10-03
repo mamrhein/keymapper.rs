@@ -89,7 +89,7 @@ cargo install --path .
 scripts/install-linux.sh
 ```
 
-The script installs the systemd user service, enables it at login, and starts keymapperd. The daemon needs read access to `/dev/input/event*` (usually via the `input` group) and write access to `/dev/uinput`; if it reports "no keyboard device found", see [Troubleshooting](#troubleshooting).
+The script installs the systemd user service, enables it at login, and starts keymapperd. The daemon needs read access to `/dev/input/event*` (usually via the `input` group) and write access to `/dev/uinput`; if it reports "No keyboard devices found", see [Troubleshooting](#troubleshooting).
 
 To uninstall, stop and disable the service (the pre-built archive also ships `uninstall-linux.sh`, which does this part) and remove the binaries:
 
@@ -310,10 +310,10 @@ List all connected keyboard devices, printing each keyboard's name, vendor, mode
 
 Key introspection tools.
 
-| Subcommand | Description                                                                                    |
-| ---------- | ---------------------------------------------------------------------------------------------- |
-| `list`     | Print all key names recognised in the configuration file                                       |
-| `probe`    | Wait for physical key presses and print each key's name and code. Press Control+Escape to exit |
+| Subcommand | Description                                                                               |
+| ---------- | ----------------------------------------------------------------------------------------- |
+| `list`     | Print all key names recognised in the configuration file                                  |
+| `probe`    | Wait for physical key presses and print each key's name and code. Press Control+C to exit |
 
 ### `keymapper daemon`
 
@@ -338,7 +338,7 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 **macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-architecture.md](docs/macos-architecture.md) for full troubleshooting.
 
-**Linux — "no keyboard device found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
+**Linux — "No keyboard devices found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
 
 **Linux — daemon exits at startup with a permission error:** creating the virtual keyboard requires write access to `/dev/uinput`. Grant it with a udev rule, ensure the user is in the `input` group, and relogin:
 
