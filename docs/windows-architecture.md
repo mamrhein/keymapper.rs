@@ -37,6 +37,7 @@ To uninstall, use `winget uninstall adrhinum.keymapper` or the Add/Remove Progra
 1. **Hook thread** — installs the `WH_KEYBOARD_LL` hook (session-global) and runs the message loop. The hook procedure performs the entire decision and emission itself: it matches the event against the raw input buffer for device identification (non-blocking, with a bounded 3 ms retry), asks the shared mapping engine for the event's fate, and either emits the mapped output via `SendInput` and swallows the key, or passes the key through. A key-up is decided from its key-down's own record in the engine, not from a re-run of the lookup.
 
    The message loop exists only to keep the hook alive and to drain the deferred-emission queue (fed exclusively by standalone consumer events, see [Standalone consumer control](#standalone-consumer-control)): the hook callback runs re-entrantly inside the blocked message wait, and a swallowed hook event produces no message of its own — a bare `GetMessageW` loop would block forever and never run its body. The loop therefore blocks in `MsgWaitForMultipleObjects` on the input queue, drains the queue with the non-blocking `PeekMessageW`, and then runs the emission drain.
+
 2. **Raw input thread** — owns a message-only window registered for raw input (`RIDEV_INPUTSINK`) on both keyboard and consumer control devices, so events arrive even when the daemon is not in the foreground. It pumps `WM_INPUT` messages, buffers keyboard key-downs in the shared device-identification buffer, and processes standalone consumer events directly (see [Standalone consumer control](#standalone-consumer-control)).
 
 ### Device identification (raw input)
@@ -48,7 +49,7 @@ Matching details:
 - Raw input key-downs are buffered with a 100 ms expiry to compensate for non-deterministic arrival order between the hook and raw input streams. Key-ups carry no new device information and are dropped.
 - The hook procedure matches its event against the most recent buffered raw input event with the same decoded `HidUsage`; the matched entry is consumed so it is never reused for a subsequent press.
 - The match is non-blocking except for a bounded retry (a 3 ms budget, 1 ms sleeps), long enough for the raw event of the same press to arrive in the common case and short enough to stay well inside Windows' low-level-hook timeout.
-- A press that never matches degrades to a lookup without device identification: device-filtered rules simply do not fire for that event, and the input chain is never blocked for long.
+- A press that never matches degrades to a lookup without device identification: keyboard filters are skipped for that event, so device-filtered rules fire as they would for any keyboard, and the input chain is never blocked for long.
 
 ### Key identity
 
@@ -106,15 +107,15 @@ Outside CI the same harness runs in local mode: it drives an already-running dae
 
 ## Source files
 
-| File | Responsibility |
-| ---- | -------------- |
-| `src/platform/windows/mapping.rs` | Hook thread, engine decision, emission, self-exclusion |
-| `src/platform/windows/raw_input.rs` | Raw input window, HID report decoding |
-| `src/platform/windows/raw_worker.rs` | Raw input thread, standalone consumer events |
-| `src/platform/windows/device_match.rs` | Device-identification buffer, device path cache |
-| `src/platform/windows/key.rs` | VK ↔ `HidUsage` conversion, consumer VK table |
-| `src/platform/windows/keyboard.rs` | Keyboard enumeration (SetupAPI + HID API) |
-| `src/platform/windows/mod.rs` | Module root, injection tag |
+| File                                   | Responsibility                                         |
+| -------------------------------------- | ------------------------------------------------------ |
+| `src/platform/windows/mapping.rs`      | Hook thread, engine decision, emission, self-exclusion |
+| `src/platform/windows/raw_input.rs`    | Raw input window, HID report decoding                  |
+| `src/platform/windows/raw_worker.rs`   | Raw input thread, standalone consumer events           |
+| `src/platform/windows/device_match.rs` | Device-identification buffer, device path cache        |
+| `src/platform/windows/key.rs`          | VK ↔ `HidUsage` conversion, consumer VK table          |
+| `src/platform/windows/keyboard.rs`     | Keyboard enumeration (SetupAPI + HID API)              |
+| `src/platform/windows/mod.rs`          | Module root, injection tag                             |
 
 ## References
 

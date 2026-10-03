@@ -20,8 +20,9 @@
 //! and the hook do not deliver in a guaranteed order, so a raw key-down may
 //! arrive a few milliseconds after the hook callback for the same press.  A
 //! match that never arrives degrades to a lookup without device
-//! identification (device-filtered rules simply do not fire for that
-//! event), and the input chain must never be blocked for long.
+//! identification (keyboard filters are then skipped, so device-filtered
+//! rules fire as for any keyboard), and the input chain must never be
+//! blocked for long.
 
 use std::{
     collections::HashMap,

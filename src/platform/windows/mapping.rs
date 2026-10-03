@@ -655,8 +655,8 @@ extern "system" fn low_level_keyboard_proc(
     // — long enough for the raw event of this same press to arrive in the
     // common case, short enough to keep the hook callback well inside
     // Windows' low-level-hook timeout.  A press that never matches degrades
-    // to a lookup without device identification (device-filtered rules
-    // simply do not fire for it).
+    // to a lookup without device identification (keyboard filters are then
+    // skipped, so device-filtered rules fire for it as for any keyboard).
     let device_path = match_usage_with_retry(usage)
         .and_then(|handle_ptr| device_cache().get_or_resolve(handle_ptr));
 
