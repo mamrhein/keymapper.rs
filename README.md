@@ -201,16 +201,26 @@ Groups are evaluated in definition order. Within each group, mappings are evalua
 Groups can be scoped to specific keyboards with the `keyboards` field. Each filter is a mapping of one or more of `name`, `vendor`, `model`, and `port`; a keyboard matches when all provided fields match (case-insensitive), and multiple filters form an OR set. Omit `keyboards` or leave it empty to apply to all keyboards.
 
 ```yaml
-# Only apply this group when the event comes from an Apple Magic Keyboard
-- name: "magic keyboard only"
+# Only apply this group when the event comes from the specified keyboard(s)
+- name: "external keyboard only"
   keyboards:
-    - name: Magic Keyboard
-      vendor: Apple
+    - name: Std 105
+    - vendor: Examtech
   mappings:
     CapsLock: LeftControl
 ```
 
-A document-level `keyboards` filter (in the mapping form, alongside `groups`) restricts which keyboards are processed at all. Use `keymapper keyboards` to list the available values.
+A document-level `keyboards` filter (in the mapping form, alongside `groups`) restricts which keyboards are processed at all: on Linux, keyboards that do not match are never grabbed, so their keys reach the system unremapped. On macOS and Windows this filter is a no-op (see the platform table below).
+
+Keyboard filtering relies on the platform's ability to identify the source device of each key event, so its support differs between platforms:
+
+| Platform | Group-level `keyboards`                                                                                          | Document-level `keyboards`                                        |
+| -------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Linux    | Works; events carry their `evdev` device path                                                                    | Enforced at device open; non-matching keyboards are never grabbed |
+| macOS    | Skipped; CGEvents expose no source device, so all groups apply to all keyboards                                  | No-op                                                             |
+| Windows  | Works via raw input device identification; events whose source cannot be matched are looked up without filtering | No-op; capture is a session-global hook                           |
+
+Use `keymapper keyboards` to list the available values.
 
 ### Mappings
 
@@ -304,7 +314,7 @@ Manage the configuration file.
 
 ### `keymapper keyboards`
 
-List all connected keyboard devices, printing each keyboard's name, vendor, model, port type, and device identifier. The name, vendor, model, and port values can be used in the `--keyboard` / `--keyboards-global` filters (as key=value pairs) to scope rules to specific devices.
+List all connected keyboard devices, printing each keyboard's name, vendor, model, port type, and device identifier. The name, vendor, model, and port values can be used in the `--keyboard` / `--keyboards-global` filters (as key=value pairs) to scope rules to specific devices. Filtering support differs by platform (see [Keyboard filters](#keyboard-filters)).
 
 ### `keymapper keys`
 
