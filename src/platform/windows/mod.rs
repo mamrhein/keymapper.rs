@@ -11,8 +11,8 @@ mod backend;
 mod capture;
 mod config_dir;
 mod device_match;
-mod key;
 mod keyboard;
+mod keycode;
 mod mapping;
 pub(crate) mod raw_input;
 mod raw_worker;
@@ -39,5 +39,5 @@ pub use config_dir::config_dir;
 // `from_hid_usage`/`as_native` drive the Windows injector); gate it
 // behind the same `test-util` feature as the rest of the harness surface.
 #[cfg(feature = "test-util")]
-pub use key::Key;
-pub use key::keycode_to_hid_usage;
+pub use keycode::Key;
+pub use keycode::keycode_to_hid_usage;

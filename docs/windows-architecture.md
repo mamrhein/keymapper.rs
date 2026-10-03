@@ -113,7 +113,7 @@ Outside CI the same harness runs in local mode: it drives an already-running dae
 | `src/platform/windows/raw_input.rs`    | Raw input window, HID report decoding                  |
 | `src/platform/windows/raw_worker.rs`   | Raw input thread, standalone consumer events           |
 | `src/platform/windows/device_match.rs` | Device-identification buffer, device path cache        |
-| `src/platform/windows/key.rs`          | VK ↔ `HidUsage` conversion, consumer VK table          |
+| `src/platform/windows/keycode.rs`      | VK ↔ `HidUsage` conversion, consumer VK table          |
 | `src/platform/windows/keyboard.rs`     | Keyboard enumeration (SetupAPI + HID API)              |
 | `src/platform/windows/mod.rs`          | Module root, injection tag                             |
 

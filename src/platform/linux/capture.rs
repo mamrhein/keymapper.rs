@@ -20,9 +20,7 @@ use evdev::{EventType, InputEvent, MiscCode};
 
 use crate::{
     common::hid_usage::HidUsage,
-    platform::{
-        backend::CapturedKey, linux::hid_translate::keycode_to_hid_usage,
-    },
+    platform::{backend::CapturedKey, linux::keycode::keycode_to_hid_usage},
 };
 
 /// Turns raw evdev events into [`CapturedKey`]s.

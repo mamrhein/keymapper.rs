@@ -30,7 +30,7 @@ use windows::Win32::{
     },
 };
 
-use super::key::Key;
+use super::keycode::Key;
 use crate::{common::keyboard::KeyboardInfo, platform::backend::CapturedKey};
 
 /// Turns raw low-level keyboard hook events into [`CapturedKey`]s.

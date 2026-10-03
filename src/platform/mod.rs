@@ -19,8 +19,8 @@
 //!   per-user configuration base directory, consumed by
 //!   `common::config_path`), and `keycode_to_hid_usage` (the native-keycode to
 //!   `HidUsage` translation used by the `keys probe` CLI command)
-//! - linux: additionally `hid_translate` (the canonical `HidUsage` and
-//!   evdev-keycode tables) and `VIRTUAL_KEYBOARD_NAME`
+//! - linux: additionally `keycode` (the canonical `HidUsage` and evdev-keycode
+//!   tables) and `VIRTUAL_KEYBOARD_NAME`
 //! - macos: additionally `start_virtkbd` (the root virtkbdd daemon entry
 //!   point) and `console_user_home` (the console user's home directory,
 //!   consumed by `common::config_path` when running as root)
@@ -55,6 +55,21 @@
 //! ([`crate::keymap_core`]) and the shared [`common`](crate::common)
 //! types; it must never depend on [`daemon`](crate::daemon) (the daemon
 //! orchestrates the platform backends, not the other way around).
+//!
+//! Module organization: every module in this tree splits along its axis
+//! of variation.  Code that differs per OS behind one shared interface is
+//! a facet: it is homed in a module named for the capability it exposes
+//! ([`app_identity`], [`endpoint`], [`logging`], the [`backend`] contract),
+//! with the interface at the module root and the per-OS implementations
+//! as children, split on the real fault line (`endpoint/unix.rs` and
+//! `logging/file.rs` each serve two OSes, so not every facet splits three
+//! ways).  Code that is private to a single OS lives inside that OS's
+//! module (`linux`, `macos`, `windows`) and splits by concern there
+//! (`capture`, `keyboard`, `keycode`, `mapping`, ...).  The OS modules are
+//! the leaves of the facet tree — reached through the contract above —
+//! not a second organizing principle: each facet's interface sits directly
+//! above its implementations, and each OS's machinery, bindings, and
+//! `#[cfg]`s stay inside one subtree.
 //!
 //! The same module also exports two `pub(crate)` facets.  [`logging`] is
 //! the OS-specific log destination (stderr/journal on Linux, a rotating
@@ -129,7 +144,7 @@ pub(crate) use linux::LinuxBackend;
 #[cfg(target_os = "linux")]
 pub use linux::config_dir;
 #[cfg(target_os = "linux")]
-pub use linux::hid_translate;
+pub use linux::keycode;
 #[cfg(target_os = "linux")]
 pub use linux::{
     VIRTUAL_KEYBOARD_NAME, keycode_to_hid_usage, list_keyboards, start_mapping,

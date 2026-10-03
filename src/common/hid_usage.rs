@@ -126,7 +126,7 @@ macro_rules! define_hid_usage {
             /// Return the Linux evdev `KEY_*` code for this usage.
             ///
             /// This is the single source of truth for the evdev key code; the
-            /// Linux `hid_translate` tables are derived from it.  Every
+            /// Linux `keycode` tables are derived from it.  Every
             /// currently-defined usage has a stable evdev equivalent, so this
             /// is always `Some`; the `Option` keeps the emission path honest
             /// should a future usage lack one.

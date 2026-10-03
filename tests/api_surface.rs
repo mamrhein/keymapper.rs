@@ -28,7 +28,7 @@ use keymapper::platform::Key;
 use keymapper::platform::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient};
 // Platform items that exist only on a single OS.
 #[cfg(target_os = "linux")]
-use keymapper::platform::{VIRTUAL_KEYBOARD_NAME, hid_translate};
+use keymapper::platform::{VIRTUAL_KEYBOARD_NAME, keycode};
 use keymapper::{
     HidUsage,
     common::{

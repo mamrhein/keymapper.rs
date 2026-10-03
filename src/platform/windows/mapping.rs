@@ -91,7 +91,7 @@ use windows::Win32::{
 use super::{
     INJECTED_TAG,
     device_match::{device_cache, match_usage},
-    key::{Key, hid_to_vk},
+    keycode::{Key, hid_to_vk},
     raw_input::start_raw_input_loop,
     raw_worker::spawn_raw_worker,
 };

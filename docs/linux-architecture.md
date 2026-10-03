@@ -115,7 +115,7 @@ Outside CI the same harness runs in local mode: it drives an already-running dae
 | `src/platform/linux/mapping/hotplug.rs` | udev add/remove monitor, startup resync                           |
 | `src/platform/linux/mapping/epoll.rs`   | Raw epoll FFI wrapper                                             |
 | `src/platform/linux/keyboard.rs`        | Keyboard enumeration via udev                                     |
-| `src/platform/linux/hid_translate.rs`   | HID usage ↔ evdev key code translation                            |
+| `src/platform/linux/keycode.rs`         | HID usage ↔ evdev key code translation                            |
 | `src/platform/linux/config_dir.rs`      | XDG configuration directory resolution                            |
 | `src/common/app_identity/linux/`        | Active application query (X11, Wayland) and `.desktop` resolution |
 

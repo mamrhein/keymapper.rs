@@ -61,7 +61,7 @@ use windows::{
     core::PCWSTR,
 };
 
-use super::key::Key;
+use super::keycode::Key;
 use crate::common::hid_usage::{HidUsage, PAGE_CONSUMER};
 
 /// HID usage page for Generic Desktop.

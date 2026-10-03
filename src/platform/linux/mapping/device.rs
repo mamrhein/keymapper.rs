@@ -46,7 +46,7 @@ use crate::{
         backend::{Emitter, OutputAction},
         linux::{
             capture::KeyScanner,
-            hid_translate::{hid_usage_to_keycode, keycode_to_hid_usage},
+            keycode::{hid_usage_to_keycode, keycode_to_hid_usage},
         },
     },
 };
@@ -91,7 +91,7 @@ pub(super) struct ManagedDevice {
 ///
 /// The bit resolves to a `ModifierRole` (the canonical layout lives in
 /// `common::modifier`); the resulting modifier usage is looked up in the
-/// shared `hid_translate` table like any other key.
+/// shared `keycode` table like any other key.
 fn modifier_bit_to_keycode(bit: u8) -> Option<u16> {
     let role = ModifierRole::try_from_bit(bit)?;
     let usage = HidUsage::keyboard(role.hid_id())?;
