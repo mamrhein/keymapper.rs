@@ -13,7 +13,7 @@
 //! `config list/check/add` subcommands all read the same file under
 //! identical security constraints.  This module provides a single
 //! [`read_config_content`] helper that every path calls, so they can never
-//! drift apart.  On Unix the file is opened with `O_NOFOLLOW` and every
+//! drift apart.  The file is opened without following symlinks and every
 //! check (regular file, size, ownership, world-writable) is performed on
 //! that same descriptor, eliminating TOCTOU races between metadata
 //! inspection and the content read.  Before the content is returned, the
@@ -22,11 +22,19 @@
 //! the sticky bit aborts the read.  Components are inspected with symlinks
 //! resolved, so trust attaches to the directory that is actually
 //! traversed, never to the link or name used to reach it.
+//!
+//! This module owns the shared sequence and the platform-neutral checks;
+//! the OS-specific enforcement (on Unix the `O_NOFOLLOW` open, the
+//! parent-directory-chain inspection, and the ownership and mode checks;
+//! elsewhere a plain open with no mode checks) lives in
+//! [`crate::platform::config_access`].
 
 use std::{io::Read, path::Path};
 
 use log::info;
 use thiserror::Error;
+
+use crate::platform::config_access;
 
 /// Maximum config file size in bytes (1 MB).  A key-mapping configuration
 /// should never approach this limit; a larger file indicates either a write
@@ -56,13 +64,12 @@ pub enum ConfigReadError {
     #[error("config file is too large ({size} bytes, limit {limit})")]
     TooLarge { size: u64, limit: u64 },
 
-    /// The config file is owned by a different user.
-    #[cfg(unix)]
+    /// The config file is owned by a different user (constructed on Unix
+    /// only).
     #[error("config file is owned by uid {uid} (current user: {current})")]
     WrongOwner { uid: u32, current: u32 },
 
-    /// The config file is world-writable.
-    #[cfg(unix)]
+    /// The config file is world-writable (constructed on Unix only).
     #[error("config file is world-writable")]
     WorldWritable,
 
@@ -70,7 +77,6 @@ pub enum ConfigReadError {
     /// only): a component that cannot be inspected, is not a directory,
     /// or is world-writable without the sticky bit may let a user who
     /// does not own the config redirect the path to a file they control.
-    #[cfg(unix)]
     #[error("untrusted parent directory '{path}' ({reason})")]
     UntrustedParentDir { path: String, reason: &'static str },
 
@@ -86,25 +92,28 @@ pub enum ConfigReadError {
 /// Shared by the daemon (initial load and hot-reload) and the CLI so both
 /// sides enforce identical constraints on the same trust boundary.
 ///
-/// The checks, in order: the path is not a symlink; on Unix the
-/// parent-directory chain is verified (every component must resolve to a
-/// directory that is not world-writable; sticky-bit protected shared
-/// directories such as `/tmp` are exempted because custom CLI config
-/// paths under the system temp directory are legitimate and the daemon's
-/// config search path never lies inside one); the file opens without
-/// following symlinks (`O_NOFOLLOW` on Unix); it is a regular file; its
-/// size is within [`MAX_CONFIG_SIZE`]; on Unix it is owned by the current
-/// user (unless running as root) and is not world-writable.  All checks
-/// run on the single open descriptor, so there is no window in which the
-/// file can be swapped between inspection and read.  Because the chain is
-/// re-inspected on every call, a symlink swapped into a parent directory
-/// after startup aborts the next read instead of being followed silently.
+/// The checks, in order: the path is not a symlink; the file opens through
+/// [`crate::platform::config_access`], which on Unix first verifies the
+/// parent-directory chain (every component must resolve to a directory
+/// that is not world-writable; sticky-bit protected shared directories
+/// such as `/tmp` are exempted because custom CLI config paths under the
+/// system temp directory are legitimate and the daemon's config search
+/// path never lies inside one) and then opens without following symlinks
+/// (`O_NOFOLLOW`); the file is a regular file; its size is within
+/// [`MAX_CONFIG_SIZE`]; the platform trust check accepts it (on Unix: it
+/// is owned by the current user unless running as root, and it is not
+/// world-writable).  All checks run on the single open descriptor, so
+/// there is no window in which the file can be swapped between inspection
+/// and read.  Because the chain is re-inspected on every call, a symlink
+/// swapped into a parent directory after startup aborts the next read
+/// instead of being followed silently.
 pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
     // Security check: verify the config file itself is not a symlink.
-    // This is an extra guard beyond O_NOFOLLOW below, closing the window
-    // in which a symlink could be planted between inspection and open.
-    // Only ENOENT means "not found"; other failures (e.g. EACCES from an
-    // unsearchable parent directory) keep their distinct error kind.
+    // This is an extra guard beyond the platform's O_NOFOLLOW (Unix),
+    // closing the window in which a symlink could be planted between
+    // inspection and open.  Only ENOENT means "not found"; other failures
+    // (e.g. EACCES from an unsearchable parent directory) keep their
+    // distinct error kind.
     let sym_meta = std::fs::symlink_metadata(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
             ConfigReadError::NotFound
@@ -116,92 +125,11 @@ pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
         return Err(ConfigReadError::Symlink);
     }
 
-    // Security check (SEC-19): verify the parent-directory chain.  A
-    // world-writable directory without the sticky bit, or a component that
-    // resolves to a non-directory, may let a user who does not own the
-    // config redirect the path to a file they control, so such a chain
-    // aborts the read.  Components are inspected with symlinks resolved:
-    // trust attaches to the directory that is actually traversed, never to
-    // the link or name used to reach it.  Sticky-bit protected shared
-    // directories (e.g. `/tmp`, or the system temp directory on macOS) are
-    // exempted because custom CLI config paths under them are legitimate and
-    // the daemon's config search path never lies inside one.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        for dir in path.ancestors().skip(1) {
-            // The remainder of a relative path is empty; stop there.
-            if dir.as_os_str().is_empty() {
-                break;
-            }
-            let dir_mode = match std::fs::metadata(dir) {
-                Ok(meta) => {
-                    if !meta.is_dir() {
-                        return Err(ConfigReadError::UntrustedParentDir {
-                            path: dir.display().to_string(),
-                            reason: "not a directory",
-                        });
-                    }
-                    meta.mode() as libc::mode_t
-                }
-                Err(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(ConfigReadError::UntrustedParentDir {
-                        path: dir.display().to_string(),
-                        reason: "missing",
-                    });
-                }
-                Err(_) => {
-                    return Err(ConfigReadError::UntrustedParentDir {
-                        path: dir.display().to_string(),
-                        reason: "cannot be inspected",
-                    });
-                }
-            };
-            if (dir_mode & libc::S_IWOTH) != 0
-                && (dir_mode & libc::S_ISVTX) == 0
-            {
-                return Err(ConfigReadError::UntrustedParentDir {
-                    path: dir.display().to_string(),
-                    reason: "world-writable without sticky bit",
-                });
-            }
-        }
-    }
-
-    // Open the file.  On Unix we use O_NOFOLLOW so a symlink planted between
-    // the check above and the open is never followed, and we can then do the
-    // metadata checks and read on the same descriptor.
-    #[cfg(unix)]
-    let mut file = {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
-            .map_err(|err| {
-                // `O_NOFOLLOW` rejects a symlink in the final position
-                // with ELOOP: that is the symlink refusal, most likely a
-                // link planted after the symlink-metadata check above.
-                if err.raw_os_error() == Some(libc::ELOOP) {
-                    ConfigReadError::Symlink
-                } else if err.kind() == std::io::ErrorKind::NotFound {
-                    ConfigReadError::NotFound
-                } else {
-                    ConfigReadError::Io(err)
-                }
-            })?
-    };
-
-    #[cfg(not(unix))]
-    let mut file = std::fs::File::open(path).map_err(|err| {
-        if err.kind() == std::io::ErrorKind::NotFound {
-            ConfigReadError::NotFound
-        } else {
-            ConfigReadError::Io(err)
-        }
-    })?;
+    // Open with the platform's hardening: on Unix this verifies the
+    // parent-directory chain (SEC-19) first, then opens with O_NOFOLLOW so
+    // a symlink planted between the check above and the open is refused
+    // rather than followed.
+    let mut file = config_access::open_config_file(path)?;
 
     let metadata = file.metadata().map_err(|_| ConfigReadError::Metadata)?;
 
@@ -217,31 +145,9 @@ pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
         });
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-
-        // Security check: file is owned by the current user.  Skipped when
-        // running as root: a root daemon legitimately reads configs owned by
-        // regular users (the production layout keeps the config in the user's
-        // home directory), and the world-writable check below is the
-        // meaningful tamper guard in that case.
-        let current_uid = unsafe { libc::getuid() };
-        let uid = metadata.uid();
-        if current_uid != 0 && uid != current_uid {
-            return Err(ConfigReadError::WrongOwner {
-                uid,
-                current: current_uid,
-            });
-        }
-
-        // Security check: file is not world-writable (prevents other users on
-        // the same system from tampering with it).
-        let mode = metadata.mode() as libc::mode_t;
-        if (mode & libc::S_IWOTH) != 0 {
-            return Err(ConfigReadError::WorldWritable);
-        }
-    }
+    // Platform-specific trust checks, run on the open descriptor's
+    // metadata (Unix: ownership and world-writable mode).
+    config_access::check_file_trust(&metadata)?;
 
     // Read content from the already-open handle — no race with metadata.
     let mut content = String::new();
@@ -297,166 +203,5 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         assert!(matches!(err, ConfigReadError::TooLarge { .. }));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlink_is_rejected() {
-        let target = write_temp("symlink_target", "groups: []");
-        let link = target.with_file_name(format!(
-            "{}.link",
-            target.file_name().unwrap().to_string_lossy()
-        ));
-        std::os::unix::fs::symlink(&target, &link)
-            .expect("failed to create symlink");
-
-        let err = read_config_content(&link).unwrap_err();
-        std::fs::remove_file(&link).ok();
-        std::fs::remove_file(&target).ok();
-
-        assert!(matches!(err, ConfigReadError::Symlink));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn world_writable_is_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = write_temp("world_writable", "groups: []");
-        std::fs::set_permissions(
-            &path,
-            std::fs::Permissions::from_mode(0o666),
-        )
-        .expect("failed to chmod");
-
-        let err = read_config_content(&path).unwrap_err();
-        std::fs::remove_file(&path).ok();
-
-        assert!(matches!(err, ConfigReadError::WorldWritable));
-    }
-
-    /// Create a unique private directory below the temp dir, or return
-    /// `None` if the temp dir itself has no sticky bit (its own
-    /// world-writable mode would make every child chain untrusted anyway).
-    #[cfg(unix)]
-    fn private_temp_subdir(label: &str) -> Option<std::path::PathBuf> {
-        use std::os::unix::fs::MetadataExt;
-
-        let temp = std::env::temp_dir();
-        let mode = std::fs::metadata(&temp)
-            .expect("failed to stat temp dir")
-            .mode() as libc::mode_t;
-        // If the temp dir itself would not pass the chain check, the
-        // platform setup is unusual; skip rather than fail spuriously.
-        if (mode & libc::S_IWOTH) != 0 && (mode & libc::S_ISVTX) == 0 {
-            return None;
-        }
-        let dir = temp.join(format!("keymapperd_cfgio_{label}_d"));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir(&dir).expect("failed to create temp dir");
-        Some(dir)
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn world_writable_parent_dir_is_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let Some(dir) = private_temp_subdir("ww_parent") else {
-            return;
-        };
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
-            .expect("failed to chmod dir");
-        let path = dir.join("config.yaml");
-        std::fs::write(&path, "groups: []").expect("failed to write config");
-
-        let err = read_config_content(&path).unwrap_err();
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert!(matches!(err, ConfigReadError::UntrustedParentDir { .. }));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_parent_to_world_writable_dir_is_rejected() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let Some(real) = private_temp_subdir("ww_link_target") else {
-            return;
-        };
-        std::fs::set_permissions(
-            &real,
-            std::fs::Permissions::from_mode(0o777),
-        )
-        .expect("failed to chmod dir");
-        let link = std::env::temp_dir().join("keymapperd_cfgio_ww_link");
-        std::os::unix::fs::symlink(&real, &link)
-            .expect("failed to create symlink");
-        // The link name is a symlink into an untrusted directory; the
-        // resolved target's world-writable mode must be what gets judged.
-        let path = link.join("config.yaml");
-        std::fs::write(real.join("config.yaml"), "groups: []")
-            .expect("failed to write config");
-
-        let err = read_config_content(&path).unwrap_err();
-        std::fs::remove_file(&link).ok();
-        std::fs::remove_dir_all(&real).ok();
-
-        assert!(matches!(err, ConfigReadError::UntrustedParentDir { .. }));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_parent_to_private_dir_is_followed() {
-        let Some(real) = private_temp_subdir("private_link_target") else {
-            return;
-        };
-        let link = std::env::temp_dir().join("keymapperd_cfgio_priv_link");
-        std::os::unix::fs::symlink(&real, &link)
-            .expect("failed to create symlink");
-        let path = link.join("config.yaml");
-        std::fs::write(real.join("config.yaml"), "groups: []")
-            .expect("failed to write config");
-
-        let content = read_config_content(&path).expect(
-            "a symlinked parent resolving to a private dir must be \
-             traversable",
-        );
-        std::fs::remove_file(&link).ok();
-        std::fs::remove_dir_all(&real).ok();
-
-        assert_eq!(content, "groups: []");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn untraversable_parent_dir_keeps_the_io_error() {
-        use std::os::unix::fs::PermissionsExt;
-
-        // The superuser ignores directory execute permissions, so the
-        // setup below cannot produce EACCES when running as root.
-        if unsafe { libc::geteuid() } == 0 {
-            return;
-        }
-        let Some(dir) = private_temp_subdir("nox_parent") else {
-            return;
-        };
-        let path = dir.join("config.yaml");
-        std::fs::write(&path, "groups: []").expect("failed to write config");
-        // Revoking every permission bit on the parent makes every path
-        // operation under it fail with EACCES (denied traversal) rather
-        // than ENOENT; that distinction must survive into the error.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000))
-            .expect("failed to chmod dir");
-
-        let err = read_config_content(&path).unwrap_err();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
-            .expect("failed to restore the dir mode");
-        std::fs::remove_dir_all(&dir).ok();
-
-        assert!(
-            matches!(err, ConfigReadError::Io(_)),
-            "expected a preserved I/O error, got {err:?}",
-        );
     }
 }

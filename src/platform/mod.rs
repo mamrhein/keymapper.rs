@@ -8,9 +8,9 @@
 // $Revision$
 
 //! Platform backend: the single public boundary between the platform
-//! layer and the code above it (the daemon, `cli`, the `test-util`
-//! dev-dependency crate, and — for [`config_dir`] and, on macOS,
-//! `console_user_home` — `common`).
+//! platform layer and the code above it (the daemon, `cli`, the `test-util`
+//! dev-dependency crate, and — for [`config_dir`], on macOS
+//! `console_user_home`, and through the [`config_access`] facet — `common`).
 //!
 //! The stable public surface that the code above may depend on is, per
 //! platform:
@@ -59,22 +59,26 @@
 //! Module organization: every module in this tree splits along its axis
 //! of variation.  Code that differs per OS behind one shared interface is
 //! a facet: it is homed in a module named for the capability it exposes
-//! ([`app_identity`], [`endpoint`], [`logging`], the [`backend`] contract),
-//! with the interface at the module root and the per-OS implementations
-//! as children, split on the real fault line (`endpoint/unix.rs` and
-//! `logging/file.rs` each serve two OSes, so not every facet splits three
-//! ways).  Code that is private to a single OS lives inside that OS's
-//! module (`linux`, `macos`, `windows`) and splits by concern there
-//! (`capture`, `keyboard`, `keycode`, `mapping`, ...).  The OS modules are
-//! the leaves of the facet tree — reached through the contract above —
-//! not a second organizing principle: each facet's interface sits directly
-//! above its implementations, and each OS's machinery, bindings, and
-//! `#[cfg]`s stay inside one subtree.
+//! ([`app_identity`], [`config_access`], [`endpoint`], [`logging`], the
+//! [`backend`] contract), with the interface at the module root and the
+//! per-OS implementations as children, split on the real fault line
+//! (`endpoint/unix.rs`, `config_access/unix.rs`, and `logging/file.rs`
+//! each serve two OSes, so not every facet splits three ways).  Code that is
+//! private to a single OS lives inside that OS's module (`linux`, `macos`,
+//! `windows`) and splits by concern there (`capture`, `keyboard`, `keycode`,
+//! `mapping`, ...).  The OS modules are the leaves of the facet tree — reached
+//! through the contract above — not a second organizing principle: each
+//! facet's interface sits directly above its implementations, and each OS's
+//! machinery, bindings, and `#[cfg]`s stay inside one subtree.
 //!
-//! The same module also exports two `pub(crate)` facets.  [`logging`] is
+//! The same module also exports three `pub(crate)` facets.  [`logging`] is
 //! the OS-specific log destination (stderr/journal on Linux, a rotating
 //! file on macOS and Windows) consumed by [`crate::daemon::logging`] so
-//! the daemon holds no `#[cfg(target_os)]` sink branches.  [`backend`] is
+//! the daemon holds no `#[cfg(target_os)]` sink branches.
+//! [`config_access`] is the OS-specific hardened config-file access
+//! (symlink-safe open, Unix parent-chain and ownership/mode checks)
+//! consumed by [`crate::common::config_io`] so the reader holds no
+//! `#[cfg(unix)]` enforcement branches.  [`backend`] is
 //! the cross-platform device-I/O contract (`KeySource`/`Emitter`:
 //! enumerate, observe, emit, suppress-echo, release-mask policy); all
 //! three platforms implement it
@@ -109,6 +113,16 @@ pub mod app_identity;
 /// variants it never constructs).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) mod backend;
+
+/// The OS-specific hardened access behind the config-file reader.
+///
+/// [`crate::common::config_io`] owns the policy and sequence of the
+/// hardened config read; this private facet owns only the OS-specific
+/// enforcement: the symlink-safe open and, on Unix, the
+/// parent-directory-chain verification and the ownership/world-writable
+/// checks. It is `pub(crate)` because only the shared reader drives it,
+/// so it is not part of the public platform surface documented above.
+pub(crate) mod config_access;
 
 /// The OS-specific transport behind the daemon's runtime control endpoint.
 ///
