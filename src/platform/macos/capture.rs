@@ -281,16 +281,14 @@ mod tests {
     /// The CGKeyCode of the `Fn` key.
     const KC_FN: u16 = 63;
 
-    /// A bare CGEvent carrying only a keycode and a flag mask.  Safe to
-    /// construct directly (as `karabiner_client` does); it must not be
-    /// posted to the HID event system, which the scanner tests never do.
+    /// A synthetic keyboard CGEvent carrying a keycode and a flag mask.
+    /// The keycode must be set at creation: `CGEventSetIntegerValueField`
+    /// silently fails on the null-type event that `CGEventCreate` returns,
+    /// leaving the keycode at 0.  The event is never posted to the HID
+    /// event system, which the scanner tests never do.
     fn event(keycode: u16, flags: CGEventFlags) -> CFRetained<CGEvent> {
-        let event = CGEvent::new(None).expect("CGEvent::new");
-        CGEvent::set_integer_value_field(
-            Some(&event),
-            CGEventField::KeyboardEventKeycode,
-            i64::from(keycode),
-        );
+        let event = CGEvent::new_keyboard_event(None, keycode, false)
+            .expect("CGEvent::new_keyboard_event");
         CGEvent::set_flags(Some(&event), flags);
         event
     }
