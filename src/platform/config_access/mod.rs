@@ -38,7 +38,7 @@
 //! `common::config_io` and never names the reader itself, so `common`
 //! orchestrates a contract it does not implement.  `common::config_io`
 //! reaches the two functions below through the same sanctioned
-//! `common -> platform` seam as `config_dir` and `console_user_home`.
+//! `common -> platform` seam as `config_dir` and `console_user_config_dir`.
 
 #[cfg(unix)]
 mod unix;

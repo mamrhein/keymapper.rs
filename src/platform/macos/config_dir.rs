@@ -68,14 +68,14 @@ pub fn console_uid() -> Option<libc::uid_t> {
 ///
 /// The owner of `/dev/console` is the console user.  A process running as
 /// root uses this to locate the configuration of the logged-in user, because
-/// its own home directory is `/var/root`.  The config path search in
-/// `common::config_path` consults it when the effective UID is 0.
+/// its own home directory is `/var/root`.  Consulted by
+/// [`console_user_config_dir`] when the effective UID is 0.
 ///
 /// Returns `None` when there is no console user (headless system, or the
 /// login window before any user has logged in) and when the console user is
 /// root (single-user mode), in which case [`config_dir`] already points at
 /// the right place.
-pub fn console_user_home() -> Option<PathBuf> {
+pub(crate) fn console_user_home() -> Option<PathBuf> {
     let uid = console_uid()?;
 
     // No logged-in user yet, or a root console: the regular config dir is

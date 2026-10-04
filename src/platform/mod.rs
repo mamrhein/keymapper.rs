@@ -11,7 +11,8 @@
 //! platform layer and the code above it (the daemon, `cli`, the `test-util`
 //! dev-dependency crate, and — for [`config_dir`],
 //! [`console_user_config_dir`], and through the [`config_access`] facet —
-//! `common`).
+//! `common`).  Everything else in this module, `console_user_home` among
+//! it, is implementation detail behind that surface.
 //!
 //! The stable public surface that the code above may depend on is, per
 //! platform:
@@ -23,7 +24,7 @@
 //! - linux: additionally `keycode` (the canonical `HidUsage` and evdev-keycode
 //!   tables) and `VIRTUAL_KEYBOARD_NAME`
 //! - macos: additionally `start_virtkbd` (the root virtkbdd daemon entry
-//!   point) and `console_user_home` (the console user's home directory)
+//!   point)
 //! - windows: (no platform-specific production export beyond the common set)
 //!
 //! Test-harness-only exports are gated behind the crate's `test-util` feature
@@ -91,6 +92,8 @@
 //! re-exports one further `pub(crate)` item: [`console_user_config_dir`],
 //! the console user's configuration base directory (real on macOS only,
 //! `None` elsewhere), consumed by [`crate::common::config_path`].
+//! macOS' `console_user_home` is not re-exported: it is private to the
+//! macOS subtree and consulted only by `console_user_config_dir`.
 //!
 //! The `test-util` dev-dependency crate and `cli` may depend only on this
 //! surface, never on the `pub(crate)` internals of the platform
@@ -171,13 +174,13 @@ pub use linux::{
 #[cfg(target_os = "macos")]
 pub(crate) use macos::MacOsBackend;
 #[cfg(target_os = "macos")]
+pub use macos::config_dir;
+#[cfg(target_os = "macos")]
 pub(crate) use macos::console_user_config_dir;
 // Test-harness-only surface (see the module docs): only reachable with
 // the `test-util` feature on.
 #[cfg(all(target_os = "macos", feature = "test-util"))]
 pub use macos::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient};
-#[cfg(target_os = "macos")]
-pub use macos::{config_dir, console_user_home};
 #[cfg(target_os = "macos")]
 pub use macos::{
     keycode_to_hid_usage, list_keyboards, start_mapping, start_virtkbd,
