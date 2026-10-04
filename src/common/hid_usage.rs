@@ -18,11 +18,12 @@
 //! - Keyboard/Keypad page (0x07) — standard keyboard keys.
 //! - Consumer page (0x0C) — media and display control keys.
 //!
-//! The enum and every table-driven impl (`from_code`, `as_str`, `ALL`, the
-//! string parser, and the Linux evdev key code) are generated from the single
-//! declarative table at the bottom of this module.  That table is the one
-//! source of truth: adding a key means adding one line, and nothing else can
-//! drift out of sync with it.
+//! The enum and every table-driven impl (`from_code`, `as_str`, `ALL` and
+//! the string parser) are generated from the single declarative table at the
+//! bottom of this module.  That table is the one source of truth: adding a
+//! key means adding one line, and nothing else can drift out of sync with
+//! it.  Platform-specific key code mappings (e.g. the Linux evdev `KEY_*`
+//! codes) live in the corresponding `platform::<os>::keycode` module.
 
 use std::fmt;
 
@@ -67,21 +68,21 @@ pub struct HidUsageParseError(String);
 // `define_hid_usage!` is the single source of truth for the `HidUsage` enum.
 // Each table line declares one variant:
 //
-//     Variant = 0xPPPPUU, "CanonicalName" [, [alias, ...]] , evdev: N;
+//     Variant = 0xPPPPUU, "CanonicalName" [, [alias, ...]];
 //
 // where `0xPPPPUU` is the combined HID usage `(page << 16) | id`,
-// `CanonicalName` is the config-facing string (and serialization form), the
-// optional bracket list holds additional parse aliases, and `evdev` is the
-// Linux evdev `KEY_*` code used for emission.  The macro expands to the enum
-// plus every impl that is a pure function of this table, so the variant list
-// is written exactly once.
+// `CanonicalName` is the config-facing string (and serialization form), and
+// the optional bracket list holds additional parse aliases.  Platform key
+// code mappings (e.g. the Linux evdev `KEY_*` codes) live in the respective
+// `platform::<os>::keycode` module.  The macro expands to the enum plus
+// every impl that is a pure function of this table, so the variant list is
+// written exactly once.
 
 macro_rules! define_hid_usage {
     {
         $(
             $variant:ident = $code:literal, $name:literal
             $(, [ $($alias:literal),* ])?
-            , evdev: $evdev:literal
             ;
         )*
     } => {
@@ -122,20 +123,6 @@ macro_rules! define_hid_usage {
 
             /// Slice of all defined `HidUsage` variants.
             pub const ALL: &[Self] = &[ $( Self::$variant, )* ];
-
-            /// Return the Linux evdev `KEY_*` code for this usage.
-            ///
-            /// This is the single source of truth for the evdev key code; the
-            /// Linux `keycode` tables are derived from it.  Every
-            /// currently-defined usage has a stable evdev equivalent, so this
-            /// is always `Some`; the `Option` keeps the emission path honest
-            /// should a future usage lack one.
-            #[allow(dead_code)] // used by linux-specific code and tests
-            pub(crate) const fn evdev_keycode(self) -> Option<u16> {
-                match self {
-                    $( Self::$variant => Some($evdev), )*
-                }
-            }
         }
 
         /// Parse a `HidUsage` from a string slice.
@@ -160,133 +147,133 @@ macro_rules! define_hid_usage {
 
 define_hid_usage! {
     // --- Keyboard page (0x07) — Modifiers ---
-    LeftControl = 0x0700E0, "LeftControl", ["Ctrl", "LeftCtrl"], evdev: 29;
-    RightControl = 0x0700E4, "RightControl", ["RightCtrl"], evdev: 97;
-    LeftShift = 0x0700E1, "LeftShift", ["Shift"], evdev: 42;
-    RightShift = 0x0700E5, "RightShift", evdev: 54;
-    LeftAlt = 0x0700E2, "LeftAlt", ["Alt", "Option", "LeftOption"], evdev: 56;
-    RightAlt = 0x0700E6, "RightAlt", ["RightOption"], evdev: 100;
-    LeftCommand = 0x0700E3, "LeftCommand", ["Command", "Cmd", "Super", "LeftCmd"], evdev: 125;
-    RightCommand = 0x0700E7, "RightCommand", ["RightCmd"], evdev: 126;
+    LeftControl = 0x0700E0, "LeftControl", ["Ctrl", "LeftCtrl"];
+    RightControl = 0x0700E4, "RightControl", ["RightCtrl"];
+    LeftShift = 0x0700E1, "LeftShift", ["Shift"];
+    RightShift = 0x0700E5, "RightShift";
+    LeftAlt = 0x0700E2, "LeftAlt", ["Alt", "Option", "LeftOption"];
+    RightAlt = 0x0700E6, "RightAlt", ["RightOption"];
+    LeftCommand = 0x0700E3, "LeftCommand", ["Command", "Cmd", "Super", "LeftCmd"];
+    RightCommand = 0x0700E7, "RightCommand", ["RightCmd"];
     // --- Keyboard page — Caps Lock ---
-    CapsLock = 0x070039, "CapsLock", ["Caps"], evdev: 58;
+    CapsLock = 0x070039, "CapsLock", ["Caps"];
     // --- Keyboard page — Editor / misc ---
-    Tab = 0x07002B, "Tab", evdev: 15;
-    Space = 0x07002C, "Space", evdev: 57;
-    Return = 0x070028, "Return", ["Enter"], evdev: 28;
-    Backspace = 0x07002A, "Backspace", evdev: 14;
-    Delete = 0x07004C, "Delete", evdev: 111;
-    Escape = 0x070029, "Escape", ["Esc"], evdev: 1;
+    Tab = 0x07002B, "Tab";
+    Space = 0x07002C, "Space";
+    Return = 0x070028, "Return", ["Enter"];
+    Backspace = 0x07002A, "Backspace";
+    Delete = 0x07004C, "Delete";
+    Escape = 0x070029, "Escape", ["Esc"];
     // --- Keyboard page — Navigation ---
-    UpArrow = 0x070052, "UpArrow", ["Up"], evdev: 103;
-    DownArrow = 0x070051, "DownArrow", ["Down"], evdev: 108;
-    LeftArrow = 0x070050, "LeftArrow", ["Left"], evdev: 105;
-    RightArrow = 0x07004F, "RightArrow", ["Right"], evdev: 106;
-    PageUp = 0x07004B, "PageUp", ["PgUp"], evdev: 104;
-    PageDown = 0x07004E, "PageDown", ["PgDn"], evdev: 109;
-    Home = 0x07004A, "Home", evdev: 102;
-    End = 0x07004D, "End", evdev: 107;
+    UpArrow = 0x070052, "UpArrow", ["Up"];
+    DownArrow = 0x070051, "DownArrow", ["Down"];
+    LeftArrow = 0x070050, "LeftArrow", ["Left"];
+    RightArrow = 0x07004F, "RightArrow", ["Right"];
+    PageUp = 0x07004B, "PageUp", ["PgUp"];
+    PageDown = 0x07004E, "PageDown", ["PgDn"];
+    Home = 0x07004A, "Home";
+    End = 0x07004D, "End";
     // --- Keyboard page — Control/function cluster ---
-    PrintScreen = 0x070046, "PrintScreen", ["PrtSc", "SysRq"], evdev: 99;
-    ScrollLock = 0x070047, "ScrollLock", ["Scroll"], evdev: 70;
-    Pause = 0x070048, "Pause", ["Break"], evdev: 119;
-    Insert = 0x070049, "Insert", ["Ins"], evdev: 110;
+    PrintScreen = 0x070046, "PrintScreen", ["PrtSc", "SysRq"];
+    ScrollLock = 0x070047, "ScrollLock", ["Scroll"];
+    Pause = 0x070048, "Pause", ["Break"];
+    Insert = 0x070049, "Insert", ["Ins"];
     // --- Keyboard page — Application menu ---
-    Menu = 0x070065, "Menu", ["ContextMenu", "Application"], evdev: 358;
+    Menu = 0x070065, "Menu", ["ContextMenu", "Application"];
     // --- Keyboard page — Function keys ---
-    F1 = 0x07003A, "F1", evdev: 59;
-    F2 = 0x07003B, "F2", evdev: 60;
-    F3 = 0x07003C, "F3", evdev: 61;
-    F4 = 0x07003D, "F4", evdev: 62;
-    F5 = 0x07003E, "F5", evdev: 63;
-    F6 = 0x07003F, "F6", evdev: 64;
-    F7 = 0x070040, "F7", evdev: 65;
-    F8 = 0x070041, "F8", evdev: 66;
-    F9 = 0x070042, "F9", evdev: 67;
-    F10 = 0x070043, "F10", evdev: 68;
-    F11 = 0x070044, "F11", evdev: 87;
-    F12 = 0x070045, "F12", evdev: 88;
+    F1 = 0x07003A, "F1";
+    F2 = 0x07003B, "F2";
+    F3 = 0x07003C, "F3";
+    F4 = 0x07003D, "F4";
+    F5 = 0x07003E, "F5";
+    F6 = 0x07003F, "F6";
+    F7 = 0x070040, "F7";
+    F8 = 0x070041, "F8";
+    F9 = 0x070042, "F9";
+    F10 = 0x070043, "F10";
+    F11 = 0x070044, "F11";
+    F12 = 0x070045, "F12";
     // --- Keyboard page — Letters ---
-    A = 0x070004, "A", evdev: 30;
-    B = 0x070005, "B", evdev: 48;
-    C = 0x070006, "C", evdev: 46;
-    D = 0x070007, "D", evdev: 32;
-    E = 0x070008, "E", evdev: 18;
-    F = 0x070009, "F", evdev: 33;
-    G = 0x07000A, "G", evdev: 34;
-    H = 0x07000B, "H", evdev: 35;
-    I = 0x07000C, "I", evdev: 23;
-    J = 0x07000D, "J", evdev: 36;
-    K = 0x07000E, "K", evdev: 37;
-    L = 0x07000F, "L", evdev: 38;
-    M = 0x070010, "M", evdev: 50;
-    N = 0x070011, "N", evdev: 49;
-    O = 0x070012, "O", evdev: 24;
-    P = 0x070013, "P", evdev: 25;
-    Q = 0x070014, "Q", evdev: 16;
-    R = 0x070015, "R", evdev: 19;
-    S = 0x070016, "S", evdev: 31;
-    T = 0x070017, "T", evdev: 20;
-    U = 0x070018, "U", evdev: 22;
-    V = 0x070019, "V", evdev: 47;
-    W = 0x07001A, "W", evdev: 17;
-    X = 0x07001B, "X", evdev: 45;
-    Y = 0x07001C, "Y", evdev: 21;
-    Z = 0x07001D, "Z", evdev: 44;
+    A = 0x070004, "A";
+    B = 0x070005, "B";
+    C = 0x070006, "C";
+    D = 0x070007, "D";
+    E = 0x070008, "E";
+    F = 0x070009, "F";
+    G = 0x07000A, "G";
+    H = 0x07000B, "H";
+    I = 0x07000C, "I";
+    J = 0x07000D, "J";
+    K = 0x07000E, "K";
+    L = 0x07000F, "L";
+    M = 0x070010, "M";
+    N = 0x070011, "N";
+    O = 0x070012, "O";
+    P = 0x070013, "P";
+    Q = 0x070014, "Q";
+    R = 0x070015, "R";
+    S = 0x070016, "S";
+    T = 0x070017, "T";
+    U = 0x070018, "U";
+    V = 0x070019, "V";
+    W = 0x07001A, "W";
+    X = 0x07001B, "X";
+    Y = 0x07001C, "Y";
+    Z = 0x07001D, "Z";
     // --- Keyboard page — Numbers ---
-    Number1 = 0x07001E, "1", ["Number1"], evdev: 2;
-    Number2 = 0x07001F, "2", ["Number2"], evdev: 3;
-    Number3 = 0x070020, "3", ["Number3"], evdev: 4;
-    Number4 = 0x070021, "4", ["Number4"], evdev: 5;
-    Number5 = 0x070022, "5", ["Number5"], evdev: 6;
-    Number6 = 0x070023, "6", ["Number6"], evdev: 7;
-    Number7 = 0x070024, "7", ["Number7"], evdev: 8;
-    Number8 = 0x070025, "8", ["Number8"], evdev: 9;
-    Number9 = 0x070026, "9", ["Number9"], evdev: 10;
-    Number0 = 0x070027, "0", ["Number0"], evdev: 11;
+    Number1 = 0x07001E, "1", ["Number1"];
+    Number2 = 0x07001F, "2", ["Number2"];
+    Number3 = 0x070020, "3", ["Number3"];
+    Number4 = 0x070021, "4", ["Number4"];
+    Number5 = 0x070022, "5", ["Number5"];
+    Number6 = 0x070023, "6", ["Number6"];
+    Number7 = 0x070024, "7", ["Number7"];
+    Number8 = 0x070025, "8", ["Number8"];
+    Number9 = 0x070026, "9", ["Number9"];
+    Number0 = 0x070027, "0", ["Number0"];
     // --- Keyboard page — Numpad ---
-    Numpad0 = 0x070062, "Numpad0", evdev: 82;
-    Numpad1 = 0x070059, "Numpad1", evdev: 79;
-    Numpad2 = 0x07005A, "Numpad2", evdev: 80;
-    Numpad3 = 0x07005B, "Numpad3", evdev: 81;
-    Numpad4 = 0x07005C, "Numpad4", evdev: 75;
-    Numpad5 = 0x07005D, "Numpad5", evdev: 76;
-    Numpad6 = 0x07005E, "Numpad6", evdev: 77;
-    Numpad7 = 0x07005F, "Numpad7", evdev: 71;
-    Numpad8 = 0x070060, "Numpad8", evdev: 72;
-    Numpad9 = 0x070061, "Numpad9", evdev: 73;
-    NumpadDecimal = 0x070063, "NumpadDecimal", evdev: 83;
-    NumpadMultiply = 0x070055, "NumpadMultiply", ["KP_Multiply"], evdev: 55;
-    NumpadPlus = 0x070057, "NumpadPlus", ["KP_Add"], evdev: 78;
-    NumpadDivide = 0x070054, "NumpadDivide", ["KP_Divide"], evdev: 98;
-    NumpadEnter = 0x070058, "NumpadEnter", ["KP_Enter"], evdev: 96;
-    NumpadMinus = 0x070056, "NumpadMinus", ["KP_Subtract"], evdev: 74;
-    NumLock = 0x070053, "NumLock", ["NumpadClear"], evdev: 69;
-    NumpadEqual = 0x070067, "NumpadEqual", evdev: 117;
+    Numpad0 = 0x070062, "Numpad0";
+    Numpad1 = 0x070059, "Numpad1";
+    Numpad2 = 0x07005A, "Numpad2";
+    Numpad3 = 0x07005B, "Numpad3";
+    Numpad4 = 0x07005C, "Numpad4";
+    Numpad5 = 0x07005D, "Numpad5";
+    Numpad6 = 0x07005E, "Numpad6";
+    Numpad7 = 0x07005F, "Numpad7";
+    Numpad8 = 0x070060, "Numpad8";
+    Numpad9 = 0x070061, "Numpad9";
+    NumpadDecimal = 0x070063, "NumpadDecimal";
+    NumpadMultiply = 0x070055, "NumpadMultiply", ["KP_Multiply"];
+    NumpadPlus = 0x070057, "NumpadPlus", ["KP_Add"];
+    NumpadDivide = 0x070054, "NumpadDivide", ["KP_Divide"];
+    NumpadEnter = 0x070058, "NumpadEnter", ["KP_Enter"];
+    NumpadMinus = 0x070056, "NumpadMinus", ["KP_Subtract"];
+    NumLock = 0x070053, "NumLock", ["NumpadClear"];
+    NumpadEqual = 0x070067, "NumpadEqual";
     // --- Keyboard page — Punctuation / symbols ---
-    Minus = 0x07002D, "Minus", evdev: 12;
-    Equal = 0x07002E, "Equal", evdev: 13;
-    BracketLeft = 0x07002F, "BracketLeft", evdev: 26;
-    BracketRight = 0x070030, "BracketRight", evdev: 27;
-    Backslash = 0x070031, "Backslash", evdev: 43;
-    Semicolon = 0x070033, "Semicolon", evdev: 39;
-    Quote = 0x070034, "Quote", evdev: 40;
-    Grave = 0x070035, "Grave", evdev: 41;
-    Comma = 0x070036, "Comma", evdev: 51;
-    Slash = 0x070038, "Slash", evdev: 53;
-    Period = 0x070037, "Period", evdev: 52;
-    IsoExtra = 0x070064, "IsoExtra", ["NonUSBackslash"], evdev: 86;
+    Minus = 0x07002D, "Minus";
+    Equal = 0x07002E, "Equal";
+    BracketLeft = 0x07002F, "BracketLeft";
+    BracketRight = 0x070030, "BracketRight";
+    Backslash = 0x070031, "Backslash";
+    Semicolon = 0x070033, "Semicolon";
+    Quote = 0x070034, "Quote";
+    Grave = 0x070035, "Grave";
+    Comma = 0x070036, "Comma";
+    Slash = 0x070038, "Slash";
+    Period = 0x070037, "Period";
+    IsoExtra = 0x070064, "IsoExtra", ["NonUSBackslash"];
     // --- Consumer page (0x0C) — Media controls ---
-    PlayPause = 0x0C00CD, "PlayPause", ["Play"], evdev: 164;
-    VolumeUp = 0x0C00E9, "VolumeUp", ["VolUp"], evdev: 115;
-    VolumeDown = 0x0C00EA, "VolumeDown", ["VolDown"], evdev: 114;
-    Mute = 0x0C00E2, "Mute", ["VolMute"], evdev: 113;
-    NextTrack = 0x0C00B5, "NextTrack", ["ScanNext"], evdev: 163;
-    PreviousTrack = 0x0C00B6, "PreviousTrack", ["ScanPrev"], evdev: 165;
-    Stop = 0x0C00B7, "Stop", ["MediaStop"], evdev: 166;
+    PlayPause = 0x0C00CD, "PlayPause", ["Play"];
+    VolumeUp = 0x0C00E9, "VolumeUp", ["VolUp"];
+    VolumeDown = 0x0C00EA, "VolumeDown", ["VolDown"];
+    Mute = 0x0C00E2, "Mute", ["VolMute"];
+    NextTrack = 0x0C00B5, "NextTrack", ["ScanNext"];
+    PreviousTrack = 0x0C00B6, "PreviousTrack", ["ScanPrev"];
+    Stop = 0x0C00B7, "Stop", ["MediaStop"];
     // --- Consumer page — Display controls ---
-    BrightnessUp = 0x0C006F, "BrightnessUp", evdev: 225;
-    BrightnessDown = 0x0C0070, "BrightnessDown", evdev: 224;
+    BrightnessUp = 0x0C006F, "BrightnessUp";
+    BrightnessDown = 0x0C0070, "BrightnessDown";
 }
 
 impl HidUsage {
@@ -772,25 +759,6 @@ mod tests {
             assert!(
                 seen.insert(usage.as_str()),
                 "duplicate canonical name '{}'",
-                usage.as_str(),
-            );
-        }
-    }
-
-    #[test]
-    fn no_duplicate_evdev_keycodes() {
-        // Every usage has an evdev key code, and no two usages share one.
-        // Uniqueness is what makes the Linux reverse lookup (a linear scan
-        // over `ALL`) an exact inverse of `evdev_keycode()`.
-        use std::collections::HashSet;
-        let mut seen = HashSet::new();
-        for usage in HidUsage::ALL.iter().copied() {
-            let code = usage.evdev_keycode().unwrap_or_else(|| {
-                panic!("missing evdev code for {}", usage.as_str())
-            });
-            assert!(
-                seen.insert(code),
-                "duplicate evdev code {code} for {}",
                 usage.as_str(),
             );
         }
