@@ -14,7 +14,9 @@ use std::path::PathBuf;
 /// Return the OS-specific per-user configuration base directory, without the
 /// application name.
 ///
-/// On Windows this is `%APPDATA%`.  The directory may not exist yet.
+/// On Windows this is `%LOCALAPPDATA%` (the same root that
+/// [`local_app_data_dir`] joins the application name onto).  The directory
+/// may not exist yet.
 pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir()
 }
