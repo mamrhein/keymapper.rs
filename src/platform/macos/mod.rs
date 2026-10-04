@@ -29,6 +29,7 @@ pub(crate) use backend::MacOsBackend;
 // exports; on macOS they are thin shims that drive the
 // [`crate::platform::backend`] contract (see the `backend` submodule).
 pub use backend::{list_keyboards, start_mapping};
+pub(crate) use config_dir::console_user_config_dir;
 pub use config_dir::{config_dir, console_user_home};
 #[cfg(feature = "test-util")]
 pub use karabiner_client::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient};

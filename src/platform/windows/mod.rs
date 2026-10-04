@@ -35,6 +35,7 @@ pub(crate) const INJECTED_TAG: usize = 0x4B_4D_50_01;
 pub(crate) use backend::WindowsBackend;
 pub use backend::{list_keyboards, start_mapping};
 pub use config_dir::config_dir;
+pub(crate) use config_dir::{console_user_config_dir, local_app_data_dir};
 // `Key` is part of the public surface only for the test harness (its
 // `from_hid_usage`/`as_native` drive the Windows injector); gate it
 // behind the same `test-util` feature as the rest of the harness surface.

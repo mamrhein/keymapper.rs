@@ -20,6 +20,23 @@ pub fn config_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join("Library").join("Application Support"))
 }
 
+/// Return the configuration base directory (without the application name)
+/// of the user currently at the console, or `None` when it does not apply.
+///
+/// Only the root daemon needs this indirection: it runs with a home
+/// directory of `/var/root`, while the configuration lives in the
+/// logged-in user's home.  Unprivileged processes (the CLI, development
+/// builds) already resolve their own home directory correctly, so they
+/// get `None`.
+pub(crate) fn console_user_config_dir() -> Option<PathBuf> {
+    if unsafe { libc::geteuid() } != 0 {
+        return None;
+    }
+
+    let home = console_user_home()?;
+    Some(home.join("Library").join("Application Support"))
+}
+
 /// Return the uid of the user currently at the console.
 ///
 /// The owner of `/dev/console` is the console user.  Returns `None` when

@@ -9,8 +9,9 @@
 
 //! Platform backend: the single public boundary between the platform
 //! platform layer and the code above it (the daemon, `cli`, the `test-util`
-//! dev-dependency crate, and — for [`config_dir`], on macOS
-//! `console_user_home`, and through the [`config_access`] facet — `common`).
+//! dev-dependency crate, and — for [`config_dir`],
+//! [`console_user_config_dir`], and through the [`config_access`] facet —
+//! `common`).
 //!
 //! The stable public surface that the code above may depend on is, per
 //! platform:
@@ -22,8 +23,7 @@
 //! - linux: additionally `keycode` (the canonical `HidUsage` and evdev-keycode
 //!   tables) and `VIRTUAL_KEYBOARD_NAME`
 //! - macos: additionally `start_virtkbd` (the root virtkbdd daemon entry
-//!   point) and `console_user_home` (the console user's home directory,
-//!   consumed by `common::config_path` when running as root)
+//!   point) and `console_user_home` (the console user's home directory)
 //! - windows: (no platform-specific production export beyond the common set)
 //!
 //! Test-harness-only exports are gated behind the crate's `test-util` feature
@@ -85,9 +85,12 @@
 //! (`LinuxBackend`/`MacOsBackend`/`WindowsBackend`,
 //! `LinuxEmitter`/`MacOsEmitter`/`WindowsEmitter`) and their
 //! `list_keyboards`/`start_mapping` exports above drive the contract.
-//! Like [`endpoint`] both facets are `pub(crate)`: only the daemon and
-//! the CLI drive them, so they are not part of the public platform
-//! surface documented above.
+//! Like [`endpoint`] all three facets are `pub(crate)`: only the daemon,
+//! the CLI, and `common` drive them, so they are not part of the public
+//! platform surface documented above.  Besides the facets, the module
+//! re-exports one further `pub(crate)` item: [`console_user_config_dir`],
+//! the console user's configuration base directory (real on macOS only,
+//! `None` elsewhere), consumed by [`crate::common::config_path`].
 //!
 //! The `test-util` dev-dependency crate and `cli` may depend only on this
 //! surface, never on the `pub(crate)` internals of the platform
@@ -158,6 +161,8 @@ pub(crate) use linux::LinuxBackend;
 #[cfg(target_os = "linux")]
 pub use linux::config_dir;
 #[cfg(target_os = "linux")]
+pub(crate) use linux::console_user_config_dir;
+#[cfg(target_os = "linux")]
 pub use linux::keycode;
 #[cfg(target_os = "linux")]
 pub use linux::{
@@ -165,6 +170,8 @@ pub use linux::{
 };
 #[cfg(target_os = "macos")]
 pub(crate) use macos::MacOsBackend;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::console_user_config_dir;
 // Test-harness-only surface (see the module docs): only reachable with
 // the `test-util` feature on.
 #[cfg(all(target_os = "macos", feature = "test-util"))]
@@ -179,6 +186,8 @@ pub use macos::{
 pub use windows::Key;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::WindowsBackend;
+#[cfg(target_os = "windows")]
+pub(crate) use windows::console_user_config_dir;
 #[cfg(target_os = "windows")]
 pub use windows::{
     config_dir, keycode_to_hid_usage, list_keyboards, start_mapping,

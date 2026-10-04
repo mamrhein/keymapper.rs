@@ -90,7 +90,7 @@ use windows::{
 };
 
 use super::{ConnectionHandler, Endpoint, IoStream};
-use crate::common::paths::local_app_data_dir;
+use crate::platform::windows::local_app_data_dir;
 
 /// The control pipe name prefix. The daemon appends a per-run random nonce
 /// (see [`pipe_name`]), so the full name is unpredictable: a same-user
@@ -108,9 +108,8 @@ const NONCE_BYTES: usize = 16;
 
 /// The file that publishes the daemon's live pipe name to the CLI.
 ///
-/// The containing `%LOCALAPPDATA%\keymapperd` directory is owned by
-/// [`common::paths`] and shared with the log directory (see
-/// [`local_app_data_dir`]).
+/// The containing `%LOCALAPPDATA%\keymapperd` directory is resolved by
+/// [`local_app_data_dir`] and shared with the log directory.
 const PUBLISH_FILE_NAME: &str = "control.pipe";
 
 /// The pipe's input and output buffer sizes (bytes).

@@ -104,28 +104,12 @@ fn ordered_search_dirs(
 /// Return the configuration directory of the user currently at the console,
 /// or `None` when it does not apply.
 ///
-/// Only the root daemon needs this indirection: it runs with a home
-/// directory of `/var/root`, while the configuration lives in the
-/// logged-in user's home.  Unprivileged processes (the CLI, development
-/// builds) already resolve their own home directory correctly.
-#[cfg(target_os = "macos")]
+/// The console-user indirection (root daemon reading the logged-in user's
+/// configuration) is a macOS mechanism and lives in
+/// [`crate::platform::console_user_config_dir`]; on other platforms that
+/// export is `None`, so this is `None` too.
 fn console_user_config_dir() -> Option<PathBuf> {
-    if unsafe { libc::geteuid() } != 0 {
-        return None;
-    }
-
-    let home = crate::platform::console_user_home()?;
-    Some(
-        home.join("Library")
-            .join("Application Support")
-            .join(APP_DIR_NAME),
-    )
-}
-
-/// Non-macOS platforms have no console-user indirection.
-#[cfg(not(target_os = "macos"))]
-fn console_user_config_dir() -> Option<PathBuf> {
-    None
+    crate::platform::console_user_config_dir().map(|d| d.join(APP_DIR_NAME))
 }
 
 /// Print the directories searched and the expected file name so that the

@@ -22,3 +22,8 @@ pub fn config_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".config")))
 }
+
+/// Linux has no console-user indirection.
+pub(crate) fn console_user_config_dir() -> Option<PathBuf> {
+    None
+}

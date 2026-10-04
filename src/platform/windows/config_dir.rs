@@ -18,3 +18,15 @@ use std::path::PathBuf;
 pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir()
 }
+
+/// Windows has no console-user indirection.
+pub(crate) fn console_user_config_dir() -> Option<PathBuf> {
+    None
+}
+
+/// The daemon's directory under the per-user local app-data root
+/// (`%LOCALAPPDATA%\keymapperd`), shared by the log directory and the
+/// control-pipe publish file so both sides resolve the same location.
+pub(crate) fn local_app_data_dir() -> Option<PathBuf> {
+    Some(dirs::data_local_dir()?.join(crate::common::paths::APP_DIR_NAME))
+}

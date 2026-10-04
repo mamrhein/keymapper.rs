@@ -17,5 +17,6 @@ mod mapping;
 pub(crate) use backend::LinuxBackend;
 pub use backend::{list_keyboards, start_mapping};
 pub use config_dir::config_dir;
+pub(crate) use config_dir::console_user_config_dir;
 pub use keycode::keycode_to_hid_usage;
 pub use mapping::VIRTUAL_KEYBOARD_NAME;

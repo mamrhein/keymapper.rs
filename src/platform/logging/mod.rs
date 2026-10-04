@@ -24,8 +24,8 @@
 //! latency stripper, and level gate.
 //!
 //! The destination splits on Linux-vs-not rather than three ways, because the
-//! two file platforms resolve an identical destination (the per-OS differences
-//! already live in [`crate::common::paths`]):
+//! two file platforms resolve an identical sink (the per-OS destination-path
+//! differences live in the shared `file` child):
 //!
 //! - **Linux:** stderr, with an empty timestamp (systemd's journal timestamps
 //!   each line, so the daemon must not duplicate it).
