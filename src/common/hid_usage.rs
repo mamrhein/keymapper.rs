@@ -186,6 +186,13 @@ define_hid_usage! {
     PageDown = 0x07004E, "PageDown", ["PgDn"], evdev: 109;
     Home = 0x07004A, "Home", evdev: 102;
     End = 0x07004D, "End", evdev: 107;
+    // --- Keyboard page — Control/function cluster ---
+    PrintScreen = 0x070046, "PrintScreen", ["PrtSc", "SysRq"], evdev: 99;
+    ScrollLock = 0x070047, "ScrollLock", ["Scroll"], evdev: 70;
+    Pause = 0x070048, "Pause", ["Break"], evdev: 119;
+    Insert = 0x070049, "Insert", ["Ins"], evdev: 110;
+    // --- Keyboard page — Application menu ---
+    Menu = 0x070065, "Menu", ["ContextMenu", "Application"], evdev: 358;
     // --- Keyboard page — Function keys ---
     F1 = 0x07003A, "F1", evdev: 59;
     F2 = 0x07003B, "F2", evdev: 60;
@@ -254,22 +261,21 @@ define_hid_usage! {
     NumpadDivide = 0x070054, "NumpadDivide", ["KP_Divide"], evdev: 98;
     NumpadEnter = 0x070058, "NumpadEnter", ["KP_Enter"], evdev: 96;
     NumpadMinus = 0x070056, "NumpadMinus", ["KP_Subtract"], evdev: 74;
-    NumpadClear = 0x070065, "NumpadClear", evdev: 140;
+    NumLock = 0x070053, "NumLock", ["NumpadClear"], evdev: 69;
     NumpadEqual = 0x070067, "NumpadEqual", evdev: 117;
     // --- Keyboard page — Punctuation / symbols ---
     Minus = 0x07002D, "Minus", evdev: 12;
     Equal = 0x07002E, "Equal", evdev: 13;
     BracketLeft = 0x07002F, "BracketLeft", evdev: 26;
-    BracketRight = 0x070031, "BracketRight", evdev: 27;
-    Backslash = 0x070030, "Backslash", evdev: 43;
+    BracketRight = 0x070030, "BracketRight", evdev: 27;
+    Backslash = 0x070031, "Backslash", evdev: 43;
     Semicolon = 0x070033, "Semicolon", evdev: 39;
     Quote = 0x070034, "Quote", evdev: 40;
     Grave = 0x070035, "Grave", evdev: 41;
     Comma = 0x070036, "Comma", evdev: 51;
-    Slash = 0x070037, "Slash", evdev: 53;
-    Period = 0x070038, "Period", evdev: 52;
+    Slash = 0x070038, "Slash", evdev: 53;
+    Period = 0x070037, "Period", evdev: 52;
     IsoExtra = 0x070064, "IsoExtra", ["NonUSBackslash"], evdev: 86;
-    IsoHash = 0x070032, "IsoHash", ["Hash"], evdev: 99;
     // --- Consumer page (0x0C) — Media controls ---
     PlayPause = 0x0C00CD, "PlayPause", ["Play"], evdev: 164;
     VolumeUp = 0x0C00E9, "VolumeUp", ["VolUp"], evdev: 115;
@@ -425,6 +431,12 @@ mod tests {
         assert_eq!(parse("PageDown"), HidUsage::PageDown);
         assert_eq!(parse("Home"), HidUsage::Home);
         assert_eq!(parse("End"), HidUsage::End);
+        // Control/function cluster
+        assert_eq!(parse("PrintScreen"), HidUsage::PrintScreen);
+        assert_eq!(parse("ScrollLock"), HidUsage::ScrollLock);
+        assert_eq!(parse("Pause"), HidUsage::Pause);
+        assert_eq!(parse("Insert"), HidUsage::Insert);
+        assert_eq!(parse("Menu"), HidUsage::Menu);
         // Function keys
         assert_eq!(parse("F1"), HidUsage::F1);
         assert_eq!(parse("F12"), HidUsage::F12);
@@ -440,7 +452,7 @@ mod tests {
         assert_eq!(parse("Numpad0"), HidUsage::Numpad0);
         assert_eq!(parse("NumpadDecimal"), HidUsage::NumpadDecimal);
         assert_eq!(parse("NumpadMultiply"), HidUsage::NumpadMultiply);
-        assert_eq!(parse("NumpadClear"), HidUsage::NumpadClear);
+        assert_eq!(parse("NumLock"), HidUsage::NumLock);
         assert_eq!(parse("NumpadEqual"), HidUsage::NumpadEqual);
         // Punctuation / symbols
         assert_eq!(parse("Minus"), HidUsage::Minus);
@@ -455,7 +467,6 @@ mod tests {
         assert_eq!(parse("Slash"), HidUsage::Slash);
         assert_eq!(parse("Grave"), HidUsage::Grave);
         assert_eq!(parse("IsoExtra"), HidUsage::IsoExtra);
-        assert_eq!(parse("IsoHash"), HidUsage::IsoHash);
         // Consumer page
         assert_eq!(parse("PlayPause"), HidUsage::PlayPause);
         assert_eq!(parse("VolumeUp"), HidUsage::VolumeUp);
@@ -501,9 +512,18 @@ mod tests {
         assert_eq!(parse("KP_Divide"), HidUsage::NumpadDivide);
         assert_eq!(parse("KP_Enter"), HidUsage::NumpadEnter);
         assert_eq!(parse("KP_Subtract"), HidUsage::NumpadMinus);
+        // Control/function aliases
+        assert_eq!(parse("PrtSc"), HidUsage::PrintScreen);
+        assert_eq!(parse("SysRq"), HidUsage::PrintScreen);
+        assert_eq!(parse("Scroll"), HidUsage::ScrollLock);
+        assert_eq!(parse("Break"), HidUsage::Pause);
+        assert_eq!(parse("Ins"), HidUsage::Insert);
+        assert_eq!(parse("ContextMenu"), HidUsage::Menu);
+        assert_eq!(parse("Application"), HidUsage::Menu);
+        // Numpad legacy alias
+        assert_eq!(parse("NumpadClear"), HidUsage::NumLock);
         // Punctuation aliases
         assert_eq!(parse("NonUSBackslash"), HidUsage::IsoExtra);
-        assert_eq!(parse("Hash"), HidUsage::IsoHash);
         // Consumer page aliases
         assert_eq!(parse("Play"), HidUsage::PlayPause);
         assert_eq!(parse("VolUp"), HidUsage::VolumeUp);
@@ -601,7 +621,7 @@ mod tests {
 
     #[test]
     fn all_count() {
-        assert_eq!(HidUsage::all().len(), 111);
+        assert_eq!(HidUsage::all().len(), 115);
     }
 
     #[test]
@@ -791,6 +811,18 @@ mod tests {
         assert_eq!(HidUsage::LeftShift.id(), 0xE1);
         assert_eq!(HidUsage::LeftAlt.id(), 0xE2);
         assert_eq!(HidUsage::LeftCommand.id(), 0xE3);
+        assert_eq!(HidUsage::BracketRight.id(), 0x30);
+        assert_eq!(HidUsage::Backslash.id(), 0x31);
+        assert_eq!(HidUsage::Period.id(), 0x37);
+        assert_eq!(HidUsage::Slash.id(), 0x38);
+
+        // Control/function cluster
+        assert_eq!(HidUsage::PrintScreen.id(), 0x46);
+        assert_eq!(HidUsage::ScrollLock.id(), 0x47);
+        assert_eq!(HidUsage::Pause.id(), 0x48);
+        assert_eq!(HidUsage::Insert.id(), 0x49);
+        assert_eq!(HidUsage::NumLock.id(), 0x53);
+        assert_eq!(HidUsage::Menu.id(), 0x65);
 
         // Consumer page
         assert_eq!(HidUsage::PlayPause.id(), 0xCD);

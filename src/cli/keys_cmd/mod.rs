@@ -79,7 +79,11 @@ fn list_category(usage: HidUsage) -> ListCategory {
         | HidUsage::Return
         | HidUsage::Backspace
         | HidUsage::Delete
-        | HidUsage::Escape => ListCategory::Editor,
+        | HidUsage::Escape
+        | HidUsage::PrintScreen
+        | HidUsage::ScrollLock
+        | HidUsage::Pause
+        | HidUsage::Menu => ListCategory::Editor,
 
         // Navigation.
         HidUsage::UpArrow
@@ -89,7 +93,8 @@ fn list_category(usage: HidUsage) -> ListCategory {
         | HidUsage::PageUp
         | HidUsage::PageDown
         | HidUsage::Home
-        | HidUsage::End => ListCategory::Navigation,
+        | HidUsage::End
+        | HidUsage::Insert => ListCategory::Navigation,
 
         // Function keys, letters, number row, and numpad digits are
         // printed as abbreviated ranges.
@@ -159,7 +164,7 @@ fn list_category(usage: HidUsage) -> ListCategory {
         | HidUsage::NumpadDivide
         | HidUsage::NumpadEnter
         | HidUsage::NumpadMinus
-        | HidUsage::NumpadClear
+        | HidUsage::NumLock
         | HidUsage::NumpadEqual => ListCategory::Numpad,
 
         // Symbols, including the ISO extra keys.
@@ -174,8 +179,7 @@ fn list_category(usage: HidUsage) -> ListCategory {
         | HidUsage::Comma
         | HidUsage::Slash
         | HidUsage::Period
-        | HidUsage::IsoExtra
-        | HidUsage::IsoHash => ListCategory::Symbols,
+        | HidUsage::IsoExtra => ListCategory::Symbols,
 
         // Consumer page media controls.
         HidUsage::PlayPause

@@ -252,12 +252,13 @@ Triggers use compact `+`-separated strings. The last token is the base key; all 
 All key names are case-sensitive and use TitleCase. Use `keymapper keys list` to print all recognized names.
 
 - **Modifiers:** `LeftControl`, `RightControl`, `LeftCtrl`, `RightCtrl`, `LeftShift`, `RightShift`, `LeftAlt`, `RightAlt`, `LeftOption`, `RightOption`, `LeftCommand`, `RightCommand`, `LeftCmd`, `RightCmd`, `CapsLock`
-- **Navigation:** `Tab`, `Space`, `Return`, `Backspace`, `Delete`, `Escape`, `UpArrow`, `DownArrow`, `LeftArrow`, `RightArrow`, `PageUp`, `PageDown`, `Home`, `End`
+- **Navigation:** `Tab`, `Space`, `Return`, `Backspace`, `Delete`, `Escape`, `UpArrow`, `DownArrow`, `LeftArrow`, `RightArrow`, `PageUp`, `PageDown`, `Home`, `End`, `Insert`
+- **Control/function:** `PrintScreen`, `ScrollLock`, `Pause`, `Menu`
 - **Function keys:** `F1` through `F12`
 - **Letters:** `A` through `Z`
 - **Numbers:** `0` through `9` (also `Number0` through `Number9`)
-- **Numpad:** `Numpad0`–`Numpad9`, `NumpadDecimal`, `NumpadMultiply`, `NumpadPlus`, `NumpadClear`, `NumpadDivide`, `NumpadEnter`, `NumpadMinus`, `NumpadEqual`
-- **Symbols:** `Minus`, `Equal`, `BracketLeft`, `BracketRight`, `Backslash`, `Semicolon`, `Quote`, `Comma`, `Period`, `Slash`, `Grave`, `IsoExtra`, `IsoHash`
+- **Numpad:** `Numpad0`–`Numpad9`, `NumpadDecimal`, `NumpadMultiply`, `NumpadPlus`, `NumLock`, `NumpadDivide`, `NumpadEnter`, `NumpadMinus`, `NumpadEqual`
+- **Symbols:** `Minus`, `Equal`, `BracketLeft`, `BracketRight`, `Backslash`, `Semicolon`, `Quote`, `Comma`, `Period`, `Slash`, `Grave`, `IsoExtra`
 - **Media:** `PlayPause`, `VolumeUp`, `VolumeDown`, `Mute`, `NextTrack`, `PreviousTrack`, `Stop`
 - **Display:** `BrightnessUp`, `BrightnessDown`
 
@@ -280,8 +281,13 @@ The following aliases resolve to the same platform key:
 | `Up`, `Down`, `Left`, `Right`                                   | arrow keys                             |
 | `PgUp`, `PgDn`                                                  | PageUp, PageDown                       |
 | `KP_Multiply`, `KP_Add`, `KP_Divide`, `KP_Enter`, `KP_Subtract` | numpad operator keys                   |
+| `NumpadClear`                                                   | NumLock                                |
 | `NonUSBackslash`                                                | IsoExtra key (international keyboards) |
-| `Hash`                                                          | IsoHash key (international keyboards)  |
+| `PrtSc`, `SysRq`                                                | PrintScreen                            |
+| `Scroll`                                                        | ScrollLock                             |
+| `Break`                                                         | Pause                                  |
+| `Ins`                                                           | Insert                                 |
+| `ContextMenu`, `Application`                                    | Menu                                   |
 | `Play`                                                          | PlayPause                              |
 | `VolUp`, `VolDown`, `VolMute`                                   | VolumeUp, VolumeDown, Mute             |
 | `ScanNext`, `ScanPrev`, `MediaStop`                             | NextTrack, PreviousTrack, Stop         |

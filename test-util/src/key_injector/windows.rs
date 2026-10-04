@@ -23,7 +23,7 @@ use super::{InjectorError, KeyInjector};
 /// Whether the platform injector can inject the given usage.
 ///
 /// `Key::from_hid_usage` returns `None` for consumer page usages and for
-/// `NumpadClear` / `NumpadEqual`, which have no native variant.
+/// `NumpadEqual` / `ScrollLock`, which have no native variant.
 pub fn is_injectable(usage: HidUsage) -> bool {
     Key::from_hid_usage(usage).is_some()
 }
@@ -184,8 +184,10 @@ mod tests {
         // injectable.
         assert!(!is_injectable(HidUsage::PlayPause));
         assert!(!is_injectable(HidUsage::VolumeUp));
-        assert!(!is_injectable(HidUsage::NumpadClear));
         assert!(!is_injectable(HidUsage::NumpadEqual));
+        assert!(!is_injectable(HidUsage::ScrollLock));
+        // NumLock gained a native variant (VK_NUMLOCK).
+        assert!(is_injectable(HidUsage::NumLock));
 
         // A regular key is injectable.
         assert!(is_injectable(HidUsage::A));

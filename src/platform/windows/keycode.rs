@@ -27,6 +27,7 @@ pub enum Key {
     RightAlt = 0xA5,     // VK_RMENU
     LeftCommand = 0x5B,  // VK_LWIN
     RightCommand = 0x5C, // VK_RWIN
+    Menu = 0x5D,         // VK_APPS
     CapsLock = 0x14,     // VK_CAPITAL
     Tab = 0x09,          // VK_TAB
     Space = 0x20,        // VK_SPACE
@@ -42,6 +43,11 @@ pub enum Key {
     PageDown = 0x22,     // VK_NEXT
     Home = 0x23,         // VK_HOME
     End = 0x24,          // VK_END
+    // --- Control/function cluster (Scroll Lock is absent: VK_SCROLL
+    // shares the value 0x45 with VK_E and cannot be a variant here) ---
+    PrintScreen = 0x2C, // VK_SNAPSHOT
+    Insert = 0x2D,      // VK_INSERT
+    Pause = 0x13,       // VK_PAUSE
     F1 = 0x70,
     F2 = 0x71,
     F3 = 0x72,
@@ -107,6 +113,7 @@ pub enum Key {
     NumpadDivide = 0x6F,   // VK_DIVIDE
     NumpadEnter = 0x92,    // VK_RETURN (extended)
     NumpadMinus = 0x6D,    // VK_SUBTRACT
+    NumLock = 0x90,        // VK_NUMLOCK
     // --- Punctuation / symbols ---
     Minus = 0xBD,        // VK_OEM_MINUS
     Equal = 0xBB,        // VK_OEM_PLUS
@@ -120,7 +127,6 @@ pub enum Key {
     Slash = 0xBF,        // VK_OEM_2
     Grave = 0xC0,        // VK_OEM_3
     IsoExtra = 0xE2,     // VK_OEM_102 (between Shift and Z on ISO)
-    IsoHash = 0xDF,      // VK_OEM_8
     // --- Consumer page (media keys) ---
     PlayPause = 0xB3,     // VK_MEDIA_PLAY_PAUSE
     VolumeUp = 0xAF,      // VK_VOLUME_UP
@@ -141,7 +147,8 @@ impl Key {
     /// Only Keyboard/Keypad page usages with a native `Key` variant are
     /// resolvable; Consumer Page usages (media keys) return `None` — use
     /// [`hid_to_vk`] for those — as do usages without a `Key` variant
-    /// (`NumpadClear`, `NumpadEqual`).
+    /// (`NumpadEqual`, and `ScrollLock`, whose VK_SCROLL is indistinguishable
+    /// from VK_E).
     pub fn from_hid_usage(usage: HidUsage) -> Option<Self> {
         if usage.page() != PAGE_KEYBOARD {
             return None;
@@ -155,6 +162,7 @@ impl Key {
             HidUsage::RightAlt => Self::RightAlt,
             HidUsage::LeftCommand => Self::LeftCommand,
             HidUsage::RightCommand => Self::RightCommand,
+            HidUsage::Menu => Self::Menu,
             HidUsage::CapsLock => Self::CapsLock,
             HidUsage::Tab => Self::Tab,
             HidUsage::Space => Self::Space,
@@ -170,6 +178,9 @@ impl Key {
             HidUsage::PageDown => Self::PageDown,
             HidUsage::Home => Self::Home,
             HidUsage::End => Self::End,
+            HidUsage::PrintScreen => Self::PrintScreen,
+            HidUsage::Insert => Self::Insert,
+            HidUsage::Pause => Self::Pause,
             HidUsage::F1 => Self::F1,
             HidUsage::F2 => Self::F2,
             HidUsage::F3 => Self::F3,
@@ -234,6 +245,7 @@ impl Key {
             HidUsage::NumpadDivide => Self::NumpadDivide,
             HidUsage::NumpadEnter => Self::NumpadEnter,
             HidUsage::NumpadMinus => Self::NumpadMinus,
+            HidUsage::NumLock => Self::NumLock,
             HidUsage::Minus => Self::Minus,
             HidUsage::Equal => Self::Equal,
             HidUsage::BracketLeft => Self::BracketLeft,
@@ -246,8 +258,7 @@ impl Key {
             HidUsage::Slash => Self::Slash,
             HidUsage::Grave => Self::Grave,
             HidUsage::IsoExtra => Self::IsoExtra,
-            HidUsage::IsoHash => Self::IsoHash,
-            // NumpadClear, NumpadEqual, and all consumer page usages have
+            // NumpadEqual, ScrollLock, and all consumer page usages have
             // no native variant.
             _ => return None,
         })
@@ -268,6 +279,7 @@ impl Key {
             Self::RightAlt => HidUsage::RightAlt,
             Self::LeftCommand => HidUsage::LeftCommand,
             Self::RightCommand => HidUsage::RightCommand,
+            Self::Menu => HidUsage::Menu,
             Self::CapsLock => HidUsage::CapsLock,
             Self::Tab => HidUsage::Tab,
             Self::Space => HidUsage::Space,
@@ -283,6 +295,9 @@ impl Key {
             Self::PageDown => HidUsage::PageDown,
             Self::Home => HidUsage::Home,
             Self::End => HidUsage::End,
+            Self::PrintScreen => HidUsage::PrintScreen,
+            Self::Insert => HidUsage::Insert,
+            Self::Pause => HidUsage::Pause,
             Self::F1 => HidUsage::F1,
             Self::F2 => HidUsage::F2,
             Self::F3 => HidUsage::F3,
@@ -347,6 +362,7 @@ impl Key {
             Self::NumpadDivide => HidUsage::NumpadDivide,
             Self::NumpadEnter => HidUsage::NumpadEnter,
             Self::NumpadMinus => HidUsage::NumpadMinus,
+            Self::NumLock => HidUsage::NumLock,
             Self::Minus => HidUsage::Minus,
             Self::Equal => HidUsage::Equal,
             Self::BracketLeft => HidUsage::BracketLeft,
@@ -359,7 +375,6 @@ impl Key {
             Self::Slash => HidUsage::Slash,
             Self::Grave => HidUsage::Grave,
             Self::IsoExtra => HidUsage::IsoExtra,
-            Self::IsoHash => HidUsage::IsoHash,
             Self::PlayPause => HidUsage::PlayPause,
             Self::VolumeUp => HidUsage::VolumeUp,
             Self::VolumeDown => HidUsage::VolumeDown,
@@ -410,6 +425,7 @@ impl Key {
             Self::RightAlt => "RightAlt",
             Self::LeftCommand => "LeftCommand",
             Self::RightCommand => "RightCommand",
+            Self::Menu => "Menu",
             Self::CapsLock => "CapsLock",
             Self::Tab => "Tab",
             Self::Space => "Space",
@@ -425,6 +441,9 @@ impl Key {
             Self::PageDown => "PageDown",
             Self::Home => "Home",
             Self::End => "End",
+            Self::PrintScreen => "PrintScreen",
+            Self::Insert => "Insert",
+            Self::Pause => "Pause",
             Self::F1 => "F1",
             Self::F2 => "F2",
             Self::F3 => "F3",
@@ -490,6 +509,7 @@ impl Key {
             Self::NumpadDivide => "NumpadDivide",
             Self::NumpadEnter => "NumpadEnter",
             Self::NumpadMinus => "NumpadMinus",
+            Self::NumLock => "NumLock",
             // Punctuation / symbols
             Self::Minus => "Minus",
             Self::Equal => "Equal",
@@ -503,7 +523,6 @@ impl Key {
             Self::Slash => "Slash",
             Self::Grave => "Grave",
             Self::IsoExtra => "IsoExtra",
-            Self::IsoHash => "IsoHash",
             Self::PlayPause => "PlayPause",
             Self::VolumeUp => "VolumeUp",
             Self::VolumeDown => "VolumeDown",
@@ -515,7 +534,7 @@ impl Key {
     }
 
     /// All defined key variants.
-    pub const ALL: [Self; 107] = [
+    pub const ALL: [Self; 111] = [
         // Modifiers
         Self::LeftControl,
         Self::RightControl,
@@ -525,6 +544,7 @@ impl Key {
         Self::RightAlt,
         Self::LeftCommand,
         Self::RightCommand,
+        Self::Menu,
         Self::CapsLock,
         // Editor / misc
         Self::Tab,
@@ -542,6 +562,10 @@ impl Key {
         Self::PageDown,
         Self::Home,
         Self::End,
+        // Control/function cluster
+        Self::PrintScreen,
+        Self::Insert,
+        Self::Pause,
         // Function keys
         Self::F1,
         Self::F2,
@@ -610,6 +634,7 @@ impl Key {
         Self::NumpadDivide,
         Self::NumpadEnter,
         Self::NumpadMinus,
+        Self::NumLock,
         // Punctuation / symbols
         Self::Minus,
         Self::Equal,
@@ -623,7 +648,6 @@ impl Key {
         Self::Slash,
         Self::Grave,
         Self::IsoExtra,
-        Self::IsoHash,
         // Consumer page (media keys)
         Self::PlayPause,
         Self::VolumeUp,
@@ -647,6 +671,7 @@ impl Key {
             0xA5 => Some(Self::RightAlt),
             0x5B => Some(Self::LeftCommand),
             0x5C => Some(Self::RightCommand),
+            0x5D => Some(Self::Menu),
             0x14 => Some(Self::CapsLock),
             0x09 => Some(Self::Tab),
             0x20 => Some(Self::Space),
@@ -662,6 +687,9 @@ impl Key {
             0x22 => Some(Self::PageDown),
             0x23 => Some(Self::Home),
             0x24 => Some(Self::End),
+            0x2C => Some(Self::PrintScreen),
+            0x2D => Some(Self::Insert),
+            0x13 => Some(Self::Pause),
             0x70 => Some(Self::F1),
             0x71 => Some(Self::F2),
             0x72 => Some(Self::F3),
@@ -726,6 +754,7 @@ impl Key {
             0x6F => Some(Self::NumpadDivide),
             0x92 => Some(Self::NumpadEnter),
             0x6D => Some(Self::NumpadMinus),
+            0x90 => Some(Self::NumLock),
             0xBD => Some(Self::Minus),
             0xBB => Some(Self::Equal),
             0xDB => Some(Self::BracketLeft),
@@ -738,7 +767,6 @@ impl Key {
             0xBF => Some(Self::Slash),
             0xC0 => Some(Self::Grave),
             0xE2 => Some(Self::IsoExtra),
-            0xDF => Some(Self::IsoHash),
             0xB3 => Some(Self::PlayPause),
             0xAF => Some(Self::VolumeUp),
             0xAE => Some(Self::VolumeDown),
@@ -766,6 +794,7 @@ impl Key {
             "RightCommand" | "RightCmd" | "RightWin" => {
                 Some(Self::RightCommand)
             }
+            "Menu" | "ContextMenu" | "Application" => Some(Self::Menu),
             "CapsLock" | "Caps" => Some(Self::CapsLock),
             "Tab" => Some(Self::Tab),
             "Space" => Some(Self::Space),
@@ -781,6 +810,9 @@ impl Key {
             "PageDown" | "PgDn" => Some(Self::PageDown),
             "Home" => Some(Self::Home),
             "End" => Some(Self::End),
+            "PrintScreen" | "PrtSc" | "SysRq" => Some(Self::PrintScreen),
+            "Insert" | "Ins" => Some(Self::Insert),
+            "Pause" | "Break" => Some(Self::Pause),
             "F1" => Some(Self::F1),
             "F2" => Some(Self::F2),
             "F3" => Some(Self::F3),
@@ -846,6 +878,7 @@ impl Key {
             "NumpadDivide" => Some(Self::NumpadDivide),
             "NumpadEnter" => Some(Self::NumpadEnter),
             "NumpadMinus" => Some(Self::NumpadMinus),
+            "NumLock" | "NumpadClear" => Some(Self::NumLock),
             // Punctuation / symbols
             "Minus" => Some(Self::Minus),
             "Equal" => Some(Self::Equal),
@@ -859,7 +892,6 @@ impl Key {
             "Slash" => Some(Self::Slash),
             "Grave" => Some(Self::Grave),
             "IsoExtra" => Some(Self::IsoExtra),
-            "IsoHash" => Some(Self::IsoHash),
             // Consumer page (media keys)
             "PlayPause" | "Play" => Some(Self::PlayPause),
             "VolumeUp" | "VolUp" => Some(Self::VolumeUp),
@@ -938,9 +970,20 @@ mod tests {
 
     #[test]
     fn from_hid_usage_returns_none_for_unsupported_keyboard_keys() {
-        // NumpadClear and NumpadEqual have no VK_* equivalent.
-        assert_eq!(Key::from_hid_usage(HidUsage::NumpadClear), None);
+        // NumpadEqual and ScrollLock have no usable VK_* equivalent;
+        // VK_SCROLL shares the value 0x45 with VK_E, so it cannot be a
+        // distinct variant.
         assert_eq!(Key::from_hid_usage(HidUsage::NumpadEqual), None);
+        assert_eq!(Key::from_hid_usage(HidUsage::ScrollLock), None);
+    }
+
+    #[test]
+    fn from_native_recognises_control_cluster_keys() {
+        assert_eq!(Key::from_native(0x2C), Some(Key::PrintScreen));
+        assert_eq!(Key::from_native(0x2D), Some(Key::Insert));
+        assert_eq!(Key::from_native(0x13), Some(Key::Pause));
+        assert_eq!(Key::from_native(0x90), Some(Key::NumLock));
+        assert_eq!(Key::from_native(0x5D), Some(Key::Menu));
     }
 
     #[test]

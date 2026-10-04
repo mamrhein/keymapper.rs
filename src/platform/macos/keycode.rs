@@ -88,6 +88,10 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         125 => 0x51, // DownArrow
         123 => 0x50, // LeftArrow
         124 => 0x4F, // RightArrow
+        // Control/function cluster
+        107 => 0x47, // ScrollLock
+        110 => 0x65, // Menu
+        114 => 0x49, // Insert
         // Function keys
         122 => 0x3A, // F1
         120 => 0x3B, // F2
@@ -105,18 +109,18 @@ pub fn cg_keycode_to_hid_usage(code: u16) -> Option<u16> {
         27 => 0x2D, // Minus
         24 => 0x2E, // Equal
         33 => 0x2F, // BracketLeft
-        30 => 0x31, // BracketRight
-        42 => 0x30, // Backslash
+        30 => 0x30, // BracketRight
+        42 => 0x31, // Backslash
         39 => 0x34, // Quote
         50 => 0x35, // Grave
         43 => 0x36, // Comma
-        47 => 0x38, // Period
-        44 => 0x37, // Slash
+        47 => 0x37, // Period
+        44 => 0x38, // Slash
         // Numpad
         65 => 0x63, // NumpadDecimal
         67 => 0x55, // NumpadMultiply
         69 => 0x57, // NumpadPlus
-        71 => 0x65, // NumpadClear
+        71 => 0x53, // NumLock (keypad Clear)
         75 => 0x54, // NumpadDivide
         76 => 0x58, // NumpadEnter
         78 => 0x56, // NumpadMinus
@@ -192,8 +196,8 @@ mod tests {
             35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
             51, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 65, 67, 69, 71, 75,
             76, 78, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 96, 97, 98,
-            99, 100, 101, 103, 109, 111, 115, 116, 117, 118, 119, 120, 121,
-            122, 123, 124, 125, 126,
+            99, 100, 101, 103, 107, 109, 110, 111, 114, 115, 116, 117, 118,
+            119, 120, 121, 122, 123, 124, 125, 126,
         ];
         for &code in mapped {
             let id = cg_keycode_to_hid_usage(code)
@@ -211,7 +215,7 @@ mod tests {
         assert_eq!(cg_keycode_to_hid_usage(65), Some(0x63)); // NumpadDecimal
         assert_eq!(cg_keycode_to_hid_usage(67), Some(0x55)); // NumpadMultiply
         assert_eq!(cg_keycode_to_hid_usage(69), Some(0x57)); // NumpadPlus
-        assert_eq!(cg_keycode_to_hid_usage(71), Some(0x65)); // NumpadClear
+        assert_eq!(cg_keycode_to_hid_usage(71), Some(0x53)); // NumLock
         assert_eq!(cg_keycode_to_hid_usage(75), Some(0x54)); // NumpadDivide
         assert_eq!(cg_keycode_to_hid_usage(76), Some(0x58)); // NumpadEnter
         assert_eq!(cg_keycode_to_hid_usage(78), Some(0x56)); // NumpadMinus
@@ -241,17 +245,24 @@ mod tests {
     }
 
     #[test]
+    fn maps_control_function_keys() {
+        assert_eq!(cg_keycode_to_hid_usage(107), Some(0x47)); // ScrollLock
+        assert_eq!(cg_keycode_to_hid_usage(110), Some(0x65)); // Menu
+        assert_eq!(cg_keycode_to_hid_usage(114), Some(0x49)); // Insert
+    }
+
+    #[test]
     fn maps_punctuation_keys() {
         assert_eq!(cg_keycode_to_hid_usage(27), Some(0x2D)); // Minus
         assert_eq!(cg_keycode_to_hid_usage(24), Some(0x2E)); // Equal
         assert_eq!(cg_keycode_to_hid_usage(33), Some(0x2F)); // BracketLeft
-        assert_eq!(cg_keycode_to_hid_usage(30), Some(0x31)); // BracketRight
-        assert_eq!(cg_keycode_to_hid_usage(42), Some(0x30)); // Backslash
+        assert_eq!(cg_keycode_to_hid_usage(30), Some(0x30)); // BracketRight
+        assert_eq!(cg_keycode_to_hid_usage(42), Some(0x31)); // Backslash
         assert_eq!(cg_keycode_to_hid_usage(39), Some(0x34)); // Quote
         assert_eq!(cg_keycode_to_hid_usage(50), Some(0x35)); // Grave
         assert_eq!(cg_keycode_to_hid_usage(43), Some(0x36)); // Comma
-        assert_eq!(cg_keycode_to_hid_usage(47), Some(0x38)); // Period
-        assert_eq!(cg_keycode_to_hid_usage(44), Some(0x37)); // Slash
+        assert_eq!(cg_keycode_to_hid_usage(47), Some(0x37)); // Period
+        assert_eq!(cg_keycode_to_hid_usage(44), Some(0x38)); // Slash
     }
 
     #[test]
