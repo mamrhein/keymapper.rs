@@ -1,6 +1,30 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.4.0  Key names and mappings
+           - Fixed misassigned key IDs: BracketRight/Backslash and Period/Slash.
+           - New control keys: Insert, PrintScreen, ScrollLock, Pause, and Menu,
+             with aliases Ins, PrtSc/SysRq, Scroll, Break, and ContextMenu/
+             Application.
+           - NumpadClear renamed to NumLock with the correct usage ID (0x53);
+             NumpadClear still works as an alias.
+           - IsoHash removed (its evdev code 99 collided with PrintScreen).
+             Note: any config using IsoHash will no longer resolve.
+          Behavior
+           - Config warnings on hot-reload: a bad edit that hot-reloads is now
+             logged at warn level instead of being applied in silence.
+             Loading still proceeds on diagnostics.
+           - Keyboard enumeration no longer errors when empty.
+             The macOS "System Keyboard" placeholder fallback was removed.
+             keymapperd logs empty or failed enumerations at error level.
+           - Windows device-filter fallback: when a key press can't be matched
+             to a raw input event, keyboard filters are now skipped, so
+             device-filtered rules fire (as they would for any keyboard) rather
+             than not firing at all.
+          Security (Windows):
+           - Named-pipe DACL actually applied: the control pipe's ACL is now
+             correctly restricting the pipe to the current user.
+
    0.3.3  Fixed winget script and manifest files
 
    0.3.2  Fixed Windows installer script.
