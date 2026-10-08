@@ -137,8 +137,14 @@ pub fn create(dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    // Create parent directory if needed.
+    // Security check: validate existing ancestor directories before
+    // create_dir_all, which follows symlinks for intermediate components.
+    // Non-existent directories are allowed (they will be created); only
+    // existing untrusted ancestors (world-writable without sticky bit,
+    // non-directory components) are rejected (SEC-19).
     if let Some(parent) = path.parent() {
+        crate::platform::config_access::verify_parent_chain_for_create(parent)
+            .map_err(|e| format!("unsafe config directory: {e}"))?;
         fs_err::create_dir_all(parent)?;
     }
 

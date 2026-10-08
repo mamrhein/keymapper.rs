@@ -163,6 +163,53 @@ fn verify_parent_chain(path: &Path) -> Result<(), ConfigReadError> {
     Ok(())
 }
 
+/// Like [`verify_parent_chain`] but allows non-existent directories.
+///
+/// Used by `config_cmd::create` before `create_dir_all`: the existing
+/// ancestors must be trusted (no world-writable-without-sticky-bit, no
+/// non-directory component), but directories that do not yet exist are
+/// skipped — they will be created by `create_dir_all` with the process
+/// umask and are trusted by construction.
+pub(crate) fn verify_parent_chain_for_create(
+    path: &Path,
+) -> Result<(), ConfigReadError> {
+    for dir in path.ancestors().skip(1) {
+        // The remainder of a relative path is empty; stop there.
+        if dir.as_os_str().is_empty() {
+            break;
+        }
+        let dir_mode = match std::fs::metadata(dir) {
+            Ok(meta) => {
+                if !meta.is_dir() {
+                    return Err(ConfigReadError::UntrustedParentDir {
+                        path: dir.display().to_string(),
+                        reason: "not a directory",
+                    });
+                }
+                meta.mode() as libc::mode_t
+            }
+            Err(ref err) if err.kind() == std::io::ErrorKind::NotFound => {
+                // Does not exist yet; create_dir_all will make it.  Skip
+                // this and any deeper ancestors.
+                continue;
+            }
+            Err(_) => {
+                return Err(ConfigReadError::UntrustedParentDir {
+                    path: dir.display().to_string(),
+                    reason: "cannot be inspected",
+                });
+            }
+        };
+        if (dir_mode & libc::S_IWOTH) != 0 && (dir_mode & libc::S_ISVTX) == 0 {
+            return Err(ConfigReadError::UntrustedParentDir {
+                path: dir.display().to_string(),
+                reason: "world-writable without sticky bit",
+            });
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -385,6 +432,45 @@ mod tests {
         assert!(
             matches!(err, ConfigReadError::Io(_)),
             "expected a preserved I/O error, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn create_chain_allows_nonexistent_dirs() {
+        let dir =
+            std::env::temp_dir().join("keymapperd_cfgacc_create_chain_ok");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir(&dir).expect("failed to create base dir");
+        // A path under the base that does not exist yet — the pre-check
+        // must allow it because create_dir_all will make it.
+        let path = dir.join("new_subdir").join("config.yaml");
+
+        verify_parent_chain_for_create(&path).expect(
+            "existing private ancestor chain must pass the create pre-check",
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn create_chain_rejects_world_writable_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join("keymapperd_cfgacc_create_chain_ww");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir(&dir).expect("failed to create base dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+            .expect("failed to chmod");
+        let path = dir.join("config.yaml");
+
+        let err = verify_parent_chain_for_create(&path).unwrap_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
+            .expect("failed to restore mode");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(
+            matches!(err, ConfigReadError::UntrustedParentDir { .. }),
+            "expected UntrustedParentDir, got {err:?}",
         );
     }
 }

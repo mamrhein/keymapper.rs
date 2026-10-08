@@ -55,6 +55,9 @@ pub(crate) use unix::open_config_file;
 /// hardening (Unix: O_NOFOLLOW | O_EXCL, mode 0600).
 #[cfg(unix)]
 pub(crate) use unix::open_temp_file_for_write;
+/// Verify existing ancestor directories before `create_dir_all` (Unix).
+#[cfg(unix)]
+pub(crate) use unix::verify_parent_chain_for_create;
 /// Validate the metadata of the already-open config file.
 #[cfg(windows)]
 pub(crate) use windows::check_file_trust;
@@ -65,3 +68,7 @@ pub(crate) use windows::open_config_file;
 /// hardening (Windows: create_new).
 #[cfg(windows)]
 pub(crate) use windows::open_temp_file_for_write;
+/// No-op on Windows: no POSIX mode bits or symlink-following concerns
+/// for `create_dir_all`.
+#[cfg(windows)]
+pub(crate) use windows::verify_parent_chain_for_create;

@@ -61,3 +61,11 @@ pub(crate) fn open_temp_file_for_write(
         .open(path)
         .map_err(ConfigWriteError::Io)
 }
+
+/// No-op: Windows has no POSIX mode bits or symlink-following concerns
+/// for `create_dir_all`.
+pub(crate) fn verify_parent_chain_for_create(
+    _path: &Path,
+) -> Result<(), ConfigReadError> {
+    Ok(())
+}
