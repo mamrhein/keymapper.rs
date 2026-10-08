@@ -11,17 +11,19 @@
 //!
 //! The CGEventTap callback hands each mapped-output batch to [`IpcClient`] via
 //! a bounded channel and never blocks.  A dedicated writer thread owns the
-//! socket: it connects to virtkbdd (retrying on failure), writes frames in
-//! order, and maintains the reachability flag that the decision core consults.
-//! When virtkbdd is unreachable every key passes through natively (mappings
-//! simply inactive), so a dead emitter never breaks typing.
+//! socket: it connects to virtkbdd (retrying on failure), verifies the
+//! server's uid is root via `getpeereid(2)` for mutual authentication, writes
+//! frames in order, and maintains the reachability flag that the decision
+//! core consults.  When virtkbdd is unreachable every key passes through
+//! natively (mappings simply inactive), so a dead emitter never breaks
+//! typing.
 //!
 //! Ordering is preserved end to end by the single stream, virtkbdd's single
 //! reader, and `KarabinerClient`'s internal mpsc.
 
 use std::{
     io::Write,
-    os::unix::net::UnixStream,
+    os::unix::{io::AsRawFd, net::UnixStream},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -39,6 +41,24 @@ use crate::keymap_core::mapping_cache::NativeKey;
 /// Path of the virtkbdd IPC socket.
 const SOCKET_PATH: &str = "/var/run/virtkbdd/keymapperd.sock";
 
+/// The macOS `struct xid` exchanged with `getpeereid(2)`.
+///
+/// macOS 27 changed the prototype from `(int, struct xid *)` to
+/// `(int, uid_t *, gid_t *)`. Passing the first and third fields of this
+/// struct as the two out-pointers is correct under both ABIs: the classic
+/// form writes all three fields through the first pointer, while the new
+/// form writes the euid and the gid to offsets 0 and 8. Only offset 0 is
+/// read back, so the call stays within the struct on every release.
+///
+/// (Same layout trick as the virtkbdd IPC server's `peer_uid` and the
+/// control socket's `peer_uid_macos`.)
+#[repr(C)]
+struct Xid {
+    xi_uid: libc::uid_t,
+    xi_euid: libc::uid_t,
+    xi_gid: libc::gid_t,
+}
+
 /// Bounded channel capacity, in batches.  The tap callback never blocks: when
 /// the channel is full a batch is dropped and counted.
 const CHANNEL_CAPACITY: usize = 512;
@@ -52,6 +72,37 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(15_000);
 /// Poll interval for draining the channel while connected.  Kept short so
 /// batches are written promptly instead of waiting for the next batch.
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Verify that the connected virtkbdd server is running as root.
+///
+/// virtkbdd always runs as root, so the peer uid must be 0. This provides
+/// mutual authentication: the server verifies the client's uid via
+/// `getpeereid`, and the client verifies the server's uid here. If the socket
+/// path is compromised (e.g., an attacker places a socket at the same path),
+/// the uid check fails and the connection is dropped.
+fn verify_server_uid(stream: &UnixStream) -> Result<(), String> {
+    let mut xid = Xid {
+        xi_uid: 0,
+        xi_euid: 0,
+        xi_gid: 0,
+    };
+    let status = unsafe {
+        libc::getpeereid(stream.as_raw_fd(), &mut xid.xi_uid, &mut xid.xi_gid)
+    };
+    if status != 0 {
+        return Err(format!(
+            "getpeereid: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if xid.xi_uid != 0 {
+        return Err(format!(
+            "server uid is {}, expected root (0)",
+            xid.xi_uid
+        ));
+    }
+    Ok(())
+}
 
 /// The keymapperd-side IPC client.
 ///
@@ -124,16 +175,29 @@ fn writer_loop(
 
         match UnixStream::connect(SOCKET_PATH) {
             Ok(stream) => {
-                // The socket is live and can accept output; mark the emitter
-                // reachable before the first batch is written.
-                reachable.store(true, Ordering::Release);
-                info!("Connection to virtkbdd established");
-                if let Err(e) = write_loop(stream, &rx, &shutdown) {
+                // Verify the server's uid is root (virtkbdd always runs as
+                // root) before sending any keystrokes. This closes the
+                // client-side half of mutual authentication: if the socket
+                // path is compromised, the uid check fails and the
+                // connection is dropped (Finding 5).
+                if let Err(e) = verify_server_uid(&stream) {
                     warn!(
-                        "Connection to virtkbdd lost ({e}); reconnecting in \
+                        "Connection to virtkbdd rejected ({e}); retrying in
                          {} ms",
                         RECONNECT_INTERVAL.as_millis()
                     );
+                } else {
+                    // The socket is live and trusted; mark the emitter
+                    // reachable before the first batch is written.
+                    reachable.store(true, Ordering::Release);
+                    info!("Connection to virtkbdd established");
+                    if let Err(e) = write_loop(stream, &rx, &shutdown) {
+                        warn!(
+                            "Connection to virtkbdd lost ({e}); reconnecting
+                             in {} ms",
+                            RECONNECT_INTERVAL.as_millis()
+                        );
+                    }
                 }
             }
             Err(e) => {
