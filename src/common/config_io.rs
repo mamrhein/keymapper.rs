@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-//! Hardened reading of the configuration file.
+//! Hardened reading and writing of the configuration file.
 //!
 //! The daemon's initial load at startup, its hot-reload path, and the CLI
 //! `config list/check/add` subcommands all read the same file under
@@ -23,13 +23,24 @@
 //! resolved, so trust attaches to the directory that is actually
 //! traversed, never to the link or name used to reach it.
 //!
+//! The same path is hardened for writes: [`write_config_atomic`] writes the
+//! content to a temp file created with `O_NOFOLLOW | O_EXCL` and mode
+//! `0600` (Unix), `fsync`s it, then `rename(2)`s it over the target — an
+//! atomic swap that can never leave a partially-written config behind.
+//! The temp file is removed on any failure, so the original config is
+//! always left untouched.  The target path itself is rejected if it is a
+//! symlink, closing the write-back TOCTOU race (SEC-1).
+//!
 //! This module owns the shared sequence and the platform-neutral checks;
 //! the OS-specific enforcement (on Unix the `O_NOFOLLOW` open, the
 //! parent-directory-chain inspection, and the ownership and mode checks;
 //! elsewhere a plain open with no mode checks) lives in
 //! [`crate::platform::config_access`].
 
-use std::{io::Read, path::Path};
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 use log::info;
 use thiserror::Error;
@@ -83,6 +94,21 @@ pub enum ConfigReadError {
     /// The config file could not be opened or read for a reason other
     /// than absence (e.g. a permission or symlink-chain failure).  The
     /// distinct I/O error kind is preserved for diagnostics.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+/// Error returned when the config file cannot be written safely.
+#[derive(Debug, Error)]
+pub enum ConfigWriteError {
+    /// The config path is a symlink; the write is refused to prevent
+    /// following a symlink planted between inspection and write (SEC-1).
+    #[error("config file is a symlink")]
+    Symlink,
+
+    /// The config file could not be created, written, or renamed for a
+    /// reason other than a symlink (e.g. permission denied, disk full).
+    /// The distinct I/O error kind is preserved for diagnostics.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -156,9 +182,100 @@ pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
     Ok(content)
 }
 
+/// Write *content* to *path* atomically and with hardening.
+///
+/// The write is performed via a temp file that is created with `O_NOFOLLOW`
+/// and `O_EXCL` (Unix) and mode `0600`, so it can never clobber an existing
+/// file and is never world-readable.  After the content is written and
+/// `fsync`'d, the temp file is `rename(2)`'d over *path* — an atomic swap on
+/// every supported platform that can never leave a partially-written config
+/// behind.  If any step fails the temp file is removed, so the original
+/// config is always left untouched.
+///
+/// The target *path* itself is rejected if it is a symlink, closing the
+/// write-back TOCTOU race: a symlink planted between a read and this write
+/// cannot be followed.
+///
+/// `create` and `add` use this helper so the write path cannot drift from
+/// the read path's hardening.
+pub fn write_config_atomic(
+    path: &Path,
+    content: &str,
+) -> Result<(), ConfigWriteError> {
+    // Security check: reject a symlink in the target position.  A missing
+    // target is fine (we are creating it); only an existing symlink is
+    // refused.  This mirrors the read path's symlink-metadata refusal and
+    // closes the write-back TOCTOU window (SEC-1).
+    if let Ok(sym_meta) = std::fs::symlink_metadata(path)
+        && sym_meta.file_type().is_symlink()
+    {
+        return Err(ConfigWriteError::Symlink);
+    }
+
+    // The temp file lives in the same directory as the target so that
+    // `rename(2)` is a same-filesystem operation (cross-device rename fails).
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_path = parent.join(temp_file_name(path));
+
+    // Create the temp file with platform-specific hardening (Unix:
+    // O_NOFOLLOW | O_EXCL, mode 0600).  On any failure the temp file is
+    // removed and the original config is untouched.
+    let mut file = config_access::open_temp_file_for_write(&temp_path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temp_path);
+    })?;
+
+    // Write the content and fsync before renaming, so the rename is the
+    // last step and the new file is durable when it becomes visible.
+    let write_result: Result<(), std::io::Error> = (|| {
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    // The file handle must be closed before rename: Windows rejects
+    // renaming an open file, and Unix is happiest with a closed fd too.
+    drop(file);
+    if let Err(err) = write_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(ConfigWriteError::Io(err));
+    }
+
+    // Atomically replace the target.  `rename(2)` does not follow symlinks
+    // for the destination, so even if the target became a symlink between
+    // the check above and this call, the symlink itself is replaced rather
+    // than followed.
+    if let Err(err) = std::fs::rename(&temp_path, path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(ConfigWriteError::Io(err));
+    }
+
+    info!("Wrote config to {}", path.display());
+    Ok(())
+}
+
+/// Generate a unique temp-file name for *path*'s sibling temp file.
+///
+/// The name is hidden (leading dot), includes the target's file name for
+/// debuggability, and is suffixed with the PID and a nanosecond timestamp so
+/// collisions across parallel writes are practically impossible.  The
+/// `O_EXCL` flag in [`crate::platform::config_access`] is the real
+/// uniqueness guarantee: even if the name collides, the open fails rather
+/// than clobbers.
+fn temp_file_name(path: &Path) -> String {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let base = path
+        .file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config".to_string());
+    format!(".{base}.{pid:x}.{nanos:x}.tmp")
+}
+
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------</arg_value></tool_call> File path: keymapper.rs/src/common/config_io.rs</arg_value></tool_call> File path: keymapper.rs/src/common/config_io.rs</arg_value></tool_call><tool_call>edit_file<arg_key>path</arg_key><arg_value>keymapper.rs/src/common/config_io.rs</arg_value><arg_key>edits</arg_key><arg_value>[{
 
 #[cfg(test)]
 mod tests {
@@ -176,12 +293,71 @@ mod tests {
     }
 
     #[test]
-    fn reads_valid_file() {
-        let path = write_temp("valid", "groups: []");
-        let content = read_config_content(&path).expect("should read");
+    fn writes_content_atomically() {
+        let path = write_temp("atomic", "groups: []");
+        write_config_atomic(&path, "groups: []").expect("atomic write");
+        let read = read_config_content(&path).expect("should read back");
         std::fs::remove_file(&path).ok();
 
-        assert_eq!(content, "groups: []");
+        assert_eq!(read, "groups: []");
+    }
+
+    #[test]
+    fn atomic_write_creates_new_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("keymapperd_config_io_create.yaml");
+        std::fs::remove_file(&path).ok();
+
+        write_config_atomic(&path, "groups: []").expect("atomic create");
+        let read = read_config_content(&path).expect("should read back");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(read, "groups: []");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_rejects_symlink() {
+        let target = write_temp("symlink_target", "groups: []");
+        let link = target.with_file_name(format!(
+            "{}.link", target.file_name().unwrap().to_string_lossy()
+        ));
+        std::os::unix::fs::symlink(&target, &link).expect("failed to create symlink");
+
+        let err = write_config_atomic(&link, "groups: []").unwrap_err();
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_file(&target).ok();
+
+        assert!(matches!(err, ConfigWriteError::Symlink));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_creates_file_with_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = write_temp("perms", "old content");
+        write_config_atomic(&path, "new content").expect("atomic write");
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode() as libc::mode_t;
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(
+            mode & 0o777, 0o600,
+            "config file must be 0600, got {:o}", mode & 0o777
+        );
+    }
+
+    #[test]
+    fn atomic_write_overwrites_existing() {
+        let path = write_temp("overwrite", "old content");
+        write_config_atomic(&path, "new content").expect("atomic overwrite");
+        let read = read_config_content(&path).expect("should read back");
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!(read, "new content");
     }
 
     #[test]

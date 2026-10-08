@@ -17,11 +17,11 @@
 //! own ACL enforcement is the real one.
 
 use std::{
-    fs::{File, Metadata},
+    fs::{File, Metadata, OpenOptions},
     path::Path,
 };
 
-use crate::common::config_io::ConfigReadError;
+use crate::common::config_io::{ConfigReadError, ConfigWriteError};
 
 /// Open *path* for reading.  Without an `O_NOFOLLOW` equivalent, only the
 /// error mapping matters here: a missing file becomes
@@ -43,4 +43,21 @@ pub(crate) fn check_file_trust(
     _metadata: &Metadata,
 ) -> Result<(), ConfigReadError> {
     Ok(())
+}
+
+/// Create a temp file for an atomic config write.
+///
+/// Windows has no `O_NOFOLLOW` or POSIX mode bits; `create_new(true)`
+/// maps to `CREATE_NEW`, which fails if the file already exists, giving
+/// the same exclusive-creation guarantee as `O_EXCL`.  The symlink
+/// refusal is handled at the `config_io` layer via `symlink_metadata`,
+/// mirroring the read path.
+pub(crate) fn open_temp_file_for_write(
+    path: &Path,
+) -> Result<File, ConfigWriteError> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(ConfigWriteError::Io)
 }

@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use crate::common::{
     config::{AppConfig, KeyEvent, RuleGroup},
-    config_io::read_config_content,
+    config_io::{read_config_content, write_config_atomic},
     config_path::{
         default_config_path, find_config_path, find_config_path_strict,
     },
@@ -142,10 +142,11 @@ pub fn create(dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
         fs_err::create_dir_all(parent)?;
     }
 
-    // Write an empty config.
+    // Write an empty config atomically with mode 0600.
     let config = AppConfig::default();
     let yaml = serde_saphyr::to_string(&config)?;
-    fs_err::write(&path, &yaml)?;
+    write_config_atomic(&path, &yaml)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
 
     println!("Created empty configuration at {}", path.display());
 
@@ -215,9 +216,10 @@ pub fn add(
         global_keyboards,
     );
 
-    // Write back.
+    // Write back atomically with mode 0600.
     let yaml = serde_saphyr::to_string(&config)?;
-    fs_err::write(&path, &yaml)?;
+    write_config_atomic(&path, &yaml)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
 
     println!(
         "Added '{}' -> '{}' to group '{}'",

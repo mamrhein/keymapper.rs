@@ -51,9 +51,17 @@ pub(crate) use unix::check_file_trust;
 /// Open the config file with the platform's hardening guarantees.
 #[cfg(unix)]
 pub(crate) use unix::open_config_file;
+/// Create a temp file for atomic config writes with the platform's
+/// hardening (Unix: O_NOFOLLOW | O_EXCL, mode 0600).
+#[cfg(unix)]
+pub(crate) use unix::open_temp_file_for_write;
 /// Validate the metadata of the already-open config file.
 #[cfg(windows)]
 pub(crate) use windows::check_file_trust;
 /// Open the config file with the platform's hardening guarantees.
 #[cfg(windows)]
 pub(crate) use windows::open_config_file;
+/// Create a temp file for atomic config writes with the platform's
+/// hardening (Windows: create_new).
+#[cfg(windows)]
+pub(crate) use windows::open_temp_file_for_write;

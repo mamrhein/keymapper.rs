@@ -21,7 +21,7 @@ use std::{
     path::Path,
 };
 
-use crate::common::config_io::ConfigReadError;
+use crate::common::config_io::{ConfigReadError, ConfigWriteError};
 
 /// Open *path* for reading, refusing to follow a symlink.
 ///
@@ -46,6 +46,32 @@ pub(crate) fn open_config_file(path: &Path) -> Result<File, ConfigReadError> {
                 ConfigReadError::NotFound
             } else {
                 ConfigReadError::Io(err)
+            }
+        })
+}
+
+/// Create a temp file for an atomic config write.
+///
+/// The file is created with `O_CREAT | O_EXCL` (exclusive — fails if the
+/// name already exists, so an existing file or symlink can never be
+/// clobbered), `O_NOFOLLOW` (rejects a symlink at the temp path with
+/// `ELOOP`), and mode `0600` (never world-readable, independent of umask).
+/// The caller writes, `fsync`s, and `rename(2)`s the file over the
+/// target; on failure the caller removes the temp file.
+pub(crate) fn open_temp_file_for_write(
+    path: &Path,
+) -> Result<File, ConfigWriteError> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o600)
+        .open(path)
+        .map_err(|err| {
+            if err.raw_os_error() == Some(libc::ELOOP) {
+                ConfigWriteError::Symlink
+            } else {
+                ConfigWriteError::Io(err)
             }
         })
 }
