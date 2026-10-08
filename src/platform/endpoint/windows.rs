@@ -731,7 +731,7 @@ fn serve(handle: PipeHandle, handler: ConnectionHandler) {
         // before disconnecting, because `DisconnectNamedPipe` resets the
         // instance and discards any unread data — disconnecting first would
         // make the client's read fail with `ERROR_PIPE_NOT_CONNECTED`.
-        if handler(&mut conn) {
+        if handler(&mut conn, 0) {
             wait_for_client_close(&mut conn);
         }
         unsafe {
@@ -964,7 +964,7 @@ mod tests {
     /// A serve-loop handler that echoes one request frame back as the reply.
     /// It keeps the transport tests independent of the daemon protocol while
     /// still exercising a full request/response round trip over the pipe.
-    fn echo(io: &mut dyn IoStream) -> bool {
+    fn echo(io: &mut dyn IoStream, _peer_uid: u32) -> bool {
         let Ok(command) = frame::read_payload(io, MAX) else {
             return false;
         };

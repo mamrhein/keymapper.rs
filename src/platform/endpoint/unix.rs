@@ -197,11 +197,17 @@ fn serve_with_timeout(
         // virtkbdd IPC server: the file mode is the first gate, but kernel
         // credentials are the source of truth, so a permission race (or a
         // mode weakened by an external actor) still cannot admit a foreign
-        // user.
-        if let Err(e) = authorize_peer(&stream, unsafe { libc::getuid() }) {
-            debug!("control-socket rejecting connection: {e}");
-            continue;
-        }
+        // user.  The peer uid is threaded into the handler so the protocol
+        // layer can enforce uid-dependent policy (e.g. refusing root log-
+        // level escalation on a user-run daemon).
+        let peer_uid = match authorize_peer(&stream, unsafe { libc::getuid() })
+        {
+            Ok(uid) => uid,
+            Err(e) => {
+                debug!("control-socket rejecting connection: {e}");
+                continue;
+            }
+        };
         // Bound the I/O before touching the stream so a stalled peer
         // cannot wedge this single-threaded loop; a timeout surfaces as
         // an I/O error and closes the connection.
@@ -214,7 +220,7 @@ fn serve_with_timeout(
         // The handler owns the protocol and its own connection logging; the
         // transport only recycles the stream (a fresh one per connection)
         // afterward.
-        handler(&mut stream);
+        handler(&mut stream, peer_uid);
     }
 }
 
@@ -233,10 +239,10 @@ fn serve_with_timeout(
 fn authorize_peer(
     stream: &UnixStream,
     current_uid: libc::uid_t,
-) -> Result<(), String> {
+) -> Result<u32, String> {
     let peer = peer_uid::peer_uid(stream)?;
     if peer == 0 || peer == current_uid {
-        Ok(())
+        Ok(peer)
     } else {
         Err(format!(
             "peer uid {peer} is neither the daemon uid nor root"
@@ -317,7 +323,7 @@ mod tests {
     /// A serve-loop handler that echoes one request frame back as the reply.
     /// It keeps the transport tests independent of the daemon protocol while
     /// still exercising a full request/response round trip over the socket.
-    fn echo(io: &mut dyn IoStream) -> bool {
+    fn echo(io: &mut dyn IoStream, _peer_uid: u32) -> bool {
         let Ok(command) = frame::read_payload(io, MAX) else {
             return false;
         };

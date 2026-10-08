@@ -166,11 +166,16 @@ pub fn start() {
 
 /// Serve one authorized control connection.
 ///
+/// *peer_uid* is the kernel-reported uid of the connecting peer (Unix) or
+/// `0` on Windows where no uid concept exists. It is used to enforce uid-
+/// dependent policy in [`dispatch`] (e.g. refusing root log-level
+/// escalation on a user-run daemon).
+///
 /// Returns `true` on a completed exchange, so the transport may wait for the
 /// peer to drain the reply before tearing the connection down (see
 /// [`ConnectionHandler`](crate::platform::endpoint::ConnectionHandler)).
-fn serve_connection(io: &mut dyn IoStream) -> bool {
-    match handle_connection(io) {
+fn serve_connection(io: &mut dyn IoStream, peer_uid: u32) -> bool {
+    match handle_connection(io, peer_uid) {
         Ok(()) => true,
         Err(e) => {
             // The peer is a well-behaved CLI; a failure is almost always the
@@ -220,25 +225,35 @@ fn exchange<R: Read + Write>(
 /// the reply frame. A connection carries exactly one command, so the peer
 /// closes after the reply.
 ///
+/// *peer_uid* is forwarded from [`serve_connection`] so [`dispatch`] can
+/// enforce uid-dependent policy.
+///
 /// Generic over the stream and `?Sized` so it runs both on a concrete
 /// transport stream and on the `dyn IoStream` the platform transport hands to
 /// [`serve_connection`].
 fn handle_connection<R: Read + Write + ?Sized>(
     io: &mut R,
+    peer_uid: u32,
 ) -> Result<(), ControlError> {
     let command = read_frame(io)?;
-    let reply = dispatch(&command);
+    let reply = dispatch(&command, peer_uid);
     write_frame(io, &reply.to_string())
 }
 
 /// Parse a command payload and run it, returning the reply to send back.
+///
+/// *peer_uid* is the kernel-reported uid of the connecting peer (Unix) or
+/// `0` on Windows. It gates the root log-level escalation refusal (Finding 4):
+/// when a root peer asks for `debug` or `trace` on a daemon that is not
+/// running as root, the request is refused to prevent keystroke logging
+/// through the verbose emit path.
 ///
 /// `SET-LOG-LEVEL` is implemented; the reserved verbs are recognised so a
 /// future daemon stops reporting them as unknown but has no action yet;
 /// anything else is an unknown command. Trailing arguments are never
 /// silently ignored: a command with unexpected arguments is answered with
 /// an error so CLI misuse stays visible.
-pub(crate) fn dispatch(command: &str) -> Response {
+pub(crate) fn dispatch(command: &str, peer_uid: u32) -> Response {
     let mut parts = command.split_whitespace();
     let Some(verb) = parts.next() else {
         return Response::Error("empty command".to_string());
@@ -264,6 +279,23 @@ pub(crate) fn dispatch(command: &str) -> Response {
                 return Response::Error(format!(
                     "unexpected argument '{extra}'"
                 ));
+            }
+            // Security check: refuse `debug`/`trace` from a root peer when the
+            // daemon is not itself running as root (Finding 4). At verbose
+            // levels the daemon logs every key event with its resolved HID
+            // usage, which is sufficient to reconstruct typed input.
+            #[cfg(unix)]
+            {
+                if level >= LevelFilter::Debug
+                    && peer_uid == 0
+                    && unsafe { libc::getuid() } != 0
+                {
+                    return Response::Error(
+                        "refusing to raise log level to debug/trace from
+                         root on a non-root daemon"
+                            .to_string(),
+                    );
+                }
             }
             logging::set_level(level);
             Response::Ok(level_name(level).to_string())
@@ -452,9 +484,13 @@ mod tests {
         assert_eq!(read_frame(&mut cursor).unwrap_err(), ControlError::Eof);
     }
 
+    // A non-root uid for tests that exercise the protocol without triggering
+    // the root log-level escalation guard.
+    const TEST_UID: u32 = 1;
+
     #[test]
     fn dispatch_sets_a_valid_level() {
-        let response = dispatch("SET-LOG-LEVEL debug");
+        let response = dispatch("SET-LOG-LEVEL debug", TEST_UID);
         assert_eq!(response.to_string(), "OK debug");
         // Restore the default so other tests observe it.
         logging::set_level(LevelFilter::Info);
@@ -463,7 +499,7 @@ mod tests {
     #[test]
     fn dispatch_rejects_a_bad_level() {
         assert_eq!(
-            dispatch("SET-LOG-LEVEL bogus").to_string(),
+            dispatch("SET-LOG-LEVEL bogus", TEST_UID).to_string(),
             "ERROR invalid level; expected error, warn, info, debug, or trace"
         );
     }
@@ -471,21 +507,24 @@ mod tests {
     #[test]
     fn dispatch_rejects_a_missing_level() {
         assert_eq!(
-            dispatch("SET-LOG-LEVEL").to_string(),
+            dispatch("SET-LOG-LEVEL", TEST_UID).to_string(),
             "ERROR invalid level; expected error, warn, info, debug, or trace"
         );
     }
 
     #[test]
     fn dispatch_rejects_an_empty_command() {
-        assert_eq!(dispatch("   ").to_string(), "ERROR empty command");
+        assert_eq!(
+            dispatch("   ", TEST_UID).to_string(),
+            "ERROR empty command"
+        );
     }
 
     #[test]
     fn dispatch_marks_reserved_verbs_unimplemented() {
         for verb in ["STATUS", "VERSION", "RELOAD"] {
             assert_eq!(
-                dispatch(verb).to_string(),
+                dispatch(verb, TEST_UID).to_string(),
                 format!("ERROR {verb} is not implemented yet")
             );
         }
@@ -493,7 +532,10 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_unknown_verbs() {
-        assert_eq!(dispatch("FLY").to_string(), "ERROR unknown command");
+        assert_eq!(
+            dispatch("FLY", TEST_UID).to_string(),
+            "ERROR unknown command"
+        );
     }
 
     #[test]
@@ -501,12 +543,41 @@ mod tests {
         // The guard is about masking CLI misuse, so the reply must not
         // look like the command was accepted.
         assert_eq!(
-            dispatch("SET-LOG-LEVEL debug junk").to_string(),
+            dispatch("SET-LOG-LEVEL debug junk", TEST_UID).to_string(),
             "ERROR unexpected argument 'junk'",
         );
         assert_eq!(
-            dispatch("SET-LOG-LEVEL bogus junk").to_string(),
+            dispatch("SET-LOG-LEVEL bogus junk", TEST_UID).to_string(),
             "ERROR invalid level; expected error, warn, info, debug, or trace",
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dispatch_rejects_root_log_level_escalation() {
+        // Skip when running as root: the guard only fires when the daemon
+        // is NOT root, so as root the request is legitimately allowed.
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+        // A root peer asking for debug/trace on a non-root daemon must be
+        // refused to prevent keystroke logging through the verbose emit
+        // path (Finding 4).
+        let reply = dispatch("SET-LOG-LEVEL debug", 0).to_string();
+        assert!(
+            reply.starts_with("ERROR"),
+            "expected root debug escalation to be refused, got {reply}",
+        );
+
+        let reply = dispatch("SET-LOG-LEVEL trace", 0).to_string();
+        assert!(
+            reply.starts_with("ERROR"),
+            "expected root trace escalation to be refused, got {reply}",
+        );
+
+        // A root peer asking for info must still be allowed.
+        let reply = dispatch("SET-LOG-LEVEL info", 0).to_string();
+        assert_eq!(reply, "OK info");
+        logging::set_level(LevelFilter::Info);
     }
 }

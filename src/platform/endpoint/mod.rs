@@ -46,11 +46,13 @@ impl<T: Read + Write + ?Sized> IoStream for T {}
 /// Handle one authorized control connection end to end.
 ///
 /// The daemon supplies this to [`Endpoint::start`]; the transport calls it
-/// with a stream for a single request/response exchange. It returns `true`
-/// when the exchange completed and the reply is buffered, so the transport may
-/// wait for the peer to drain it before tearing the connection down, and
-/// `false` when it failed and the transport should tear down immediately.
-pub(crate) type ConnectionHandler = fn(&mut dyn IoStream) -> bool;
+/// with a stream for a single request/response exchange. *peer_uid* is the
+/// kernel-reported uid of the connecting peer (Unix) or `0` on Windows where
+/// no uid concept exists. It returns `true` when the exchange completed and
+/// the reply is buffered, so the transport may wait for the peer to drain it
+/// before tearing the connection down, and `false` when it failed and the
+/// transport should tear down immediately.
+pub(crate) type ConnectionHandler = fn(&mut dyn IoStream, u32) -> bool;
 
 /// A local control endpoint: the OS-specific transport the daemon's framed
 /// control protocol runs over.
