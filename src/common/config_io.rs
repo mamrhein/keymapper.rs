@@ -84,6 +84,12 @@ pub enum ConfigReadError {
     #[error("config file is world-writable")]
     WorldWritable,
 
+    /// The config file is world-readable and not owned by root (Unix
+    /// only).  A user-owned world-readable config leaks keyboard mapping
+    /// rules to other local users on a multi-user system.
+    #[error("config file is world-readable; use `chmod 600` to fix")]
+    WorldReadable,
+
     /// A parent directory of the config path could not be trusted (Unix
     /// only): a component that cannot be inspected, is not a directory,
     /// or is world-writable without the sticky bit may let a user who
@@ -289,6 +295,15 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("keymapperd_config_io_{}.yaml", label));
         std::fs::write(&path, content).expect("failed to write temp config");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .expect("failed to set permissions");
+        }
         path
     }
 

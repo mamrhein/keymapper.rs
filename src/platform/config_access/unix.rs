@@ -102,6 +102,14 @@ pub(crate) fn check_file_trust(
     if (mode & libc::S_IWOTH) != 0 {
         return Err(ConfigReadError::WorldWritable);
     }
+
+    // Security check: file is not world-readable unless owned by root.
+    // A root-owned config in a root-owned directory is fine to be
+    // world-readable; a user-owned world-readable config leaks mapping
+    // rules to other local users on a multi-user system.
+    if uid != 0 && (mode & libc::S_IROTH) != 0 {
+        return Err(ConfigReadError::WorldReadable);
+    }
     Ok(())
 }
 
@@ -174,6 +182,12 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join(format!("keymapperd_cfgacc_{}.yaml", label));
         std::fs::write(&path, content).expect("failed to write temp config");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("failed to set permissions");
         path
     }
 
@@ -249,6 +263,26 @@ mod tests {
     }
 
     #[test]
+    fn world_readable_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = write_temp("world_readable", "groups: []");
+        std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("failed to chmod");
+
+        let err = read_config_content(&path).unwrap_err();
+        std::fs::remove_file(&path).ok();
+
+        assert!(
+            matches!(err, ConfigReadError::WorldReadable),
+            "expected WorldReadable, got {err:?}"
+        );
+    }
+
+    #[test]
     fn world_writable_parent_dir_is_rejected() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -296,6 +330,8 @@ mod tests {
 
     #[test]
     fn symlinked_parent_to_private_dir_is_followed() {
+        use std::os::unix::fs::PermissionsExt;
+
         let Some(real) = private_temp_subdir("private_link_target") else {
             return;
         };
@@ -303,8 +339,13 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link)
             .expect("failed to create symlink");
         let path = link.join("config.yaml");
-        std::fs::write(real.join("config.yaml"), "groups: []")
-            .expect("failed to write config");
+        let target = real.join("config.yaml");
+        std::fs::write(&target, "groups: []").expect("failed to write config");
+        std::fs::set_permissions(
+            &target,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("failed to set permissions");
 
         let content = read_config_content(&path).expect(
             "a symlinked parent resolving to a private dir must be \

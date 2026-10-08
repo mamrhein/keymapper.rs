@@ -38,11 +38,23 @@ use tempfile::TempDir;
 /// settle; generous to keep the test robust on loaded CI machines.
 const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Write a config file with mode 0600 (non-world-readable) so it passes the
+/// hardened reader's trust checks.
+fn write_config(path: &Path, content: &str) {
+    fs::write(path, content).expect("failed to write config");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .expect("failed to set permissions");
+    }
+}
+
 /// Simulate an editor's atomic save: write a sibling temp file, then rename
 /// it onto the target path.
 fn atomic_save(path: &Path, content: &str) {
     let tmp = path.with_extension("yaml.tmp");
-    fs::write(&tmp, content).expect("failed to write temp file");
+    write_config(&tmp, content);
     fs::rename(&tmp, path).expect("failed to rename onto config path");
 }
 
@@ -83,7 +95,7 @@ fn hot_reload_survives_repeated_atomic_saves() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let config_path = dir.path().join("config.yaml");
 
-    atomic_save(&config_path, "- mappings:\n    A: CapsLock\n");
+    write_config(&config_path, "- mappings:\n    A: CapsLock\n");
     let state = state_with("- mappings:\n    A: CapsLock\n");
 
     let watcher_state: Arc<RwLock<dyn MutableLookup>> = state.clone();
@@ -111,8 +123,7 @@ fn in_place_write_triggers_reload() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let config_path = dir.path().join("config.yaml");
 
-    fs::write(&config_path, "- mappings:\n    A: CapsLock\n")
-        .expect("failed to write config");
+    write_config(&config_path, "- mappings:\n    A: CapsLock\n");
     let state = state_with("- mappings:\n    A: CapsLock\n");
 
     let watcher_state: Arc<RwLock<dyn MutableLookup>> = state.clone();
@@ -120,8 +131,7 @@ fn in_place_write_triggers_reload() {
         .expect("failed to start config watcher");
 
     // A plain truncate-and-write save (no rename) must also reload.
-    fs::write(&config_path, "- mappings:\n    A: LeftShift\n")
-        .expect("failed to rewrite config");
+    write_config(&config_path, "- mappings:\n    A: LeftShift\n");
     assert!(
         wait_for_output(&state, HidUsage::LeftShift),
         "in-place write did not hot-reload the config"
@@ -133,8 +143,7 @@ fn delete_then_recreate_triggers_reload() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let config_path = dir.path().join("config.yaml");
 
-    fs::write(&config_path, "- mappings:\n    A: CapsLock\n")
-        .expect("failed to write config");
+    write_config(&config_path, "- mappings:\n    A: CapsLock\n");
     let state = state_with("- mappings:\n    A: CapsLock\n");
 
     let watcher_state: Arc<RwLock<dyn MutableLookup>> = state.clone();
@@ -145,8 +154,7 @@ fn delete_then_recreate_triggers_reload() {
     // removal alone must not poison the watch; the recreate reloads.
     fs::remove_file(&config_path).expect("failed to remove config");
     thread::sleep(Duration::from_millis(100));
-    fs::write(&config_path, "- mappings:\n    A: LeftShift\n")
-        .expect("failed to recreate config");
+    write_config(&config_path, "- mappings:\n    A: LeftShift\n");
 
     assert!(
         wait_for_output(&state, HidUsage::LeftShift),
@@ -159,8 +167,7 @@ fn sibling_file_changes_do_not_disturb() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let config_path = dir.path().join("config.yaml");
 
-    fs::write(&config_path, "- mappings:\n    A: CapsLock\n")
-        .expect("failed to write config");
+    write_config(&config_path, "- mappings:\n    A: CapsLock\n");
     let state = state_with("- mappings:\n    A: CapsLock\n");
 
     let watcher_state: Arc<RwLock<dyn MutableLookup>> = state.clone();

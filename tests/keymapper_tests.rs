@@ -44,6 +44,15 @@ fn write_config_dir(label: &str, content: &str) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("failed to create temp dir");
     let config_path = dir.join("config.yaml");
     std::fs::write(&config_path, content).expect("failed to write config");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &config_path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("failed to set permissions");
+    }
     dir
 }
 

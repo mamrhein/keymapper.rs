@@ -18,6 +18,15 @@ fn write_temp_config(label: &str, content: &str) -> String {
     let dir = env::temp_dir();
     let path = dir.join(format!("keymapperd_test_{}.yaml", label));
     std::fs::write(&path, content).expect("failed to write temp config");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            &path,
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .expect("failed to set permissions");
+    }
     path.to_string_lossy().into_owned()
 }
 
@@ -115,6 +124,23 @@ fn compile_from_path_rejects_world_writable() {
     let path = dir.join("keymapperd_test_world_writable.yaml");
     std::fs::write(&path, "groups: []").expect("failed to write temp config");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666))
+        .expect("failed to chmod");
+
+    let result = RuntimeLookupCache::compile_from_path(&path);
+    std::fs::remove_file(&path).ok();
+
+    assert!(result.is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn compile_from_path_rejects_world_readable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = env::temp_dir();
+    let path = dir.join("keymapperd_test_world_readable.yaml");
+    std::fs::write(&path, "groups: []").expect("failed to write temp config");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
         .expect("failed to chmod");
 
     let result = RuntimeLookupCache::compile_from_path(&path);
