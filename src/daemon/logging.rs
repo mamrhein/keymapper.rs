@@ -61,7 +61,7 @@ use std::{
 /// Re-export the `log` level type so callers (the CLI, the control
 /// socket) can name it without adding a direct `log` dependency.
 pub use log::LevelFilter;
-use log::{Level, Log, Metadata, Record, error, info};
+use log::{Level, Log, Metadata, Record, debug, error, info};
 
 use crate::platform::logging::{LogSink, log_sink};
 
@@ -385,7 +385,7 @@ fn panic_hook(info: &PanicHookInfo) {
 
     // A separate record so a long backtrace cannot crowd out the panic
     // message itself.
-    error!(
+    debug!(
         "Panic backtrace:\n{}",
         std::backtrace::Backtrace::force_capture()
     );
