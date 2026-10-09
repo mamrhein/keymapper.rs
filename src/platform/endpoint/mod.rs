@@ -54,6 +54,46 @@ impl<T: Read + Write + ?Sized> IoStream for T {}
 /// transport should tear down immediately.
 pub(crate) type ConnectionHandler = fn(&mut dyn IoStream, u32) -> bool;
 
+/// Sliding-window rate limiter for control-socket connections.
+///
+/// Tracks connection attempts per peer uid over a sliding window and
+/// rejects excess connections to prevent a single uid from flooding the
+/// single-threaded accept loop and denying service to legitimate CLI
+/// invocations (Finding 6). On Windows there is no uid concept, so all
+/// connections share the same bucket.
+pub(crate) struct RateLimiter {
+    window: std::time::Duration,
+    threshold: usize,
+    entries: Vec<(u32, std::time::Instant)>,
+}
+
+impl RateLimiter {
+    /// Create a limiter that allows at most *threshold* connections per
+    /// *window* per uid.
+    pub(crate) fn new(window: std::time::Duration, threshold: usize) -> Self {
+        Self {
+            window,
+            threshold,
+            entries: Vec::with_capacity(64),
+        }
+    }
+
+    /// Returns `true` if the connection is allowed, `false` if the
+    /// per-uid rate limit has been exceeded.  Old entries outside the
+    /// window are pruned on every call, so the `Vec` stays bounded.
+    pub(crate) fn check_and_record(&mut self, uid: u32) -> bool {
+        let now = std::time::Instant::now();
+        let cutoff = now - self.window;
+        self.entries.retain(|(_, ts)| *ts >= cutoff);
+        let count = self.entries.iter().filter(|(u, _)| *u == uid).count();
+        if count >= self.threshold {
+            return false;
+        }
+        self.entries.push((uid, now));
+        true
+    }
+}
+
 /// A local control endpoint: the OS-specific transport the daemon's framed
 /// control protocol runs over.
 ///

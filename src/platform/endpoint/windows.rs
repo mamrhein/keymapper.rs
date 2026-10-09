@@ -89,7 +89,7 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR},
 };
 
-use super::{ConnectionHandler, Endpoint, IoStream};
+use super::{ConnectionHandler, Endpoint, IoStream, RateLimiter};
 use crate::platform::windows::local_app_data_dir;
 
 /// The control pipe name prefix. The daemon appends a per-run random nonce
@@ -149,6 +149,13 @@ const BUSY_RETRY_WAIT_MS: u32 = 100;
 /// CLI, which completes an exchange in milliseconds, while keeping the
 /// wedge time bounded.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sliding-window size for connection rate limiting (Finding 6). Windows
+/// has no uid concept, so all connections share one bucket.
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+
+/// Maximum accepted connections within [`RATE_LIMIT_WINDOW`].
+const RATE_LIMIT_THRESHOLD: usize = 10;
 
 /// The Windows control endpoint.
 pub(crate) struct WindowsEndpoint;
@@ -720,8 +727,20 @@ fn serve(handle: PipeHandle, handler: ConnectionHandler) {
                 return;
             }
         };
+    let mut rate_limiter =
+        RateLimiter::new(RATE_LIMIT_WINDOW, RATE_LIMIT_THRESHOLD);
     loop {
         if !accept_client(handle, event) {
+            continue;
+        }
+        // Rate limit: reject excess connections so a peer cannot flood the
+        // single pipe instance (Finding 6). Windows has no uid, so all
+        // connections share one bucket.
+        if !rate_limiter.check_and_record(0) {
+            debug!("control-pipe rate limit exceeded");
+            unsafe {
+                let _ = DisconnectNamedPipe(handle.0);
+            }
             continue;
         }
         let mut conn = Pipe { handle, event };

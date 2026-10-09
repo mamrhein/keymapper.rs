@@ -40,7 +40,7 @@ use std::{
 
 use log::{debug, info, warn};
 
-use super::{ConnectionHandler, Endpoint, IoStream};
+use super::{ConnectionHandler, Endpoint, IoStream, RateLimiter};
 
 /// Peer-credential lookup, per OS: `SO_PEERCRED` on Linux, `getpeereid(2)`
 /// on macOS. Kept in separate files because the socket option and its struct
@@ -66,6 +66,12 @@ const SOCKET_NAME: &str = "keymapperd.sock";
 /// stuck peer into a closed connection; a well-behaved local CLI
 /// completes the exchange in milliseconds.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sliding-window size for per-uid connection rate limiting (Finding 6).
+const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
+
+/// Maximum accepted connections per *uid* within [`RATE_LIMIT_WINDOW`].
+const RATE_LIMIT_THRESHOLD: usize = 10;
 
 /// The unix control endpoint.
 pub(crate) struct UnixEndpoint;
@@ -189,6 +195,8 @@ fn serve_with_timeout(
     io_timeout: Duration,
     handler: ConnectionHandler,
 ) {
+    let mut rate_limiter =
+        RateLimiter::new(RATE_LIMIT_WINDOW, RATE_LIMIT_THRESHOLD);
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else {
             continue;
@@ -208,6 +216,12 @@ fn serve_with_timeout(
                 continue;
             }
         };
+        // Rate limit: reject excess connections per uid so a single peer
+        // cannot flood the single-threaded accept loop (Finding 6).
+        if !rate_limiter.check_and_record(peer_uid) {
+            debug!("control-socket rate limit exceeded for uid {peer_uid}");
+            continue;
+        }
         // Bound the I/O before touching the stream so a stalled peer
         // cannot wedge this single-threaded loop; a timeout surfaces as
         // an I/O error and closes the connection.
