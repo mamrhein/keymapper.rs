@@ -271,14 +271,15 @@ pub fn start_config_watcher<P: AsRef<Path>>(
                         let _ = reload_tx.send(());
                     }
                     Interest::ConfigRemoved => warn!(
-                        "Watched config file {} was removed; waiting for it \
+                        "Watched config file {:?} was removed; waiting for it
                          to be recreated.",
-                        path_to_watch.display()
+                        path_to_watch
                     ),
                     Interest::WatchDirRemoved => warn!(
-                        "Watched config directory {} was removed or renamed; \
+                        "Watched config directory {:?} was removed or \
+                         renamed;
                          hot-reload is no longer active.",
-                        closure_dir.display()
+                        closure_dir
                     ),
                     Interest::Ignore => {}
                 }

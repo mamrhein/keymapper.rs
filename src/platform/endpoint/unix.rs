@@ -285,7 +285,7 @@ impl Endpoint for UnixEndpoint {
                 return;
             }
         };
-        info!("Control socket listening on {}", path.display());
+        info!("Control socket listening on {:?}", path);
 
         if let Err(e) = std::thread::Builder::new()
             .name("control-socket".into())

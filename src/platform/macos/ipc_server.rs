@@ -97,7 +97,7 @@ pub fn run_server(
     let mut socket_owner: Option<libc::uid_t> = None;
     apply_socket_ownership(&socket_path, &mut socket_owner);
 
-    info!("Service virtkbdd listening on {}", socket_path.display());
+    info!("Service virtkbdd listening on {:?}", socket_path);
 
     loop {
         if shutdown.load(Ordering::Acquire) {

@@ -184,7 +184,7 @@ pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
     // Read content from the already-open handle — no race with metadata.
     let mut content = String::new();
     file.read_to_string(&mut content)?;
-    info!("Read config from {}", path.display());
+    info!("Read config from {:?}", path);
     Ok(content)
 }
 
@@ -254,7 +254,7 @@ pub fn write_config_atomic(
         return Err(ConfigWriteError::Io(err));
     }
 
-    info!("Wrote config to {}", path.display());
+    info!("Wrote config to {:?}", path);
     Ok(())
 }
 
