@@ -333,7 +333,7 @@ struct LevelGateLogger {
 
 impl Log for LevelGateLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        let current = level_from_u8(CURRENT_LEVEL.load(Ordering::Relaxed));
+        let current = level_from_u8(CURRENT_LEVEL.load(Ordering::SeqCst));
         metadata.level() <= current
     }
 
