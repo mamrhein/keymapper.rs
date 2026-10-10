@@ -226,9 +226,10 @@ pub fn write_config_atomic(
     // Create the temp file with platform-specific hardening (Unix:
     // O_NOFOLLOW | O_EXCL, mode 0600).  On any failure the temp file is
     // removed and the original config is untouched.
-    let mut file = config_access::open_temp_file_for_write(&temp_path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp_path);
-    })?;
+    let mut file = config_access::open_temp_file_for_write(&temp_path)
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp_path);
+        })?;
 
     // Write the content and fsync before renaming, so the rename is the
     // last step and the new file is durable when it becomes visible.
@@ -281,7 +282,7 @@ fn temp_file_name(path: &Path) -> String {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------</arg_value></tool_call> File path: keymapper.rs/src/common/config_io.rs</arg_value></tool_call> File path: keymapper.rs/src/common/config_io.rs</arg_value></tool_call><tool_call>edit_file<arg_key>path</arg_key><arg_value>keymapper.rs/src/common/config_io.rs</arg_value><arg_key>edits</arg_key><arg_value>[{
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -335,9 +336,11 @@ mod tests {
     fn atomic_write_rejects_symlink() {
         let target = write_temp("symlink_target", "groups: []");
         let link = target.with_file_name(format!(
-            "{}.link", target.file_name().unwrap().to_string_lossy()
+            "{}.link",
+            target.file_name().unwrap().to_string_lossy()
         ));
-        std::os::unix::fs::symlink(&target, &link).expect("failed to create symlink");
+        std::os::unix::fs::symlink(&target, &link)
+            .expect("failed to create symlink");
 
         let err = write_config_atomic(&link, "groups: []").unwrap_err();
         std::fs::remove_file(&link).ok();
@@ -360,8 +363,10 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         assert_eq!(
-            mode & 0o777, 0o600,
-            "config file must be 0600, got {:o}", mode & 0o777
+            mode & 0o777,
+            0o600,
+            "config file must be 0600, got {:o}",
+            mode & 0o777
         );
     }
 
