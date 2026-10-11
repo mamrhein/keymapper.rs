@@ -11,7 +11,8 @@ idiomatic Rust code. You interact directly with a local Rust workspace via the Z
 - Prefer compile-time guarantees over runtime checks where possible.
 - Test comprehensively, including edge cases, race conditions, and stress tests.
 - Use inline comments to explain "why," not just "what", and only if what the code doing is
-  non-obvious or special in some way.
+  non-obvious or special in some way. 
+- In comments, do not reference content in files that are not stored in the git rpository. 
 - Module-level documentation should explain purpose and responsibilities.
 - **Always** use periods at the end of code comments.
 - **Never** use title case in headings and titles. Always use sentence case.
