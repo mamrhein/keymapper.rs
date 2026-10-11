@@ -1,33 +1,35 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.?.?  Add short, intuitive aliases to commands, subcommands and arguments.
+
    0.4.1  Security (control socket & access control):
            - Peer UID verification: the macOS virtkbdd IPC client now calls
-             getpeereid(2) to confirm the peer is root before sending keystrokes,
-             providing mutual authentication on the IPC channel.
+             getpeereid(2) to confirm the peer is root before sending key-
+             strokes, providing mutual authentication on the IPC channel.
            - Log-level privilege escalation prevention: SET-LOG-LEVEL to
              debug/trace is refused when the peer UID is root and the daemon is
              not running as root.
-           - Per-UID rate limiting: a sliding-window RateLimiter (10 connections/
-             uid/second) is applied in both the Unix and Windows accept loops to
-             prevent flooding of the single-threaded control socket.
+           - Per-UID rate limiting: a sliding-window RateLimiter (10 connec-
+             tions/uid/second) is applied in both the Unix and Windows accept
+             loops to prevent flooding of the single-threaded control socket.
           Security (filesystem & config integrity):
-           - Atomic config writes: config files are now written via a temp-file +
-             rename(2) pattern using O_NOFOLLOW | O_EXCL and mode 0600, preventing
-             symlink attacks, partial-write corruption, and TOCTOU races.
+           - Atomic config writes: config files are now written via a temp-file
+             + rename pattern using O_NOFOLLOW | O_EXCL and mode 0600, preven-
+             ting symlink attacks, partial-write corruption, and TOCTOU races.
            - World-readable config rejection: non-root-owned config files with
-             world-read permissions are now rejected; all config files are created
-             with mode 0600.
-           - Parent-chain verification: verify_parent_chain_for_create pre-checks
-             directory creation paths before create_dir_all to prevent privilege
-             escalation via crafted parent directories.
+             world-read permissions are now rejected; all config files are
+             created with mode 0600.
+           - Parent-chain verification: verify_parent_chain_for_create pre-
+             checks directory creation paths before create_dir_all to prevent
+             privilege escalation via crafted parent directories.
           Security (log injection & information disclosure):
-           - Path interpolation in log statements switched to Debug format ({:?})
-             to prevent log injection via paths containing control characters.
+           - Path interpolation in log statements switched to Debug format to
+             prevent log injection via paths containing control characters.
            - Panic backtrace logging demoted to debug level so stack traces are
              not emitted at info/warn levels.
-           - Memory ordering for log-level reads corrected from Relaxed to SeqCst
-             to ensure visibility across threads.
+           - Memory ordering for log-level reads corrected from Relaxed to
+             SeqCst to ensure visibility across threads.
 
    0.4.0  Key names and mappings
            - Fixed misassigned key IDs: BracketRight/Backslash and Period/Slash.

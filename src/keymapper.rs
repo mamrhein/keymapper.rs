@@ -37,9 +37,11 @@ enum Commands {
     /// Prints the canonical app name — the exact value to use in the `apps`
     /// field of your config.yaml — followed by a human-readable display name
     /// where it differs.
+    #[command(visible_alias = "apps")]
     Appnames,
 
     /// Configuration file management.
+    #[command(visible_alias = "cfg")]
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
@@ -50,6 +52,7 @@ enum Commands {
     /// Shows the name, vendor, model, port type, and device identifier for
     /// each detected keyboard.  The device identifier can be used to
     /// filter key events for per-device mapping rules.
+    #[command(visible_alias = "kbs")]
     Keyboards,
 
     /// Key introspection tools.
@@ -59,6 +62,7 @@ enum Commands {
     },
 
     /// Daemon process management.
+    #[command(visible_alias = "dmn")]
     Daemon {
         #[command(subcommand)]
         command: DaemonCommands,
@@ -68,24 +72,29 @@ enum Commands {
 #[derive(Subcommand)]
 enum DaemonCommands {
     /// Check whether keymapperd is running.
+    #[command(visible_alias = "st")]
     Status,
 
     /// Start keymapperd if it is not already running.
+    #[command(visible_alias = "sr")]
     Start,
 
     /// Stop keymapperd if it is running.
+    #[command(visible_alias = "sp")]
     Stop,
 
     /// Restart keymapperd (stop then start).
+    #[command(visible_alias = "rs")]
     Restart,
 
     /// Change the log level of a running keymapperd without a restart.
     ///
     /// Talks to the daemon over its control socket; the log output itself is
     /// unchanged (journal / Event Viewer / the stderr fallback).
+    #[command(visible_alias = "lg")]
     Log {
         /// The new log level.
-        #[arg(long, value_parser = parse_log_level_arg)]
+        #[arg(long, visible_alias = "lvl", value_parser = parse_log_level_arg)]
         level: LevelFilter,
     },
 }
@@ -103,17 +112,20 @@ enum KeysCommands {
     ///
     /// These are the canonical names grouped by category that can be used
     /// as triggers and outputs in key-mapping rules.
+    #[command(visible_alias = "ls")]
     List,
 
     /// Wait for physical key presses and print each key's name and code.
     ///
     /// Press Control+C to exit.
+    #[command(visible_alias = "pb")]
     Probe,
 }
 
 #[derive(Subcommand)]
 enum ConfigCommands {
     /// Print the configuration file to stdout.
+    #[command(visible_alias = "ls")]
     List {
         /// Path to a config file or directory containing `config.yaml`.
         ///
@@ -123,6 +135,7 @@ enum ConfigCommands {
     },
 
     /// Validate and diagnose the configuration.
+    #[command(visible_alias = "chk")]
     Check {
         /// Path to a config file or directory containing `config.yaml`.
         ///
@@ -133,6 +146,7 @@ enum ConfigCommands {
 
     /// Create an empty configuration file at the given directory or the
     /// default platform-specific location when omitted.
+    #[command(visible_alias = "mk")]
     Create {
         /// Directory where `config.yaml` will be created.
         ///
@@ -163,14 +177,14 @@ enum ConfigCommands {
         /// Multiple specifiers can be passed by repeating the flag.  Within
         /// a single value, key=value pairs are separated by commas.
         /// E.g. `--keyboard "name=Magic Keyboard,vendor=Apple"`
-        #[arg(long)]
+        #[arg(long, visible_alias = "kbd")]
         keyboard: Option<Vec<String>>,
 
         /// Set global keyboard filter(s).  Same syntax as `--keyboard`.
         ///
         /// When present, only events from matching keyboards are processed
         /// at all.
-        #[arg(long)]
+        #[arg(long, visible_alias = "kbd-global")]
         keyboards_global: Option<Vec<String>>,
 
         /// Path to a config file or directory containing `config.yaml`.
