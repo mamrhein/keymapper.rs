@@ -40,13 +40,23 @@ fn gui_domain() -> String {
 }
 
 /// The path to the plist file in the user's LaunchAgents directory.
+///
+/// Resolves the home directory from the password database (`getpwuid_r`)
+/// when running elevated (euid != ruid), so an attacker-influenced `$HOME`
+/// cannot redirect the plist to a different user's LaunchAgents directory.
 fn plist_path() -> String {
-    format!(
-        "{}/Library/LaunchAgents/{}.plist",
-        std::env::var("HOME").unwrap_or_default(),
-        SERVICE_LABEL
-    )
+    let home = crate::platform::current_user_home()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!("{home}/Library/LaunchAgents/{}.plist", SERVICE_LABEL)
 }
+
+/// Absolute paths for every shell-out, so an attacker-influenced `PATH`
+/// cannot substitute a trojan `sudo`/`launchctl`/`pgrep` that runs with the
+/// invoking privileges — up to root via `sudo`.
+const SUDO_PATH: &str = "/usr/bin/sudo";
+const LAUNCHCTL_PATH: &str = "/usr/bin/launchctl";
+const PGREP_PATH: &str = "/usr/bin/pgrep";
 
 /// The path to the virtkbdd plist in the system LaunchDaemons directory.
 fn virtkbdd_plist_path() -> String {
@@ -57,14 +67,15 @@ fn virtkbdd_plist_path() -> String {
 ///
 /// The system domain is only accessible to root, so virtkbdd operations go
 /// through `sudo`. Any sudo password prompt is read from the controlling
-/// terminal, not from our stdio.
+/// terminal, not from our stdio. Absolute paths pin every binary against a
+/// trojaned `PATH` substitution.
 fn launchctl(sudo: bool) -> Command {
     if sudo {
-        let mut cmd = Command::new("sudo");
-        cmd.arg("launchctl");
+        let mut cmd = Command::new(SUDO_PATH);
+        cmd.arg(LAUNCHCTL_PATH);
         cmd
     } else {
-        Command::new("launchctl")
+        Command::new(LAUNCHCTL_PATH)
     }
 }
 
@@ -144,7 +155,7 @@ fn bootout(sudo: bool, domain: &str, label: &str) -> Result<(), String> {
 /// as running. `pgrep` also covers the case where the daemon was started
 /// manually rather than through launchd.
 pub fn is_running() -> bool {
-    Command::new("pgrep")
+    Command::new(PGREP_PATH)
         .args(["-x", DAEMON_NAME])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -183,7 +194,7 @@ pub fn start() -> Result<(), String> {
         .status()
         .ok(); // Ignore — service may not be loaded yet.
 
-    let output = Command::new("launchctl")
+    let output = Command::new(LAUNCHCTL_PATH)
         .args(["bootstrap", &domain, &plist])
         .output()
         .map_err(|e| format!("failed to invoke launchctl: {e}"))?;
@@ -265,10 +276,18 @@ pub fn restart() -> Result<(), String> {
     std::thread::sleep(std::time::Duration::from_millis(200));
     let plist = plist_path();
     let domain = gui_domain();
-    Command::new("launchctl")
+    let output = Command::new(LAUNCHCTL_PATH)
         .args(["bootstrap", &domain, &plist])
         .output()
         .map_err(|e| format!("failed to invoke launchctl: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "launchctl bootstrap failed: {}",
+            stderr.trim().lines().next().unwrap_or("unknown error")
+        ));
+    }
 
     verify_daemon_started()
 }
@@ -282,7 +301,7 @@ pub fn restart() -> Result<(), String> {
 /// or exited. `pgrep` sees the root-owned virtkbdd process even when run as
 /// an unprivileged user, so no `sudo` is needed for this check.
 pub fn virtkbdd_is_running() -> bool {
-    Command::new("pgrep")
+    Command::new(PGREP_PATH)
         .args(["-x", "virtkbdd"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

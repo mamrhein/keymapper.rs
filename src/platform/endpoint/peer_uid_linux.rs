@@ -16,6 +16,10 @@ use std::{
 
 /// Return the uid of the connected peer, or an error if the kernel cannot
 /// report it (the caller then fails closed).
+///
+/// The returned `len` is validated against `size_of::<ucred>()`; a short-but-
+/// successful reply would leave the zero-initialized `cred.uid` reading as uid
+/// 0, which the policy admits — a fail-open toward the privileged uid.
 pub(super) fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
     // `SO_PEERCRED` is filled in by the kernel at connect time and cannot
     // be forged by the peer.
@@ -34,6 +38,16 @@ pub(super) fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
         return Err(format!(
             "getsockopt(SO_PEERCRED): {}",
             io::Error::last_os_error()
+        ));
+    }
+    // On a short-but-successful write the zero-initialized `cred.uid` reads
+    // as uid 0, which the policy *admits* — a fail-open toward the privileged
+    // uid. Validate the length so that cannot happen.
+    if len as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(format!(
+            "getsockopt(SO_PEERCRED): short reply ({} bytes, expected {})",
+            len,
+            std::mem::size_of::<libc::ucred>()
         ));
     }
     Ok(cred.uid)

@@ -30,7 +30,7 @@ pub(crate) use backend::MacOsBackend;
 // [`crate::platform::backend`] contract (see the `backend` submodule).
 pub use backend::{list_keyboards, start_mapping};
 pub use config_dir::config_dir;
-pub(crate) use config_dir::console_user_config_dir;
+pub(crate) use config_dir::{console_user_config_dir, current_user_home};
 #[cfg(feature = "test-util")]
 pub use karabiner_client::{INJECTION_KEYBOARD_IDENTITY, KarabinerClient};
 pub use keycode::keycode_to_hid_usage;

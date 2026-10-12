@@ -78,13 +78,20 @@ pub(crate) struct UnixEndpoint;
 
 /// The control endpoint path.
 ///
-/// `$XDG_RUNTIME_DIR/keymapperd.sock` when the runtime dir is set (the normal
-/// case under a per-user systemd session); otherwise a per-user cache
-/// directory. Both the daemon and the CLI resolve this the same way from the
-/// same environment, so they always agree.
+/// `$XDG_RUNTIME_DIR/keymapperd.sock` when the runtime dir is set and
+/// absolute (the normal case under a per-user systemd session); otherwise a
+/// per-user cache directory. Both the daemon and the CLI resolve this the same
+/// way from the same environment, so they always agree.
+///
+/// A relative or empty `XDG_RUNTIME_DIR` is rejected — it would silently
+/// re-root the socket into the CWD, where an attacker could plant a listening
+/// socket and impersonate the daemon to the CLI.
 fn socket_path() -> PathBuf {
     if let Some(rd) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(rd).join(SOCKET_NAME);
+        let rd = PathBuf::from(rd);
+        if !rd.as_os_str().is_empty() && rd.is_absolute() {
+            return rd.join(SOCKET_NAME);
+        }
     }
     let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
     base.join(APP_NAME).join(SOCKET_NAME)
@@ -572,5 +579,38 @@ mod tests {
             <UnixEndpoint as Endpoint>::connect_error(&refused)
                 .contains("older")
         );
+    }
+
+    /// A relative `XDG_RUNTIME_DIR` is rejected so it cannot re-root the
+    /// socket into the CWD (R3-9).
+    #[test]
+    fn socket_path_rejects_relative_xdg_runtime_dir() {
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", "relative/dir");
+        }
+        let path = socket_path();
+        assert!(path.is_absolute(), "fallback path must be absolute");
+        assert!(!path.as_os_str().is_empty());
+    }
+
+    /// An empty `XDG_RUNTIME_DIR` is rejected (R3-9).
+    #[test]
+    fn socket_path_rejects_empty_xdg_runtime_dir() {
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", "");
+        }
+        let path = socket_path();
+        assert!(path.is_absolute());
+    }
+
+    /// An absolute `XDG_RUNTIME_DIR` is used directly (R3-9 happy path).
+    #[test]
+    fn socket_path_uses_absolute_xdg_runtime_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().to_str().unwrap());
+        }
+        let path = socket_path();
+        assert_eq!(path, dir.path().join(SOCKET_NAME));
     }
 }

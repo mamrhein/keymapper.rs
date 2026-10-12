@@ -117,14 +117,16 @@ fn parse_vendor_from_path(path: &str) -> Option<String> {
 fn parse_vid_pid(path: &str) -> Option<(u16, u16)> {
     let lower = path.to_lowercase();
     let vid_start = lower.find("vid_")? + 4;
-    let vid_str = &lower[vid_start..vid_start + 4];
+    // Use `.get()` so a string ending within 4 bytes of the match does not
+    // panic on slice range bounds.
+    let vid_str = lower.get(vid_start..vid_start + 4)?;
     if vid_str.chars().any(|c| !c.is_ascii_hexdigit()) {
         return None;
     }
     let vid = u16::from_str_radix(vid_str, 16).ok()?;
 
     let pid_start = lower.find("pid_")? + 4;
-    let pid_str = &lower[pid_start..pid_start + 4];
+    let pid_str = lower.get(pid_start..pid_start + 4)?;
     if pid_str.chars().any(|c| !c.is_ascii_hexdigit()) {
         return None;
     }
@@ -348,6 +350,12 @@ fn check_keyboard_via_hid(handle: HANDLE) -> Option<bool> {
         return None;
     }
 
+    // Cap the count before allocating as defense-in-depth: a misbehaving
+    // driver could report an absurdly large count, causing excessive memory
+    // allocation.
+    const MAX_LINK_COLLECTION_NODES: usize = 256;
+    node_count = node_count.min(MAX_LINK_COLLECTION_NODES as u32);
+
     let mut nodes: Vec<HIDP_LINK_COLLECTION_NODE> = (0..node_count)
         .map(|_| HIDP_LINK_COLLECTION_NODE::default())
         .collect();
@@ -363,8 +371,11 @@ fn check_keyboard_via_hid(handle: HANDLE) -> Option<bool> {
         return None;
     }
 
+    // Clamp the slice defensively: a driver that reports more nodes than
+    // the buffer can hold would otherwise cause an out-of-bounds read.
+    let n = (node_count as usize).min(nodes.len());
     // Top-level collections have Parent == 0xFFFF.
-    for node in &nodes[..node_count as usize] {
+    for node in &nodes[..n] {
         if node.Parent == 0xFFFF
             && node.LinkUsagePage == HID_USAGE_PAGE_GENERIC
             && node.LinkUsage == HID_USAGE_KEYBOARD
@@ -849,6 +860,29 @@ mod tests {
             "HID\\VID_046D+PID_C08C",
             r"\\?\hid#vid_046d#mouse"
         ));
+    }
+
+    #[test]
+    fn parse_vid_pid_extracts_vendor_and_product_id() {
+        let path = r"\\?\hid#vid_046d&pid_c345#";
+        assert_eq!(parse_vid_pid(path), Some((0x046d, 0xc345)));
+    }
+
+    /// A path that ends within the 4-hex-digit VID token must not panic
+    /// (R3-19: `.get()` returns `None` instead of slicing past the end).
+    #[test]
+    fn parse_vid_pid_short_path_does_not_panic() {
+        assert_eq!(parse_vid_pid("vid_04"), None);
+        assert_eq!(parse_vid_pid("vid_046d"), None); // VID ok but no PID
+        assert_eq!(parse_vid_pid("vid_046d&pid_c3"), None); // PID too short
+    }
+
+    /// Non-hex characters in the VID or PID token are rejected rather than
+    /// producing a bogus value.
+    #[test]
+    fn parse_vid_pid_rejects_non_hex() {
+        assert_eq!(parse_vid_pid("vid_zzzz&pid_c345"), None);
+        assert_eq!(parse_vid_pid("vid_046d&pid_zzzz"), None);
     }
 
     #[test]

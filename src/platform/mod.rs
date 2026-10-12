@@ -177,6 +177,8 @@ pub(crate) use macos::MacOsBackend;
 pub use macos::config_dir;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::console_user_config_dir;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::current_user_home;
 // Test-harness-only surface (see the module docs): only reachable with
 // the `test-util` feature on.
 #[cfg(all(target_os = "macos", feature = "test-util"))]

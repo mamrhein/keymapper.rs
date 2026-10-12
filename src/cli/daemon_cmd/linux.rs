@@ -18,9 +18,13 @@ use std::process::Command;
 /// The systemd user unit name.
 const SERVICE_NAME: &str = "keymapperd.service";
 
+/// Absolute path to `systemctl`, so an attacker-influenced `PATH` cannot
+/// substitute a trojan binary that runs with the user's privileges.
+const SYSTEMCTL_PATH: &str = "/usr/bin/systemctl";
+
 /// Helper that runs `systemctl --user` with the given arguments.
 fn systemctl(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new("systemctl")
+    Command::new(SYSTEMCTL_PATH)
         .args(["--user"])
         .args(args)
         .output()
@@ -37,10 +41,14 @@ pub fn is_running() -> bool {
 /// Start the keymapperd service via systemd.
 pub fn start() -> Result<(), String> {
     // Check that the unit file is installed.
-    let unit_path =
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join(".config/systemd/user/")
-            .join(SERVICE_NAME);
+    // Use `dirs::home_dir()` (password-database backed) instead of `$HOME`,
+    // which an attacker could redirect with a relative or empty value.
+    let unit_path = dirs::home_dir()
+        .map(|h| h.join(".config/systemd/user/").join(SERVICE_NAME))
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(".config/systemd/user/")
+                .join(SERVICE_NAME)
+        });
 
     if !unit_path.exists() {
         return Err(format!(

@@ -269,18 +269,19 @@ unsafe fn handle_wm_input(_hwnd: HWND, l_param: LPARAM) {
 
     // Allocate buffer and retrieve the actual data.
     let mut buffer = vec![0u8; size as usize];
-    let bytes_read = unsafe {
+    let mut bytes_read: u32 = 0;
+    let result = unsafe {
         GetRawInputData(
             h_raw_input,
             RID_INPUT,
             Some(buffer.as_mut_ptr() as *mut std::ffi::c_void),
-            &mut size,
+            &mut bytes_read,
             std::mem::size_of::<RAWINPUTHEADER>() as u32,
         )
     };
 
     // `UINT_MAX` (0xFFFFFFFF) indicates an error.
-    if bytes_read == 0xFFFFFFFF {
+    if result == 0xFFFFFFFF || bytes_read == 0 {
         return;
     }
 
@@ -316,10 +317,17 @@ unsafe fn handle_wm_input(_hwnd: HWND, l_param: LPARAM) {
                 let data_len = hid.dwSizeHid as usize;
 
                 // `bRawData` is a flexible array member; bound it to the
-                // size reported by the driver and verify it fits the buffer.
+                // size reported by the driver and verify it fits within
+                // the bytes actually written.  Use `checked_add` so a buggy
+                // or malicious driver cannot cause an unsigned underflow
+                // that admits a slice past the buffer.
                 let offset =
                     hid as *const RAWHID as usize - buffer.as_ptr() as usize;
-                if data_len == 0 || data_len > buffer.len() - offset {
+                if data_len == 0
+                    || offset
+                        .checked_add(data_len)
+                        .map_or(true, |end| end > bytes_read as usize)
+                {
                     return;
                 }
 
@@ -450,7 +458,11 @@ fn decode_hid_usage(device: HANDLE, report: &[u8]) -> Option<HidUsage> {
             return None;
         }
 
-        entries[..count as usize].iter().find_map(|entry| {
+        // Clamp count to the buffer capacity as defense-in-depth: a driver
+        // that reports more entries than it wrote would otherwise cause an
+        // out-of-bounds read.
+        let n = (count as usize).min(entries.len());
+        entries[..n].iter().find_map(|entry| {
             if entry.usage_page == PAGE_CONSUMER && entry.numeric_value() != 0
             {
                 HidUsage::from_code(

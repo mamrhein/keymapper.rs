@@ -87,6 +87,28 @@ pub(crate) fn console_user_home() -> Option<PathBuf> {
     passwd_home(uid)
 }
 
+/// Return the home directory of the current process, resolving from the
+/// password database when running with elevated privileges.
+///
+/// When `euid != ruid` (e.g. under `sudo`) `$HOME` points at the invoking
+/// root account's directory, not the real user's.  We therefore look up the
+/// real UID in the password database via `getpwuid_r` so that paths such as
+/// LaunchAgent plists land in the correct user's home.  When `euid == ruid`
+/// we fall back to `dirs::home_dir()` (which reads `$HOME`), matching the
+/// behaviour of [`config_dir`].
+pub(crate) fn current_user_home() -> Option<PathBuf> {
+    let ruid = unsafe { libc::getuid() };
+    let euid = unsafe { libc::geteuid() };
+
+    if euid != ruid {
+        // Elevated: resolve the real user's home from the password database
+        // instead of trusting an attacker-influenced `$HOME`.
+        return passwd_home(ruid);
+    }
+
+    dirs::home_dir()
+}
+
 /// Look up the home directory of *uid* in the password database.
 fn passwd_home(uid: libc::uid_t) -> Option<PathBuf> {
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
@@ -157,5 +179,13 @@ mod tests {
 
         assert!(home.is_absolute());
         assert_ne!(home, PathBuf::from("/var/root"));
+    }
+
+    /// `current_user_home` resolves an absolute home directory through the
+    /// password database (never `$HOME` when elevated).
+    #[test]
+    fn current_user_home_is_absolute() {
+        let home = current_user_home().expect("current user must have a home");
+        assert!(home.is_absolute(), "home must be absolute, got {home:?}");
     }
 }

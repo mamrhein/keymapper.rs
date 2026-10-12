@@ -80,7 +80,17 @@ fn to_utf16_null(s: &str) -> Vec<u16> {
 /// Look up a value from the PE version resource block.
 ///
 /// Returns `None` if the file has no version info or the key is missing.
-unsafe fn ver_query_value(buffer: &[u8], sub_block: &str) -> Option<Vec<u16>> {
+///
+/// When *binary* is `true` the sub-block is a binary value (e.g.
+/// `\VarFileInfo\Translation`); `VerQueryValueW` reports its length in
+/// **bytes**, so it is divided by two to obtain the u16 element count.
+/// For string values *binary* is `false` and `pu_len` is already in
+/// WCHARs (u16 count).
+unsafe fn ver_query_value(
+    buffer: &[u8],
+    sub_block: &str,
+    binary: bool,
+) -> Option<Vec<u16>> {
     let sub_block_utf16 = to_utf16_null(sub_block);
     let mut lplp_buffer: *const u8 = std::ptr::null();
     let mut pu_len: u32 = 0;
@@ -102,8 +112,13 @@ unsafe fn ver_query_value(buffer: &[u8], sub_block: &str) -> Option<Vec<u16>> {
         return None;
     }
 
+    // For binary values `pu_len` is in bytes; convert to a u16 count so
+    // the slice does not read past the version-info buffer.  Without this
+    // division the byte length is treated as a u16 element count (R3-20),
+    // reading twice as many elements as the buffer actually holds.
+    let u16_count = ver_query_u16_count(pu_len, binary);
     Some(unsafe {
-        std::slice::from_raw_parts(lplp_buffer as *const u16, pu_len as usize)
+        std::slice::from_raw_parts(lplp_buffer as *const u16, u16_count)
             .to_vec()
     })
 }
@@ -112,7 +127,7 @@ unsafe fn ver_query_value(buffer: &[u8], sub_block: &str) -> Option<Vec<u16>> {
 /// reading the translation table from the version resource.
 unsafe fn resolve_file_description_path(buffer: &[u8]) -> Option<String> {
     let lang_data =
-        unsafe { ver_query_value(buffer, "\\VarFileInfo\\Translation") }?;
+        unsafe { ver_query_value(buffer, r"\VarFileInfo\Translation", true) }?;
     if lang_data.len() < 2 {
         return None;
     }
@@ -153,7 +168,8 @@ fn get_file_description(path: &str) -> Option<String> {
         // actual translation block.
         if let Some(desc) = ver_query_value(
             &buffer,
-            "\\StringFileInfo\\040904b0\\FileDescription",
+            r"\StringFileInfo\040904b0\FileDescription",
+            false,
         ) {
             let s = utf16_to_string(&desc);
             if !s.is_empty() {
@@ -163,7 +179,7 @@ fn get_file_description(path: &str) -> Option<String> {
 
         // Resolve from the actual translation table.
         if let Some(sub_block) = resolve_file_description_path(&buffer)
-            && let Some(desc) = ver_query_value(&buffer, &sub_block)
+            && let Some(desc) = ver_query_value(&buffer, &sub_block, false)
         {
             let s = utf16_to_string(&desc);
             if !s.is_empty() {
@@ -307,4 +323,55 @@ fn app_identity_for_pid(pid: u32) -> Option<AppName> {
 
     let display = get_file_description(&image_path).unwrap_or(name.clone());
     Some(AppName { name, display })
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+/// Convert a `VerQueryValueW` length to a u16 element count.
+///
+/// For binary sub-blocks (e.g. `\VarFileInfo\Translation`) `VerQueryValueW`
+/// reports the length in **bytes**, so it must be halved to obtain the u16
+/// element count.  For string sub-blocks the length is already in WCHARs
+/// (u16 count).  Without this distinction a 4-byte binary block would be read
+/// as 4 u16 values (8 bytes) — an out-of-bounds read (R3-20).
+fn ver_query_u16_count(byte_len: u32, binary: bool) -> usize {
+    if binary {
+        (byte_len / 2) as usize
+    } else {
+        byte_len as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 4-byte binary Translation block must yield exactly 2 u16 elements,
+    /// not 4 (R3-20).
+    #[test]
+    fn ver_query_u16_count_binary_halves_byte_length() {
+        // 4 bytes = 2 u16 elements (one LANGID entry: language + codepage).
+        assert_eq!(ver_query_u16_count(4, true), 2);
+        assert_eq!(ver_query_u16_count(2, true), 1);
+        assert_eq!(ver_query_u16_count(0, true), 0);
+    }
+
+    /// String sub-blocks are already counted in u16s, so the length passes
+    /// through unchanged.
+    #[test]
+    fn ver_query_u16_count_string_preserves_length() {
+        assert_eq!(ver_query_u16_count(10, false), 10);
+        assert_eq!(ver_query_u16_count(0, false), 0);
+    }
+
+    /// Odd byte lengths for binary blocks are truncated (not rounded up), so
+    /// the resulting u16 count never reads past the buffer.
+    #[test]
+    fn ver_query_u16_count_binary_truncates_odd_bytes() {
+        // 5 bytes → 2 u16s (last byte is a dangling half-word, correctly
+        // excluded).
+        assert_eq!(ver_query_u16_count(5, true), 2);
+    }
 }

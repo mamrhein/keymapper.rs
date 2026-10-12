@@ -46,8 +46,8 @@ pub(crate) fn vendor_id_to_name(vendor_id: u32) -> String {
 
 /// Run `ioreg` and filter for keyboard devices.
 fn run_ioreg() -> Result<String, Box<dyn std::error::Error>> {
-    // Query the IOService registry for HID keyboard devices.
-    let output = Command::new("ioreg")
+    // Absolute path prevents a trojaned `PATH` from substituting `ioreg`.
+    let output = Command::new("/usr/sbin/ioreg")
         .args(["-p", "AppleHIDKeyboard", "-r", "-l", "-w", "0"])
         .output()
         .map_err(|e| format!("failed to execute ioreg: {e}"))?;
