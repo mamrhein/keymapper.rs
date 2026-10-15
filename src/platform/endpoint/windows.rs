@@ -1265,8 +1265,7 @@ mod tests {
     fn published_endpoint_round_trips_through_discovery() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PUBLISH_FILE_NAME);
-        let name =
-            format!("\\\\.\\pipe\\keymapperd_disc_{}", std::process::id());
+        let name = pipe_name().expect("the system PRNG failed");
         assert!(start_with_name(&name, echo));
         publish_name(&path, &name).expect("publishing failed");
         let resolved =
@@ -1303,7 +1302,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PUBLISH_FILE_NAME);
         let stale =
-            format!("{}keymapperd-{}", PIPE_PREFIX, "0".repeat(NONCE_HEX_LEN));
+            format!("{}{}", PIPE_PREFIX, "0".repeat(NONCE_HEX_LEN));
         fs_err::write(&path, &stale).unwrap();
         let name =
             resolve_published_name(&path).expect("the name must resolve");
