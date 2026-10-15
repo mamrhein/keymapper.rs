@@ -33,7 +33,7 @@
 //! `ERROR_INVALID_SECURITY_DESCRIPTOR`), while the two-step approach
 //! succeeds. The descriptor itself comes from an SDDL string —
 //! `D:(A;;GA;;;<user-sid>)`, a single `ACCESS_ALLOWED` ACE granting the
-//! caller's SID generic all — converted by the Win32 security API, so the
+//! caller's SID full control — converted by the Win32 security API, so the
 //! ACL byte layout is produced by the system rather than assembled by hand.
 //!
 //! The serve loop runs a daemon-supplied [`ConnectionHandler`] once per
@@ -45,7 +45,7 @@ use std::{
     io::{Read, Write},
     os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use log::{debug, info, warn};
@@ -53,8 +53,9 @@ use windows::{
     Win32::{
         Foundation::{
             CloseHandle, ERROR_BROKEN_PIPE, ERROR_IO_PENDING,
-            ERROR_PIPE_CONNECTED, GENERIC_ALL, GetLastError, HANDLE, HLOCAL,
-            LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            ERROR_PIPE_CONNECTED, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE,
+            GetLastError, HANDLE, HLOCAL, LocalFree, WAIT_OBJECT_0,
+            WAIT_TIMEOUT,
         },
         Security::{
             ACL,
@@ -97,10 +98,34 @@ use crate::platform::windows::local_app_data_dir;
 /// process that starts before the daemon cannot squat it.
 const PIPE_PREFIX: &str = r"\\.\pipe\keymapperd-";
 
-/// The root every published pipe name must live under. The CLI validates
-/// the publish file against it, so a foreign file can never redirect the
-/// client to an arbitrary object.
-const PIPE_ROOT: &str = r"\\.\pipe\";
+/// Expected length of the per-run nonce in [`pipe_name`], rendered as
+/// hex characters (see [`NONCE_BYTES`]).
+const NONCE_HEX_LEN: usize = 2 * NONCE_BYTES;
+
+/// Control characters must not appear in a published pipe name: they are
+/// never part of a legal `\Device\NamedPipe\…` path, and rejecting them
+/// blocks any future redirection trick that smuggles a name fragment past a
+/// naive parser.
+fn contains_control_chars(s: &str) -> bool {
+    s.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
+
+/// Validate the published name's shape: it must start with [`PIPE_PREFIX`]
+/// and carry a 32-hex-nonce, with no control characters.
+///
+/// This is the client-side gate that turns a squattable publish file (see
+/// R3-7) into a non-issue: even if an attacker can write the publish file,
+/// they cannot redirect the client to a pipe outside the daemon's namespace
+/// without also guessing the per-run nonce.
+fn is_valid_pipe_name(name: &str) -> bool {
+    if name.starts_with(PIPE_PREFIX) {
+        let nonce = &name[PIPE_PREFIX.len()..];
+        return !contains_control_chars(nonce)
+            && nonce.len() == NONCE_HEX_LEN
+            && nonce.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    false
+}
 
 /// Random bytes in the per-run pipe-name nonce (rendered as 32 hex
 /// characters).
@@ -111,6 +136,12 @@ const NONCE_BYTES: usize = 16;
 /// The containing `%LOCALAPPDATA%\keymapperd` directory is resolved by
 /// [`local_app_data_dir`] and shared with the log directory.
 const PUBLISH_FILE_NAME: &str = "control.pipe";
+
+/// Maximum duration a client can hold the single pipe instance open
+/// after a completed exchange. Bounded to a few multiples of [`IO_TIMEOUT`]
+/// so a peer that dribbles one byte every ~9.9 s (staying just under each
+/// read timeout) cannot hold the instance open indefinitely.
+const CLIENT_CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The pipe's input and output buffer sizes (bytes).
 const PIPE_BUFFER: u32 = 4096;
@@ -342,19 +373,29 @@ fn wait_overlapped(handle: HANDLE, ov: &OVERLAPPED) -> std::io::Result<u32> {
             Ok(transferred)
         }
         WAIT_TIMEOUT => {
+            // Cancel and reap the pending request so the kernel releases `ov`
+            // before this function returns.
             unsafe {
                 let _ = CancelIoEx(handle, Some(ov as *const OVERLAPPED));
-                // Reap the cancelled request so `ov` and its event are
-                // released by the kernel before this function returns.
                 let mut transferred = 0u32;
                 let _ =
                     GetOverlappedResult(handle, ov, &mut transferred, true);
             }
             Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
         }
-        // The wait itself failed (e.g. an invalid event handle); surface
-        // the OS error so the caller tears the connection down.
-        _ => Err(std::io::Error::last_os_error()),
+        // Any other wait result is a failure (e.g. an invalid event handle).
+        // Cancel and reap before surfacing the error: without this the
+        // OVERLAPPED is still pending and the kernel can write through a
+        // dangling pointer after this function returns (UB).
+        _ => {
+            unsafe {
+                let _ = CancelIoEx(handle, Some(ov as *const OVERLAPPED));
+                let mut transferred = 0u32;
+                let _ =
+                    GetOverlappedResult(handle, ov, &mut transferred, true);
+            }
+            Err(std::io::Error::last_os_error())
+        }
     }
 }
 
@@ -603,7 +644,10 @@ fn publish_name(path: &Path, name: &str) -> Result<(), String> {
 fn resolve_published_name(path: &Path) -> Option<String> {
     let name = fs_err::read_to_string(path).ok()?;
     let name = name.trim();
-    (!name.is_empty() && name.starts_with(PIPE_ROOT)).then(|| name.to_string())
+    if name.is_empty() || contains_control_chars(name) {
+        return None;
+    }
+    is_valid_pipe_name(name).then(|| name.to_string())
 }
 
 /// Create the pipe at *name*, apply the owner-only DACL, and spawn the
@@ -807,6 +851,7 @@ fn accept_client(handle: PipeHandle, event: HANDLE) -> bool {
 /// without closing is abandoned after one timeout instead of wedging the
 /// single pipe instance.
 fn wait_for_client_close(conn: &mut Pipe) {
+    let deadline = Instant::now() + CLIENT_CLOSE_TIMEOUT;
     let mut buf = [0u8; 64];
     loop {
         match conn.read(&mut buf) {
@@ -817,6 +862,13 @@ fn wait_for_client_close(conn: &mut Pipe) {
             // Any error means the peer is gone (or the pipe is unusable);
             // either way there is nothing more to wait for.
             Err(_) => break,
+        }
+        if Instant::now() >= deadline {
+            debug!(
+                "giving up waiting for client to close after {:?}",
+                CLIENT_CLOSE_TIMEOUT
+            );
+            break;
         }
     }
 }
@@ -867,7 +919,7 @@ fn open_pipe(name: &[u16]) -> std::io::Result<HANDLE> {
     let handle = match unsafe {
         CreateFileW(
             PCWSTR(name.as_ptr()),
-            GENERIC_ALL.0,
+            GENERIC_READ.0 | GENERIC_WRITE.0,
             FILE_SHARE_MODE(0),
             None,
             OPEN_EXISTING,
@@ -1251,7 +1303,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PUBLISH_FILE_NAME);
         let stale =
-            format!("{}keymapperd-{}", PIPE_ROOT, "0".repeat(2 * NONCE_BYTES));
+            format!("{}keymapperd-{}", PIPE_PREFIX, "0".repeat(NONCE_HEX_LEN));
         fs_err::write(&path, &stale).unwrap();
         let name =
             resolve_published_name(&path).expect("the name must resolve");
@@ -1264,6 +1316,44 @@ mod tests {
             msg.contains("no daemon is running"),
             "unexpected message: {msg}"
         );
+    }
+
+    /// `is_valid_pipe_name` accepts a well-formed name and rejects
+    /// everything else: wrong prefix, wrong nonce length, non-hex nonce,
+    /// control characters, and a bare `\.\pipe\` root without the prefix.
+    #[test]
+    fn pipe_name_validation() {
+        let good = pipe_name().expect("the system PRNG failed");
+        assert!(is_valid_pipe_name(&good));
+        // Wrong prefix: a foreign `\.\pipe\evil` path.
+        assert!(!is_valid_pipe_name(r"\\.\\pipe\\evil"));
+        // Correct prefix but no nonce.
+        assert!(!is_valid_pipe_name(PIPE_PREFIX));
+        // Correct prefix but short nonce.
+        assert!(!is_valid_pipe_name(&format!("{}{}", PIPE_PREFIX, "ab")));
+        // Correct prefix but non-hex nonce.
+        assert!(!is_valid_pipe_name(&format!(
+            "{}{}",
+            PIPE_PREFIX,
+            "z".repeat(NONCE_HEX_LEN)
+        )));
+        // Control character inside the name.
+        assert!(!is_valid_pipe_name(&format!(
+            "{}\x01{}",
+            PIPE_PREFIX,
+            "a".repeat(NONCE_HEX_LEN)
+        )));
+    }
+
+    /// `contains_control_chars` flags bytes below 0x20 and 0x7f, but not
+    /// printable ASCII or the pipe path separators.
+    #[test]
+    fn control_char_detection() {
+        assert!(!contains_control_chars("\\.\\pipe\\keymapperd-deadbeef"));
+        assert!(contains_control_chars("bad\x00char"));
+        assert!(contains_control_chars("tab\there"));
+        assert!(contains_control_chars("bell\x07"));
+        assert!(contains_control_chars("del\x7f"));
     }
 
     #[test]

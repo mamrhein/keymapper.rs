@@ -191,6 +191,8 @@ The document is a YAML sequence of rule groups. Each group has:
 | ----------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `name`      | No       | Human-readable label (ignored at runtime)                                                                               |
 | `apps`      | No       | List of application names (as printed by `keymapper appnames`) to scope the group. Omit or leave empty for global rules |
+
+>**Note:** `apps` scoping is a convenience, not a security boundary. Application names are resolved from the active window's title or process identity, which any same-session process can spoof. Do not use `apps` rules to enforce security policy (e.g. suppressing keys in password fields).
 | `keyboards` | No       | List of keyboard filters to scope the group. Omit or leave empty for all keyboards                                      |
 | `mappings`  | Yes      | Key-value pairs mapping triggers to outputs                                                                             |
 
@@ -199,6 +201,8 @@ Groups are evaluated in definition order. Within each group, mappings are evalua
 ### Keyboard filters
 
 Groups can be scoped to specific keyboards with the `keyboards` field. Each filter is a mapping of one or more of `name`, `vendor`, `model`, and `port`; a keyboard matches when all provided fields match (case-insensitive), and multiple filters form an OR set. Omit `keyboards` or leave it empty to apply to all keyboards.
+
+>**Note:** keyboard filtering relies on the platform's ability to identify the source device of each key event. On macOS this is not possible (CGEvents carry no source device), so the filter is a no-op and all groups apply to all keyboards.
 
 ```yaml
 # Only apply this group when the event comes from the specified keyboard(s)
@@ -343,6 +347,7 @@ All subcommands manage keymapperd through the platform service manager: `launchc
 | `start`    | Start keymapperd if it is not already running |
 | `stop`     | Stop keymapperd if it is running              |
 | `restart`  | Restart keymapperd (stop then start)          |
+| `log --level LEVEL` | Change the log level of a running daemon without restart (at `debug`/`trace`, keystrokes are logged) |
 
 ## Hot-reload
 
@@ -352,9 +357,11 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 **macOS — daemon not capturing keys:** keymapperd needs the Input Monitoring and Accessibility privacy permissions (System Settings > Privacy & Security). Verify both processes are running: `keymapper daemon status`. If keymapperd is not loaded, reinstall it: `sudo ./install-macos.sh`.
 
+>**Note:** secure-input password fields disable the CGEvent tap, which silently lifts key remapping for that field. This is an operating-system behavior, not a configuration option; mapped keys will pass through unremapped during password entry.
+
 **macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-architecture.md](docs/macos-architecture.md) for full troubleshooting.
 
-**Linux — "No keyboard devices found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin.
+**Linux — "No keyboard devices found":** you may need to add your user to the `input` group (`sudo usermod -aG input $USER`) and relogin. Note that `input` group membership also grants read access to all `/dev/input/event*` nodes on the system, which can expose other users' keystrokes — prefer logind per-seat ACLs (`uaccess`) where available.
 
 **Linux — daemon exits at startup with a permission error:** creating the virtual keyboard requires write access to `/dev/uinput`. Grant it with a udev rule, ensure the user is in the `input` group, and relogin:
 

@@ -59,7 +59,7 @@ nix = { version = "0.31.3", features = ["event"] }
 sysinfo = "0.39"  # process enumeration for `keymapper appnames`
 udev = "0.9"
 wayland-client = "0.31"
-x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
+x11rb = "0.14"
 zbus = { version = "5", features = ["blocking"] }
 
 # macOS framework bindings

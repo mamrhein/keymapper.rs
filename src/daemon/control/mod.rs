@@ -291,7 +291,7 @@ pub(crate) fn dispatch(command: &str, peer_uid: u32) -> Response {
                     && unsafe { libc::getuid() } != 0
                 {
                     return Response::Error(
-                        "refusing to raise log level to debug/trace from
+                        "refusing to raise log level to debug/trace from \
                          root on a non-root daemon"
                             .to_string(),
                     );
@@ -579,5 +579,40 @@ mod tests {
         let reply = dispatch("SET-LOG-LEVEL info", 0).to_string();
         assert_eq!(reply, "OK info");
         logging::set_level(LevelFilter::Info);
+    }
+
+    /// Every `Response` must render as a single line: the wire format is
+    /// length-prefixed so embedded newlines cannot desync framing, but a
+    /// multi-line literal in any reply would mangle the CLI's rendering and
+    /// violate the documented single-line contract.
+    #[test]
+    fn all_replies_are_single_line() {
+        for (verb, uid) in [
+            ("STATUS", TEST_UID),
+            ("VERSION", TEST_UID),
+            ("RELOAD", TEST_UID),
+            ("FLY", TEST_UID),
+            ("", TEST_UID),
+            ("SET-LOG-LEVEL bogus", TEST_UID),
+        ] {
+            let reply = dispatch(verb, uid).to_string();
+            assert!(
+                !reply.contains('\n'),
+                "reply for `{verb}` is not single-line: {reply:?}",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_escalation_refusal_is_single_line() {
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+        let reply = dispatch("SET-LOG-LEVEL debug", 0).to_string();
+        assert!(
+            !reply.contains('\n'),
+            "root-escalation refusal is not single-line: {reply:?}",
+        );
     }
 }

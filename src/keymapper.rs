@@ -91,6 +91,10 @@ enum DaemonCommands {
     ///
     /// Talks to the daemon over its control socket; the log output itself is
     /// unchanged (journal / Event Viewer / the stderr fallback).
+    ///
+    /// Warning: at `debug` and above the daemon logs every key-down with its
+    /// resolved HID usage, enough to reconstruct typed input. Enabling these
+    /// levels causes the daemon log to record your keystrokes.
     #[command(visible_alias = "lg")]
     Log {
         /// The new log level.
