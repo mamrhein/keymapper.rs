@@ -17,6 +17,15 @@ Type=simple
 ExecStart=@BINARY_PATH@
 Restart=on-failure
 RestartSec=3
+# Sandbox hardening: restrict privileges and scope filesystem/device access
+# so a compromised daemon cannot escalate or read unrelated state.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.cache/keymapperd %t/keymapperd
+DeviceAllow=/dev/uinput rw
+DeviceAllow=/dev/input/event* r
+PrivateTmp=yes
 
 [Install]
 # WantedBy (not just PartOf) pulls the daemon into the session transaction so
