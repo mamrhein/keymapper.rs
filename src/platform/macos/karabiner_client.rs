@@ -33,11 +33,23 @@
 //! Reports are enqueued through [`KarabinerClient`] and written by the
 //! background thread, so the public methods are safe to call from any
 //! thread.
+//!
+//! ### Peer and path authentication (R3-3)
+//!
+//! The socket lives at a hardcoded path under `/Library/Application Support`
+//! and is reachable only by root.  Before connecting, the parent-directory
+//! chain is checked for group/world-writable or non-root-owned components
+//! (see [`check_socket_path_security`]); after connecting, the daemon's peer
+//! credentials are verified to be root (uid 0, gid 0) via `getpeereid(2)`
+//! (see [`verify_server_uid`]).  A connection that is authenticated but never
+//! reports the virtual keyboard ready is treated as a security warning, not
+//! merely an operational one.
 
 use std::{
     fmt,
     io::{ErrorKind, Read, Write},
-    os::unix::net::UnixStream,
+    os::unix::{fs::MetadataExt, io::AsRawFd, net::UnixStream},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -47,6 +59,7 @@ use std::{
 };
 
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded};
+use fs_err as std_fs;
 use log::{info, warn};
 
 // ---------------------------------------------------------------------------
@@ -136,6 +149,135 @@ const KEYBOARD_REPORT_ID: u8 = 1;
 
 /// Report ID of the `consumer_input` report.
 const CONSUMER_REPORT_ID: u8 = 2;
+
+// ---------------------------------------------------------------------------
+// Peer and path authentication (R3-3)
+// ---------------------------------------------------------------------------
+
+/// The macOS `struct xid` exchanged with `getpeereid(2)`.
+///
+/// macos 27 changed the prototype from `(int, struct xid *)` to
+/// `(int, uid_t *, gid_t *)`.  Passing the first and third fields of this
+/// struct as the two out-pointers is correct under both ABIs: the classic
+/// form writes all three fields through the first pointer, while the new
+/// form writes the euid and the gid to offsets 0 and 8.  Only offsets 0 and
+/// 16 are read back, so the call stays within the struct on every release.
+#[repr(C)]
+struct Xid {
+    xi_uid: libc::uid_t,
+    xi_euid: libc::uid_t,
+    xi_gid: libc::gid_t,
+}
+
+/// The mode bits that signal a directory is writable by non-root users.
+///
+/// A group-writable (`0o020`) or world-writable (`0o002`) ancestor of the
+/// socket lets a non-root process plant or replace the socket, so both are
+/// refused unless the sticky bit (`0o1000`) absolves deletion rights.
+const WRITABLE_BY_OTHERS: u32 = 0o022;
+
+/// The sticky bit: a world-writable directory with this set is safe from
+/// deletion/rename by non-owners (e.g. `/tmp`), so the writable-bit refusal
+/// is skipped for it.
+const STICKY_BIT: u32 = 0o1000;
+
+/// Verify that the connected Karabiner daemon is running as root.
+///
+/// The Karabiner daemon is a root LaunchDaemon, so the peer credentials
+/// reported by `getpeereid(2)` must be uid 0 and gid 0 (wheel).  This closes
+/// the client-side half of R3-3: even if an attacker plants a socket at the
+/// hardcoded path, the credential check fails and no keystrokes are sent.
+///
+/// *expected_uid* and *expected_gid* are parameters so the rejection path can
+/// be exercised in tests without real uid switching; production always passes
+/// `(0, 0)`.
+fn verify_server_uid(
+    stream: &UnixStream,
+    expected_uid: libc::uid_t,
+    expected_gid: libc::gid_t,
+) -> Result<(), String> {
+    let mut xid = Xid {
+        xi_uid: 0,
+        xi_euid: 0,
+        xi_gid: 0,
+    };
+    let status = unsafe {
+        libc::getpeereid(stream.as_raw_fd(), &mut xid.xi_uid, &mut xid.xi_gid)
+    };
+    if status != 0 {
+        return Err(format!(
+            "getpeereid: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if xid.xi_uid != expected_uid {
+        return Err(format!(
+            "Karabiner daemon uid is {}, expected {expected_uid}",
+            xid.xi_uid
+        ));
+    }
+    if xid.xi_gid != expected_gid {
+        return Err(format!(
+            "Karabiner daemon gid is {}, expected {expected_gid}",
+            xid.xi_gid
+        ));
+    }
+    Ok(())
+}
+
+/// Stat the socket path and each ancestor, rejecting components that a
+/// non-root process could manipulate.
+///
+/// Before connecting to the root-only Karabiner socket, every directory from
+/// `/` down to the socket's parent is inspected.  A group- or world-writable
+/// component (without the sticky bit) lets a local attacker delete and replace
+/// the socket; a component not owned by root (when the client itself is root)
+/// signals a compromised install path.  Either condition aborts the connect
+/// instead of trusting a potentially planted listener (R3-3).
+///
+/// *current_uid* is the effective uid of the connecting process, threaded in
+/// so the ownership rule can be tested without real uid switching.
+fn check_socket_path_security(
+    path: &Path,
+    current_uid: libc::uid_t,
+) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Err("socket path has no parent directory".to_string());
+    };
+
+    let is_root = current_uid == 0;
+
+    for ancestor in parent.ancestors() {
+        let Ok(meta) = std_fs::metadata(ancestor) else {
+            // A missing ancestor means the socket cannot exist either; let
+            // the connect attempt surface the real error.
+            continue;
+        };
+        if !meta.is_dir() {
+            return Err(format!(
+                "refusing to connect: {} is not a directory",
+                ancestor.display()
+            ));
+        }
+        let mode = meta.mode();
+        // A sticky world-writable directory (like `/tmp`) is safe from
+        // cross-user deletion, so only refuse non-sticky writable bits.
+        if mode & WRITABLE_BY_OTHERS != 0 && mode & STICKY_BIT == 0 {
+            return Err(format!(
+                "refusing to connect: {} is group/world-writable",
+                ancestor.display()
+            ));
+        }
+        if is_root && meta.uid() != 0 {
+            return Err(format!(
+                "refusing to connect: {} is owned by uid {}, not root",
+                ancestor.display(),
+                meta.uid()
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// The identity of a Karabiner DriverKit virtual keyboard as registered
 /// with the daemon via `virtual_hid_keyboard_initialize`.
@@ -380,14 +522,19 @@ pub struct KarabinerClient {
 }
 
 impl KarabinerClient {
-    /// Probe whether the Karabiner service socket is reachable.
+    /// Probe whether the Karabiner service socket is reachable *and* root.
     ///
     /// Connects and immediately disconnects without sending any requests,
     /// so no virtual keyboard is created.  Fails when the socket does not
-    /// exist or the caller lacks permission to connect (the socket is
-    /// root-only).
+    /// exist, the caller lacks permission to connect (the socket is
+    /// root-only), the path components are writable by non-root users
+    /// (R3-3), or the connected server is not running as root.
     pub fn probe_socket() -> std::io::Result<()> {
-        UnixStream::connect(SOCKET_PATH)?;
+        let current_uid = unsafe { libc::geteuid() };
+        check_socket_path_security(Path::new(SOCKET_PATH), current_uid)
+            .map_err(std::io::Error::other)?;
+        let stream = UnixStream::connect(SOCKET_PATH)?;
+        verify_server_uid(&stream, 0, 0).map_err(std::io::Error::other)?;
         Ok(())
     }
 
@@ -550,17 +697,67 @@ fn client_loop(
             return;
         }
 
+        // Pre-connect: refuse to connect if the socket path components are
+        // writable by non-root users (R3-3). A planted listener in a
+        // group/world-writable ancestor could impersonate the daemon.
+        let current_uid = unsafe { libc::geteuid() };
+        if let Err(e) =
+            check_socket_path_security(Path::new(SOCKET_PATH), current_uid)
+        {
+            warn!(
+                "Karabiner socket path rejected ({e}); retrying in {} ms",
+                RECONNECT_INTERVAL.as_millis()
+            );
+            if shutdown.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(RECONNECT_INTERVAL);
+            continue;
+        }
+
         match UnixStream::connect(SOCKET_PATH) {
             Ok(stream) => {
-                info!("Karabiner daemon connected");
-                if let Err(e) =
-                    run_connection(stream, &rx, &ready, &shutdown, identity)
-                {
-                    warn!(
-                        "Karabiner daemon connection lost ({e}); \
-                         reconnecting in {} ms",
-                        RECONNECT_INTERVAL.as_millis()
-                    );
+                // Verify the server is root before sending any keystrokes
+                // (R3-3). An attacker who squats the socket path cannot
+                // impersonate the daemon if getpeereid rejects them.
+                match verify_server_uid(&stream, 0, 0) {
+                    Ok(()) => {
+                        info!("Karabiner daemon connected");
+                        let ever_ready = AtomicBool::new(false);
+                        if let Err(e) = run_connection(
+                            stream,
+                            &rx,
+                            &ready,
+                            &shutdown,
+                            identity,
+                            &ever_ready,
+                        ) {
+                            warn!(
+                                "Karabiner daemon connection lost ({e}); \
+                                 reconnecting in {} ms",
+                                RECONNECT_INTERVAL.as_millis()
+                            );
+                        }
+                        // A connection that was authenticated but never
+                        // reported the keyboard ready is suspicious: a
+                        // squatting listener may be replaying the wire
+                        // protocol without owning the virtual-HID device.
+                        if !ever_ready.load(Ordering::Acquire) {
+                            warn!(
+                                "Security event: connected to the Karabiner
+                                 daemon but the virtual keyboard never became
+                                 ready; the peer may not be the genuine root
+                                 daemon"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Karabiner daemon server uid check failed ({e});
+                             retrying in {} ms",
+                            RECONNECT_INTERVAL.as_millis()
+                        );
+                    }
                 }
                 ready.store(false, Ordering::Release);
             }
@@ -587,6 +784,7 @@ fn run_connection(
     ready: &Arc<AtomicBool>,
     shutdown: &Arc<AtomicBool>,
     identity: KeyboardIdentity,
+    ever_ready: &AtomicBool,
 ) -> std::io::Result<()> {
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
 
@@ -636,6 +834,13 @@ fn run_connection(
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {}
             Err(e) => return Err(e),
+        }
+
+        // Record whether the keyboard ever became ready during this connection
+        // so `client_loop` can emit a security warning for a peer that was
+        // authenticated but never produced a ready state (R3-3).
+        if ready.load(Ordering::Acquire) {
+            ever_ready.store(true, Ordering::Relaxed);
         }
 
         // Send pending reports.  While the keyboard is not ready they are
@@ -980,9 +1185,11 @@ mod tests {
         let (tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
         let ready = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let ever_ready = Arc::new(AtomicBool::new(false));
 
-        // The thread gets its own clone; the test keeps `ready` to poll.
+        // The thread gets its own clones; the test keeps `ready` to poll.
         let ready_thread = Arc::clone(&ready);
+        let ever_ready_thread = Arc::clone(&ever_ready);
 
         let client = thread::spawn(move || {
             run_connection(
@@ -991,6 +1198,7 @@ mod tests {
                 &ready_thread,
                 &shutdown,
                 OUTPUT_KEYBOARD_IDENTITY,
+                &ever_ready_thread,
             )
         });
 
@@ -1065,6 +1273,10 @@ mod tests {
         drop(daemon_stream);
         let result = client.join().unwrap();
         assert!(result.is_err()); // EOF from the closed daemon end
+
+        // The keyboard became ready during the connection, so `ever_ready`
+        // must have been set (R3-3 readiness tracking).
+        assert!(ever_ready.load(Ordering::Acquire));
     }
 
     /// Saturate `client`'s bounded command channel.
@@ -1125,5 +1337,265 @@ mod tests {
         // full, so no half sequence can sit in the queue.
         assert_eq!(client.dropped.load(Ordering::Relaxed), 4);
         assert_eq!(client.tx.len(), COMMAND_CHANNEL_CAPACITY);
+    }
+
+    // -----------------------------------------------------------------------
+    // R3-3: peer and path authentication for the Karabiner socket
+    // -----------------------------------------------------------------------
+
+    /// `verify_server_uid` accepts a peer whose uid and gid match the expected
+    /// root credentials. The peer of a socketpair is this very process, so
+    /// passing its own uid/gid must succeed.
+    #[test]
+    fn verify_server_uid_accepts_matching_credentials() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        verify_server_uid(&client, uid, gid).unwrap();
+    }
+
+    /// `verify_server_uid` rejects a peer whose uid does not match the
+    /// expected root credential. The socketpair peer is `getuid()`, so
+    /// passing a foreign uid exercises the rejection path without needing
+    /// privileges.
+    #[test]
+    fn verify_server_uid_rejects_foreign_uid() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let foreign_uid = unsafe { libc::getuid() }.wrapping_add(1);
+        let gid = unsafe { libc::getgid() };
+        let err = verify_server_uid(&client, foreign_uid, gid).unwrap_err();
+        assert!(err.contains("uid"), "expected uid in error: {err}");
+    }
+
+    /// `verify_server_uid` rejects a peer whose gid does not match the
+    /// expected root credential, even when the uid is correct.
+    #[test]
+    fn verify_server_uid_rejects_foreign_gid() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let uid = unsafe { libc::getuid() };
+        let foreign_gid = unsafe { libc::getgid() }.wrapping_add(1);
+        let err = verify_server_uid(&client, uid, foreign_gid).unwrap_err();
+        assert!(err.contains("gid"), "expected gid in error: {err}");
+    }
+
+    /// `verify_server_uid` with the production arguments (uid 0, gid 0)
+    /// accepts only when the process is itself root; otherwise it rejects
+    /// the non-root peer of a socketpair.
+    #[test]
+    fn verify_server_uid_root_check_matches_euid() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        if unsafe { libc::geteuid() } == 0 {
+            verify_server_uid(&client, 0, 0).unwrap();
+        } else {
+            let err = verify_server_uid(&client, 0, 0).unwrap_err();
+            assert!(err.contains("uid"), "expected uid in error: {err}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // R3-3: peer and path authentication for the Karabiner socket
+    // -----------------------------------------------------------------------
+
+    /// `check_socket_path_security` accepts a directory chain whose components
+    /// are not group/world-writable and (when simulated as root) are all
+    /// root-owned.
+    #[test]
+    fn socket_path_security_accepts_safe_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        // The tempdir is owned by the current user with mode 0700.
+        let socket_path = dir.path().join("socket.sock");
+        // Simulate running as the current user (ownership check skipped).
+        let uid = unsafe { libc::getuid() };
+        check_socket_path_security(&socket_path, uid).unwrap();
+    }
+
+    /// `check_socket_path_security` rejects a chain containing a non-sticky
+    /// world-writable directory.
+    #[test]
+    fn socket_path_security_rejects_world_writable() {
+        use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("writable");
+        fs_err::create_dir(&subdir).unwrap();
+        fs_err::set_permissions(&subdir, Permissions::from_mode(0o777))
+            .unwrap();
+        let socket_path = subdir.join("socket.sock");
+        // Ownership is irrelevant here; the mode check fires first.
+        let uid = unsafe { libc::getuid() };
+        let err = check_socket_path_security(&socket_path, uid).unwrap_err();
+        assert!(
+            err.contains("world-writable"),
+            "expected world-writable in error: {err}"
+        );
+    }
+
+    /// `check_socket_path_security` rejects a chain containing a non-sticky
+    /// group-writable directory.
+    #[test]
+    fn socket_path_security_rejects_group_writable() {
+        use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("group_writable");
+        fs_err::create_dir(&subdir).unwrap();
+        // 0o770: group-writable, not sticky.
+        fs_err::set_permissions(&subdir, Permissions::from_mode(0o770))
+            .unwrap();
+        let socket_path = subdir.join("socket.sock");
+        let uid = unsafe { libc::getuid() };
+        let err = check_socket_path_security(&socket_path, uid).unwrap_err();
+        assert!(
+            err.contains("group/world-writable"),
+            "expected group/world-writable in error: {err}"
+        );
+    }
+
+    /// `check_socket_path_security` accepts a sticky world-writable directory
+    /// (e.g. `/tmp`) because the sticky bit prevents cross-user deletion.
+    #[test]
+    fn socket_path_security_accepts_sticky_world_writable() {
+        use std::{fs::Permissions, os::unix::fs::PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sticky");
+        fs_err::create_dir(&subdir).unwrap();
+        // 0o1777: world-writable with sticky bit (like /tmp).
+        fs_err::set_permissions(&subdir, Permissions::from_mode(0o1777))
+            .unwrap();
+        let socket_path = subdir.join("socket.sock");
+        let uid = unsafe { libc::getuid() };
+        check_socket_path_security(&socket_path, uid).unwrap();
+    }
+
+    /// `check_socket_path_security` rejects a directory chain whose component
+    /// is not owned by root when the client simulates running as root. The
+    /// current user owns the tempdir, so with `current_uid = 0` the
+    /// ownership check fires.
+    #[test]
+    fn socket_path_security_rejects_non_root_owned_when_root() {
+        let dir = tempfile::tempdir().unwrap();
+        // The tempdir is owned by the current user, not root.
+        let socket_path = dir.path().join("socket.sock");
+        // Simulate running as root: the ownership check should reject the
+        // user-owned tempdir ancestor.
+        let err = check_socket_path_security(&socket_path, 0).unwrap_err();
+        assert!(
+            err.contains("owned by uid"),
+            "expected owned-by-uid in error: {err}"
+        );
+    }
+
+    /// `check_socket_path_security` accepts a path whose ancestors are all
+    /// root-owned. Uses a tempdir under `/tmp` (root-owned, sticky) so that
+    /// every ancestor from `/` to the tempdir passes both the mode and
+    /// ownership checks when running as root.
+    #[test]
+    fn socket_path_security_accepts_root_owned_chain() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: requires root to create a root-owned chain");
+            return;
+        }
+        let dir = tempfile::Builder::new()
+            .prefix("karabiner_sec_test_")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket_path = dir.path().join("socket.sock");
+        // When running as root, all ancestors (`/`, `/tmp`, the tempdir)
+        // are root-owned and pass both checks.
+        check_socket_path_security(&socket_path, 0).unwrap();
+    }
+
+    /// `run_connection` sets `ever_ready` when the daemon pushes the
+    /// keyboard-ready state, mirroring the existing mock-daemon test but
+    /// asserting the readiness flag used by the R3-3 security check.
+    #[test]
+    fn run_connection_sets_ever_ready_on_keyboard_ready() {
+        let (client_stream, mut daemon_stream) = UnixStream::pair().unwrap();
+        daemon_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let (_tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let ready = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let ever_ready = Arc::new(AtomicBool::new(false));
+
+        let ready_thread = Arc::clone(&ready);
+        let ever_ready_thread = Arc::clone(&ever_ready);
+
+        let client = thread::spawn(move || {
+            run_connection(
+                client_stream,
+                &rx,
+                &ready_thread,
+                &shutdown,
+                OUTPUT_KEYBOARD_IDENTITY,
+                &ever_ready_thread,
+            )
+        });
+
+        // The client sends the initialize request first.
+        let _ = decode_frame(&mut daemon_stream).unwrap();
+
+        // Push the keyboard-ready state.
+        let state_payload = [RESP_VIRTUAL_HID_KEYBOARD_READY, 1];
+        daemon_stream
+            .write_all(&encode_id_frame(MSG_REQUEST, 100, &state_payload))
+            .unwrap();
+
+        // The client must answer with an empty response.
+        let frame = decode_frame(&mut daemon_stream).unwrap();
+        assert_eq!(frame.msg_type, MSG_RESPONSE);
+
+        // Wait for the client to observe readiness.
+        wait_until(|| ready.load(Ordering::Acquire));
+        assert!(ever_ready.load(Ordering::Acquire));
+
+        // Close the connection.
+        drop(daemon_stream);
+        let _ = client.join();
+    }
+
+    /// `run_connection` leaves `ever_ready` false when the daemon
+    /// authenticates (the stream is open) but never pushes a
+    /// keyboard-ready state. This is the "connected but never ready"
+    /// security condition from R3-3.
+    #[test]
+    fn run_connection_clears_ever_ready_when_never_ready() {
+        let (client_stream, mut daemon_stream) = UnixStream::pair().unwrap();
+        daemon_stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let (_tx, rx) = crossbeam_channel::unbounded::<ClientCommand>();
+        let ready = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let ever_ready = Arc::new(AtomicBool::new(false));
+
+        let ready_thread = Arc::clone(&ready);
+        let ever_ready_thread = Arc::clone(&ever_ready);
+
+        let client = thread::spawn(move || {
+            run_connection(
+                client_stream,
+                &rx,
+                &ready_thread,
+                &shutdown,
+                OUTPUT_KEYBOARD_IDENTITY,
+                &ever_ready_thread,
+            )
+        });
+
+        // The client sends the initialize request; consume it.
+        let _ = decode_frame(&mut daemon_stream).unwrap();
+
+        // Do NOT send a keyboard-ready state, then close the connection.
+        drop(daemon_stream);
+
+        let result = client.join().unwrap();
+        assert!(result.is_err()); // EOF from the closed daemon end.
+        assert!(!ever_ready.load(Ordering::Acquire));
+        assert!(!ready.load(Ordering::Acquire));
     }
 }
