@@ -67,6 +67,14 @@ const SOCKET_NAME: &str = "keymapperd.sock";
 /// completes the exchange in milliseconds.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Read and write timeout for a *client* control connection.
+///
+/// The server-side [`IO_TIMEOUT`] is generous (10 s) so a stalled peer can
+/// drain its reply; the client side is far stricter (1 s) so a dead or
+/// impersonating daemon surfaces as an error instead of hanging the CLI
+/// (R3-4). A normal local round-trip completes in milliseconds.
+const CLIENT_IO_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// Sliding-window size for per-uid connection rate limiting (Finding 6).
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 
@@ -276,6 +284,33 @@ fn connect_at(path: &Path) -> std::io::Result<UnixStream> {
     UnixStream::connect(path)
 }
 
+/// Verify the server's uid after connecting as a client (R3-4).
+///
+/// The daemon runs as root (uid 0) or as the current user; both are
+/// accepted. Any other uid means an attacker has squatted the socket path in
+/// a writable directory, so the connection is dropped before any command is
+/// exchanged. *current_uid* is passed explicitly to keep the check testable
+/// without real uid switching, mirroring [`authorize_peer`].
+fn verify_server_uid(
+    stream: &UnixStream,
+    current_uid: libc::uid_t,
+) -> std::io::Result<()> {
+    let peer = peer_uid::peer_uid(stream).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
+    })?;
+    if peer == 0 || peer == current_uid {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "control endpoint peer uid {peer} is neither root nor the \
+                 current uid {current_uid}; refusing to talk to a non-daemon"
+            ),
+        ))
+    }
+}
+
 impl Endpoint for UnixEndpoint {
     /// Bind the endpoint and spawn the accept thread.
     fn start(handler: ConnectionHandler) {
@@ -303,8 +338,18 @@ impl Endpoint for UnixEndpoint {
     }
 
     /// Connect to the daemon's control endpoint as a client.
+    ///
+    /// After connecting, the server's uid is verified (R3-4): only root or
+    /// the current user's daemon is accepted, so an attacker who squats the
+    /// socket path in a writable directory cannot impersonate the daemon to
+    /// the CLI. A 1 s read/write timeout ([`CLIENT_IO_TIMEOUT`]) is also set
+    /// so a non-responsive endpoint surfaces as an error instead of hanging
+    /// the CLI.
     fn connect() -> std::io::Result<Box<dyn IoStream>> {
         let stream = connect_at(&socket_path())?;
+        verify_server_uid(&stream, unsafe { libc::getuid() })?;
+        stream.set_read_timeout(Some(CLIENT_IO_TIMEOUT))?;
+        stream.set_write_timeout(Some(CLIENT_IO_TIMEOUT))?;
         Ok(Box::new(stream))
     }
 
@@ -612,5 +657,126 @@ mod tests {
         }
         let path = socket_path();
         assert_eq!(path, dir.path().join(SOCKET_NAME));
+    }
+
+    // -----------------------------------------------------------------------
+    // Client-side peer-uid verification (R3-4)
+    // -----------------------------------------------------------------------
+
+    /// `verify_server_uid` admits the same-uid server (the normal case: a
+    /// user-run daemon) via a loopback socketpair.
+    #[test]
+    fn verify_server_uid_accepts_own_uid() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        // The peer of a socketpair is this very process.
+        verify_server_uid(&client, unsafe { libc::getuid() }).unwrap();
+    }
+
+    /// `verify_server_uid` rejects a peer whose uid is neither root nor the
+    /// caller's. The actual kernel-reported uid of a socketpair peer is always
+    /// `getuid()`, so the rejection path is exercised by telling
+    /// `verify_server_uid` to expect a different uid. A real foreign-uid peer
+    /// cannot be created without privileges, so this is the correct in-sandbox
+    /// simulation.
+    #[test]
+    fn verify_server_uid_rejects_foreign_uid() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let foreign_uid = unsafe { libc::getuid() } + 1;
+        let err = verify_server_uid(&client, foreign_uid).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("neither root nor the current uid"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Client connect + timeout integration (R3-4)
+    // -----------------------------------------------------------------------
+
+    /// The full client [`connect`] path (peer verification + timeout setting)
+    /// must not break a normal round-trip: an echo server is bound at the
+    /// resolved socket path, and `Endpoint::connect` succeeds, verifies the
+    /// uid, and completes the exchange within the 1 s client timeout.
+    #[test]
+    fn client_connect_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().to_str().unwrap());
+        }
+        let path = socket_path();
+
+        let listener = match bind_at(&path) {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!(
+                    "skipping client_connect_round_trips: cannot bind ({e})"
+                );
+                return;
+            }
+        };
+        std::thread::spawn(move || serve(listener, echo));
+
+        // Give the server thread a moment to enter the accept loop.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let mut conn = <UnixEndpoint as Endpoint>::connect().unwrap();
+        let command = b"SET-LOG-LEVEL debug";
+        frame::write_frame(&mut conn, command).unwrap();
+        let reply = frame::read_payload(&mut conn, MAX).unwrap();
+        assert_eq!(reply, command);
+    }
+
+    /// A server that accepts but never responds must not hang the CLI: after
+    /// the 1 s client read timeout, a read surfaces as an error instead of
+    /// blocking indefinitely (R3-4).
+    #[test]
+    fn client_connect_times_out_on_stalled_server() {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", dir.path().to_str().unwrap());
+        }
+        let path = socket_path();
+
+        let listener = match bind_at(&path) {
+            Ok(listener) => listener,
+            Err(e) => {
+                eprintln!(
+                    "skipping client_connect_times_out_on_stalled_server: \
+                     cannot bind ({e})"
+                );
+                return;
+            }
+        };
+
+        // Accept the connection and hold it open without reading or writing,
+        // simulating a daemon that has crashed or is hung mid-accept.
+        let server_thread = std::thread::spawn(move || {
+            if let Ok((_stream, _)) = listener.accept() {
+                // Keep the connection alive but do nothing — never send a
+                // reply, never close. The client's read timeout must fire.
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        });
+
+        std::thread::sleep(Duration::from_millis(50));
+
+        let start = std::time::Instant::now();
+        let mut conn = <UnixEndpoint as Endpoint>::connect().unwrap();
+
+        // The server never replies; reading must fail after ~1 s, not hang.
+        let mut buf = [0u8; 16];
+        let result = std::io::Read::read(&mut conn, &mut buf);
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "read from a stalled server should time out, not succeed"
+        );
+        // The timeout must fire well before the server's 10 s sleep, proving
+        // the client-side timeout (not the server's) is what bounds the wait.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "timeout took too long: {elapsed:?}"
+        );
+
+        drop(server_thread);
     }
 }
