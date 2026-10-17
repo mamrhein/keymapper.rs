@@ -38,7 +38,7 @@ use super::{
     config_dir::console_uid, emit::emit_native_key, ipc_frame,
     karabiner_client::KarabinerClient,
 };
-use crate::keymap_core::mapping_cache::NativeKey;
+use crate::{common::frame, keymap_core::mapping_cache::NativeKey};
 
 /// Directory holding the virtkbdd IPC socket.
 const SOCKET_DIR: &str = "/var/run/virtkbdd";
@@ -220,8 +220,14 @@ fn handle_connection(
     emit: &impl Fn(&[NativeKey]),
 ) {
     let mut reader = BufReader::new(stream);
+    // A persistent `FrameReader` retains partial header/payload bytes across
+    // the read-timeout retries in this loop, so a `SO_RCVTIMEO` firing
+    // mid-frame cannot desync the stream (Finding R3-12).  `decode_stream`
+    // resumes on it.
+    let mut frame_reader =
+        frame::FrameReader::new(&mut reader, ipc_frame::MAX_PAYLOAD_LEN);
     loop {
-        match ipc_frame::decode_stream(&mut reader) {
+        match ipc_frame::decode_stream(&mut frame_reader) {
             Ok(keys) => {
                 if console_uid() != Some(peer_uid) {
                     info!(

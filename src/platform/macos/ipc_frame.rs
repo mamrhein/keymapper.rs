@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::{
     common::{
-        frame::{self, FrameError},
+        frame::{self, FrameError, FrameReader},
         hid_usage::HidUsage,
     },
     keymap_core::mapping_cache::NativeKey,
@@ -42,7 +42,7 @@ use crate::{
 
 /// Upper bound for a single frame's payload.  Legitimate payloads are at most
 /// 328 bytes; the bound guards against corrupt length fields.
-const MAX_PAYLOAD_LEN: usize = 4096;
+pub(crate) const MAX_PAYLOAD_LEN: usize = 4096;
 
 /// Maximum number of keys in a single frame.
 const MAX_KEYS_PER_FRAME: usize = 64;
@@ -156,14 +156,17 @@ pub fn decode(buf: &[u8]) -> Result<Vec<NativeKey>, IpcFrameError> {
     decode_payload(payload)
 }
 
-/// Read and decode a single frame from a stream.
+/// Read and decode a single frame from a resumable stream reader.
 ///
-/// Returns [`IpcFrameError::Eof`] when the peer closes the connection cleanly.
-pub fn decode_stream<R: Read>(
-    reader: &mut R,
+/// *reader* must be a [`FrameReader`] held across frames by the caller, so
+/// that a mid-frame read timeout (returned as [`IpcFrameError::Io`] with
+/// `WouldBlock`) leaves the partial header/payload bytes in place for the next
+/// call instead of desyncing the stream (Finding R3-12).  A clean peer close
+/// before a full frame is reported as [`IpcFrameError::Eof`].
+pub fn decode_stream<'a, R: Read + ?Sized>(
+    reader: &mut FrameReader<'a, R>,
 ) -> Result<Vec<NativeKey>, IpcFrameError> {
-    let payload = frame::read_payload(reader, MAX_PAYLOAD_LEN)
-        .map_err(IpcFrameError::from)?;
+    let payload = reader.read_payload().map_err(IpcFrameError::from)?;
     decode_payload(&payload)
 }
 
@@ -379,7 +382,8 @@ mod tests {
         let keys = vec![key(0x02, HidUsage::E), key(0, HidUsage::A)];
         let frame = encode(&keys);
         let mut cursor = Cursor::new(frame);
-        assert_eq!(decode_stream(&mut cursor).unwrap(), keys);
+        let mut fr = FrameReader::new(&mut cursor, MAX_PAYLOAD_LEN);
+        assert_eq!(decode_stream(&mut fr).unwrap(), keys);
     }
 
     #[test]
@@ -387,10 +391,8 @@ mod tests {
         use std::io::Cursor;
 
         let mut cursor = Cursor::new(Vec::<u8>::new());
-        assert_eq!(
-            decode_stream(&mut cursor).unwrap_err(),
-            IpcFrameError::Eof
-        );
+        let mut fr = FrameReader::new(&mut cursor, MAX_PAYLOAD_LEN);
+        assert_eq!(decode_stream(&mut fr).unwrap_err(), IpcFrameError::Eof);
     }
 
     #[test]
@@ -400,9 +402,7 @@ mod tests {
         // A partial header (fewer than 5 bytes) is a clean EOF, not an I/O
         // error, because the peer closed mid-frame.
         let mut cursor = Cursor::new(vec![FRAME_VERSION, 9]);
-        assert_eq!(
-            decode_stream(&mut cursor).unwrap_err(),
-            IpcFrameError::Eof
-        );
+        let mut fr = FrameReader::new(&mut cursor, MAX_PAYLOAD_LEN);
+        assert_eq!(decode_stream(&mut fr).unwrap_err(), IpcFrameError::Eof);
     }
 }
