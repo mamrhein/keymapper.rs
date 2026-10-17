@@ -120,7 +120,7 @@ pub(crate) trait Endpoint {
 }
 
 #[cfg(unix)]
-mod unix;
+pub(crate) mod unix;
 #[cfg(windows)]
 mod windows;
 

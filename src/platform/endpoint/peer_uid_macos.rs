@@ -7,46 +7,126 @@
 // $Source$
 // $Revision$
 
-//! Peer-credential lookup for the macOS control socket.
+//! Peer-credential lookup for the macOs control socket and the virtkbdd IPC
+//! client.
 
 use std::{
     io,
     os::unix::{io::AsRawFd, net::UnixStream},
 };
 
-/// The macOS `struct xid` exchanged with `getpeereid(2)`.
+/// The audit token macOs attaches to every unix-socket peer.
 ///
-/// macOS 27 changed the prototype from `(int, struct xid *)` to
-/// `(int, uid_t *, gid_t *)`. Passing the first and third fields of this
-/// struct as the two out-pointers is correct under both ABIs: the classic
-/// form writes all three fields through the first pointer, while the new
-/// form writes the euid and the gid to offsets 0 and 8. Only offset 0 is
-/// read back, so the call stays within the struct on every release.
+/// Retrieved with `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)`; its field layout
+/// is the stable kernel ABI documented by `audit_token_to_au32(3)` (the public
+/// libbsm helpers are not exported from any linkable dylib on macOs 27, so the
+/// layout is read directly here). Field order, confirmed against a live
+/// `socketpair` on macOs 27:
 ///
-/// (Same layout trick as the virtkbdd IPC server's `peer_uid`.)
+/// ```text
+/// [0] auid   (audit / real login uid — immutable across setuid)
+/// [1] euid    effective user id
+/// [2] egid
+/// [3] ruid
+/// [4] rgid
+/// [5] pid
+/// [6] asid  (audit session id)
+/// [7] tid   (terminal/process-id version)
+/// ```
 #[repr(C)]
-struct Xid {
-    xi_uid: libc::uid_t,
-    xi_euid: libc::uid_t,
-    xi_gid: libc::gid_t,
+struct AuditToken([u32; 8]);
+
+impl AuditToken {
+    /// The audit user ID — the immutable real identity of the peer's login
+    /// session. It is fixed at login and cannot be cleared by a `setuid`
+    /// transition, which is exactly what distinguishes a genuine root daemon
+    /// from a setuid-root attacker (R3-14).
+    fn real_uid(&self) -> libc::uid_t {
+        self.0[0] as libc::uid_t
+    }
+    /// The effective user ID of the peer.
+    fn effective_uid(&self) -> libc::uid_t {
+        self.0[1] as libc::uid_t
+    }
 }
 
-/// Return the uid of the connected peer, via `getpeereid(2)`.
+/// Kernel-reported credentials of a connected unix peer.
 ///
-/// Offset 0 of [`Xid`] holds the effective uid on macOS 27+ and the real
-/// uid on earlier releases. For a normal user process such as keymapperd
-/// the two are equal, and it is the identity that matters here.
-pub(super) fn peer_uid(stream: &UnixStream) -> Result<libc::uid_t, String> {
-    let mut xid = Xid {
-        xi_uid: 0,
-        xi_euid: 0,
-        xi_gid: 0,
-    };
+/// On macOs both fields come from the peer's audit token (via
+/// `LOCAL_PEERTOKEN`), which is authoritative and cannot be forged by the
+/// peer. `real_uid` is the audit user ID: for a normal process it equals the
+/// real uid, and because it is frozen at login it stays non-zero for a process
+/// that merely escalated to root via `setuid` — so the `real_uid == 0 &&
+/// effective_uid == 0` policy correctly rejects such peers (R3-14).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PeerCreds {
+    pub real_uid: libc::uid_t,
+    pub effective_uid: libc::uid_t,
+}
+
+/// Fetch the peer's credentials from its audit token.
+///
+/// `getpeereid(2)` on macOs 27+ returns only the *effective* uid (written to
+/// offset 0), so a setuid-root peer — effective uid 0 but a non-zero
+/// real/audit identity — would be admitted through the old `peer == 0` branch.
+/// The audit token exposes both identities, which
+/// `authorize_peer`/`verify_server_uid` require to be consistent (R3-14). A
+/// lookup failure is propagated so the caller fails closed: a peer whose
+/// credentials cannot be established is never admitted.
+pub(crate) fn peer_creds(stream: &UnixStream) -> Result<PeerCreds, String> {
+    let mut token = AuditToken([0; 8]);
+    let mut len = std::mem::size_of::<AuditToken>() as libc::socklen_t;
     let status = unsafe {
-        libc::getpeereid(stream.as_raw_fd(), &mut xid.xi_uid, &mut xid.xi_gid)
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERTOKEN,
+            std::ptr::addr_of_mut!(token).cast::<libc::c_void>(),
+            &mut len,
+        )
     };
     if status != 0 {
-        return Err(format!("getpeereid: {}", io::Error::last_os_error()));
+        return Err(format!(
+            "getsockopt(LOCAL_PEERTOKEN): {}",
+            io::Error::last_os_error()
+        ));
     }
-    Ok(xid.xi_uid)
+    if len as usize != std::mem::size_of::<AuditToken>() {
+        return Err(format!(
+            "getsockopt(LOCAL_PEERTOKEN): short reply ({} bytes, expected {})",
+            len,
+            std::mem::size_of::<AuditToken>()
+        ));
+    }
+    Ok(PeerCreds {
+        real_uid: token.real_uid(),
+        effective_uid: token.effective_uid(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The audit-token reader must yield this process's own identity when
+    /// queried over a `socketpair` (the peer is the same process). This is the
+    /// macOs-specific half of `authorize_peer_checks_peer_credentials`: it
+    /// pins the FFI field layout to the real kernel value so a future
+    /// macOs release that shifts the layout would surface as a failing
+    /// assertion here rather than a silent security regression.
+    #[test]
+    fn peer_creds_reports_self_over_socketpair() {
+        let (a, _b) = UnixStream::pair().unwrap();
+        let creds = peer_creds(&a)
+            .expect("LOCAL_PEERTOKEN should succeed on a socketpair");
+        let uid = unsafe { libc::getuid() };
+        assert_eq!(
+            creds.real_uid, uid,
+            "real (audit) uid should match getuid"
+        );
+        assert_eq!(
+            creds.effective_uid, uid,
+            "effective uid should match getuid"
+        );
+    }
 }

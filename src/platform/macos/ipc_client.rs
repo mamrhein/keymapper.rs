@@ -12,7 +12,7 @@
 //! The CGEventTap callback hands each mapped-output batch to [`IpcClient`] via
 //! a bounded channel and never blocks.  A dedicated writer thread owns the
 //! socket: it connects to virtkbdd (retrying on failure), verifies the
-//! server's uid is root via `getpeereid(2)` for mutual authentication, writes
+//! server's identity via its audit token for mutual authentication, writes
 //! frames in order, and maintains the reachability flag that the decision
 //! core consults.  When virtkbdd is unreachable every key passes through
 //! natively (mappings simply inactive), so a dead emitter never breaks
@@ -23,7 +23,7 @@
 
 use std::{
     io::Write,
-    os::unix::{io::AsRawFd, net::UnixStream},
+    os::unix::net::UnixStream,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -36,28 +36,12 @@ use std::{
 use log::{info, warn};
 
 use super::ipc_frame;
-use crate::keymap_core::mapping_cache::NativeKey;
+use crate::{
+    keymap_core::mapping_cache::NativeKey, platform::endpoint::unix::peer_uid,
+};
 
 /// Path of the virtkbdd IPC socket.
 const SOCKET_PATH: &str = "/var/run/virtkbdd/keymapperd.sock";
-
-/// The macOS `struct xid` exchanged with `getpeereid(2)`.
-///
-/// macOS 27 changed the prototype from `(int, struct xid *)` to
-/// `(int, uid_t *, gid_t *)`. Passing the first and third fields of this
-/// struct as the two out-pointers is correct under both ABIs: the classic
-/// form writes all three fields through the first pointer, while the new
-/// form writes the euid and the gid to offsets 0 and 8. Only offset 0 is
-/// read back, so the call stays within the struct on every release.
-///
-/// (Same layout trick as the virtkbdd IPC server's `peer_uid` and the
-/// control socket's `peer_uid_macos`.)
-#[repr(C)]
-struct Xid {
-    xi_uid: libc::uid_t,
-    xi_euid: libc::uid_t,
-    xi_gid: libc::gid_t,
-}
 
 /// Bounded channel capacity, in batches.  The tap callback never blocks: when
 /// the channel is full a batch is dropped and counted.
@@ -73,35 +57,27 @@ const WRITE_TIMEOUT: Duration = Duration::from_millis(15_000);
 /// batches are written promptly instead of waiting for the next batch.
 const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Verify that the connected virtkbdd server is running as root.
+/// Verify that the connected virtkbdd server is genuinely root.
 ///
-/// virtkbdd always runs as root, so the peer uid must be 0. This provides
-/// mutual authentication: the server verifies the client's uid via
-/// `getpeereid`, and the client verifies the server's uid here. If the socket
-/// path is compromised (e.g., an attacker places a socket at the same path),
-/// the uid check fails and the connection is dropped.
+/// virtkbdd always runs as true root, so both its real (audit) and effective
+/// uid must be 0. This is the client-side mirror of the control-socket check in
+/// [`crate::platform::endpoint::unix`]: on macOs 27 `getpeereid(2)` reports only
+/// the effective uid, so a setuid-root squatter placed at the socket path would
+/// pass an euid-only gate. The audit token exposes both identities, so the root
+/// branch requires `real_uid == 0 && effective_uid == 0` (R3-14). If the path is
+/// compromised the check fails and the connection — and therefore keystroke
+/// emission — is dropped.
 fn verify_server_uid(stream: &UnixStream) -> Result<(), String> {
-    let mut xid = Xid {
-        xi_uid: 0,
-        xi_euid: 0,
-        xi_gid: 0,
-    };
-    let status = unsafe {
-        libc::getpeereid(stream.as_raw_fd(), &mut xid.xi_uid, &mut xid.xi_gid)
-    };
-    if status != 0 {
-        return Err(format!(
-            "getpeereid: {}",
-            std::io::Error::last_os_error()
-        ));
+    let creds = peer_uid::peer_creds(stream)?;
+    if creds.real_uid == 0 && creds.effective_uid == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "virtkbdd server is not root (real {}, effective {}); refusing to
+             emit keystrokes",
+            creds.real_uid, creds.effective_uid
+        ))
     }
-    if xid.xi_uid != 0 {
-        return Err(format!(
-            "server uid is {}, expected root (0)",
-            xid.xi_uid
-        ));
-    }
-    Ok(())
 }
 
 /// The keymapperd-side IPC client.
