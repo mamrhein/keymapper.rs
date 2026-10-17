@@ -241,34 +241,64 @@ fn wide_eq(a: &[u16], b: &[u16]) -> bool {
     a[..a_len] == b[..b_len]
 }
 
+/// Resolve the absolute path to the daemon executable, rooted in the same
+/// directory as the running CLI binary.
+///
+/// Passing a bare name to `CreateProcessW` would make Windows search its
+/// standard search order (current directory first), allowing a trojan
+/// `keymapperd.exe` in the CWD to run with the CLI's privileges (R3-6).
+/// Pinning the path to the CLI's own directory removes the search entirely.
+fn daemon_exe_path() -> Result<Vec<u16>, String> {
+    let exe = std::env::current_exe().map_err(|e| {
+        format!("cannot determine current executable path: {e}")
+    })?;
+    let exe_dir = exe
+        .parent()
+        .ok_or("current executable has no parent directory")?;
+    let daemon_path = exe_dir.join(format!("{}.exe", DAEMON_NAME));
+    Ok(to_wide(&daemon_path.to_string_lossy()))
+}
+
 /// Spawn the daemon as a background process without creating a console window.
 ///
 /// Uses `CreateProcessW` directly instead of going through `cmd.exe`, avoiding
-/// any command injection surface from shell interpretation.
+/// any command injection surface from shell interpretation. The executable
+/// path is rooted in the CLI's own directory (see [`daemon_exe_path`]) rather
+/// than a bare name, so Windows' standard search order — which starts with the
+/// current directory — cannot be abused to load a trojan `keymapperd.exe`
+/// (R3-6).
 fn spawn_daemon() -> Result<(), String> {
-    // Pin the wide command string so the reference outlives the unsafe block.
-    let cmd_wide = to_wide(DAEMON_NAME);
+    // The full path to keymapperd.exe in the CLI's own directory. Pinning the
+    // path removes the search-order attack surface entirely.
+    // `exe_wide` is consumed by `CreateProcessW` as a mutable pointer (the
+    // API contract reads from but may not write to `lpApplicationName`,
+    // though the FFI type is `*mut`). Both buffers must be mutable.
+    let mut exe_wide = daemon_exe_path()?;
+    // The command-line buffer must be mutable: `CreateProcessW` may modify it
+    // in place (the first whitespace-delimited token is treated as the module
+    // name when `lpApplicationName` is null; here we provide it separately but
+    // still pass a mutable buffer per the API contract).
+    let mut cmd_wide = exe_wide.clone();
     let mut si: STARTUPINFOW = unsafe { std::mem::zeroed() };
     si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
 
     // CREATE_NO_WINDOW ensures no console window is created for console
-    // applications. The lpApplicationName parameter is null so the full
-    // executable name (including path lookup) is parsed from lpCommandLine.
+    // applications. `lpApplicationName` carries the rooted full path so
+    // Windows never searches; the command-line buffer is mutable per the
+    // API contract.
     let result = unsafe {
         CreateProcessW(
-            std::ptr::null_mut(), /* lpApplicationName: parse from command
-                                   * line */
-            cmd_wide.as_ptr() as *mut u16, /* lpCommandLine: mutable per
-                                            * API contract */
-            std::ptr::null_mut(), // lpProcessAttributes
-            std::ptr::null_mut(), // lpThreadAttributes
-            0,                    // bInheritHandles
-            CREATE_NO_WINDOW,     // dwCreationFlags: no console window
-            std::ptr::null_mut(), // lpEnvironment
-            std::ptr::null_mut(), // lpCurrentDirectory
-            &si as *const _ as *mut STARTUPINFOW, /* lpStartupInfo: mutable
-                                   * per API contract */
+            exe_wide.as_mut_ptr(), // lpApplicationName: rooted full path
+            cmd_wide.as_mut_ptr(), // lpCommandLine: mutable per API contract
+            std::ptr::null_mut(),  // lpProcessAttributes
+            std::ptr::null_mut(),  // lpThreadAttributes
+            0,                     // bInheritHandles
+            CREATE_NO_WINDOW,      // dwCreationFlags: no console window
+            std::ptr::null_mut(),  // lpEnvironment
+            std::ptr::null_mut(),  // lpCurrentDirectory
+            &mut si,               /* lpStartupInfo: mutable per API
+                                    * contract */
             &mut pi,
         )
     };

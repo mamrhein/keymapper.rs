@@ -70,11 +70,14 @@ use windows::{
             PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser,
         },
         Storage::FileSystem::{
-            CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
-            FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING,
-            PIPE_ACCESS_DUPLEX, ReadFile, WRITE_DAC, WriteFile,
+            CreateFileW, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE,
+            GetFileAttributesW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
+            WRITE_DAC, WriteFile,
         },
         System::{
+            Console::{CTRL_CLOSE_EVENT, SetConsoleCtrlHandler},
             IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Pipes::{
                 ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
@@ -92,6 +95,13 @@ use windows::{
 
 use super::{ConnectionHandler, Endpoint, IoStream, RateLimiter};
 use crate::platform::windows::local_app_data_dir;
+
+/// A publish-file path retained for best-effort cleanup on graceful shutdown.
+/// `SetConsoleCtrlHandler` cannot capture a closure, so the path is published
+/// here before registration and consulted from the handler on
+/// `CTRL_CLOSE_EVENT`.
+static PUBLISH_PATH_FOR_CLEANUP: std::sync::OnceLock<PathBuf> =
+    std::sync::OnceLock::new();
 
 /// The control pipe name prefix. The daemon appends a per-run random nonce
 /// (see [`pipe_name`]), so the full name is unpredictable: a same-user
@@ -592,6 +602,48 @@ fn publish_path() -> Option<PathBuf> {
     Some(local_app_data_dir()?.join(PUBLISH_FILE_NAME))
 }
 
+/// Check whether *path* is a reparse point (symlink, junction, mount point).
+///
+/// `GetFileAttributesW` queries the link object itself rather than following
+/// it, so a reparse-point entry at the publish path would redirect our write
+/// to an attacker-chosen target (R3-7). Publication must refuse before
+/// opening.
+fn is_reparse_point(path: &Path) -> bool {
+    let wide = to_wide(&path.to_string_lossy());
+    let attrs = unsafe { GetFileAttributesW(PCWSTR(wide.as_ptr())) };
+    // INVALID_FILE_ATTRIBUTES (0xFFFFFFFF) means the path does not exist yet;
+    // that is fine, there is no reparse point to worry about.
+    if attrs == 0xFFFF_FFFF {
+        return false;
+    }
+    attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+}
+
+/// Best-effort removal of the publish file on graceful shutdown.
+///
+/// Registered via `SetConsoleCtrlHandler` so the file is cleaned up when the
+/// console session ends (`CTRL_CLOSE_EVENT`). `TerminateProcess` cannot be
+/// intercepted, so this is best-effort; stale files from a hard kill are still
+/// handled at startup by the delete-then-`CREATE_NEW` pattern in
+/// [`publish_name`].
+extern "system" fn cleanup_publish_file(ctrl_type: u32) -> BOOL {
+    if ctrl_type == CTRL_CLOSE_EVENT {
+        if let Some(path) = PUBLISH_PATH_FOR_CLEANUP.get() {
+            let _ = fs_err::remove_file(path);
+        }
+    }
+    BOOL::from(false)
+}
+
+/// Register the publish-file path for best-effort cleanup on graceful
+/// shutdown.
+fn register_shutdown_cleanup(path: &Path) {
+    if PUBLISH_PATH_FOR_CLEANUP.set(path.to_path_buf()).is_ok() {
+        let _ =
+            unsafe { SetConsoleCtrlHandler(Some(cleanup_publish_file), true) };
+    }
+}
+
 /// Publish *name* (the pipe the daemon is serving) at *path*.
 ///
 /// The file is hardened with the same owner-only DACL as the pipe *before*
@@ -600,6 +652,15 @@ fn publish_path() -> Option<PathBuf> {
 /// (fail closed). Publication runs only after the pipe is live with its
 /// DACL applied, so a readable publish file always names a genuine
 /// endpoint.
+///
+/// Security hardening (R3-7):
+/// - Reject the path if it is a reparse point (symlink/junction), which an
+///   attacker could plant to redirect the write.
+/// - Delete any stale regular file first, then create exclusively
+///   (`CREATE_NEW` via `create_new(true)`) so a race-created file is rejected
+///   at open time rather than silently truncated.
+/// - Open with `FILE_FLAG_OPEN_REPARSE_POINT` so a reparse point that appears
+///   in the window between the check and the open is not followed.
 fn publish_name(path: &Path, name: &str) -> Result<(), String> {
     let Some(sid) = current_user_sid() else {
         return Err("could not resolve the current user's SID".to_string());
@@ -608,14 +669,33 @@ fn publish_name(path: &Path, name: &str) -> Result<(), String> {
         fs_err::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
+    // Refuse reparse points: a symlink or junction at the publish path would
+    // redirect the write to an attacker-chosen target, leaking the pipe name
+    // or corrupting a sensitive file.
+    if is_reparse_point(path) {
+        return Err(format!(
+            "refusing to publish over a reparse point at {}",
+            path.display()
+        ));
+    }
+    // Delete any stale file left by a previous (crashed) daemon run. The
+    // subsequent `create_new` ensures the open is exclusive: if something
+    // reappears at the path in the race window, creation fails rather than
+    // silently truncating a file an attacker placed there.
+    let _ = fs_err::remove_file(path);
     // The DACL is applied to this handle right after creation, so it must
     // carry `WRITE_DAC`; the plain write access `fs_err` requests by default
     // does not include it and the descriptor application would fail with
     // `ERROR_ACCESS_DENIED`. The generic-all mask already implies
     // `WRITE_DAC`; the flag is set explicitly for clarity.
+    // `FILE_FLAG_OPEN_REPARSE_POINT` disables reparse-point following so
+    // an attacker-planted link is opened (and then rejected by the
+    // reparse-point check) instead of traversed.
     let mut opts = fs_err::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     opts.options_mut().access_mode(GENERIC_ALL.0 | WRITE_DAC.0);
+    opts.options_mut()
+        .attributes(FILE_FLAG_OPEN_REPARSE_POINT.0);
     let mut file = opts
         .open(path)
         .map_err(|e| format!("cannot create {}: {e}", path.display()))?;
@@ -632,7 +712,10 @@ fn publish_name(path: &Path, name: &str) -> Result<(), String> {
         ));
     }
     file.write_all(name.as_bytes())
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    // Register the path for best-effort cleanup on graceful shutdown.
+    register_shutdown_cleanup(path);
+    Ok(())
 }
 
 /// Read the pipe name published at *path*.
@@ -1301,8 +1384,7 @@ mod tests {
     fn stale_publish_file_reports_no_daemon() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(PUBLISH_FILE_NAME);
-        let stale =
-            format!("{}{}", PIPE_PREFIX, "0".repeat(NONCE_HEX_LEN));
+        let stale = format!("{}{}", PIPE_PREFIX, "0".repeat(NONCE_HEX_LEN));
         fs_err::write(&path, &stale).unwrap();
         let name =
             resolve_published_name(&path).expect("the name must resolve");
@@ -1370,5 +1452,71 @@ mod tests {
             <WindowsEndpoint as Endpoint>::connect_error(&no_endpoint_error())
                 .contains("no daemon is running")
         );
+    }
+
+    /// `is_reparse_point` returns false for a non-existent path and a regular
+    /// file, and true for a symlink (R3-7).
+    #[test]
+    fn is_reparse_point_detects_links() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Non-existent path: no reparse point.
+        let missing = dir.path().join("nope");
+        assert!(!is_reparse_point(&missing));
+
+        // Regular file: no reparse point.
+        let regular = dir.path().join("regular.txt");
+        fs_err::write(&regular, "hello").unwrap();
+        assert!(!is_reparse_point(&regular));
+
+        // Symlink: a reparse point. Skip when symlinks are unavailable (no
+        // developer mode, no admin privileges).
+        let link = dir.path().join("link.txt");
+        if std::os::windows::fs::symlink_file(&regular, &link).is_err() {
+            eprintln!(
+                "skipping symlink assertion in \
+                 is_reparse_point_detects_links:
+                cannot create symlinks in this environment"
+            );
+            return;
+        }
+        assert!(is_reparse_point(&link));
+    }
+
+    /// `publish_name` replaces a stale regular file rather than failing or
+    /// following a link (R3-7 delete-then-CREATE_NEW).
+    #[test]
+    fn publish_name_replaces_stale_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PUBLISH_FILE_NAME);
+        // Plant a stale file with garbage content from a previous run.
+        fs_err::write(&path, "garbage").unwrap();
+        let name = pipe_name().expect("the system PRNG failed");
+        publish_name(&path, &name)
+            .expect("publishing over a stale file must succeed");
+        let resolved =
+            resolve_published_name(&path).expect("discovery failed");
+        assert_eq!(resolved, name);
+    }
+
+    #[test]
+    fn publish_name_rejects_reparse_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        fs_err::write(&target, "inside-base").unwrap();
+        let path = dir.path().join(PUBLISH_FILE_NAME);
+        if std::os::windows::fs::symlink_file(&target, &path).is_err() {
+            eprintln!(
+                "skipping reparse-point test: cannot create symlinks in
+                this environment"
+            );
+            return;
+        }
+        let name = pipe_name().expect("the system PRNG failed");
+        let err = publish_name(&path, &name)
+            .expect_err("publishing over a symlink must fail");
+        assert!(err.contains("reparse point"), "unexpected error: {err}");
+        // The symlink must still exist — we refuse, not delete.
+        assert!(path.exists());
     }
 }
