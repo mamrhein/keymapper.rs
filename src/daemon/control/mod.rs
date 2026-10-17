@@ -43,8 +43,9 @@
 //!
 //! This module is the platform-agnostic half of the control path: the framed
 //! protocol and command dispatch. The OS-specific transport — the unix socket
-//! and its `SO_PEERCRED`/`getpeereid` peer check, and the Windows named pipe
-//! and its ACL machinery — lives in [`crate::platform::endpoint`] behind the
+//! and its `SO_PEERCRED`/audit-token (`LOCAL_PEERTOKEN`) peer check, and the
+//! Windows named pipe and its ACL machinery — lives in
+//! [`crate::platform::endpoint`] behind the
 //! [`Endpoint`](crate::platform::endpoint::Endpoint) trait, which this module
 //! consumes. [`start`] hands a [`serve_connection`] callback to the transport,
 //! so the dependency arrow stays `daemon -> platform`: the transport runs the

@@ -873,8 +873,8 @@ fn create_injector()
 -> Result<Option<Box<dyn KeyInjector + Send>>, InjectorError> {
     #[cfg(target_os = "macos")]
     {
-        use test_util::key_injector::MacOSInjector;
-        let injector = MacOSInjector::new()?;
+        use test_util::key_injector::MacOsInjector;
+        let injector = MacOsInjector::new()?;
         Ok(injector.map(|i| Box::new(i) as Box<dyn KeyInjector + Send>))
     }
     #[cfg(target_os = "linux")]

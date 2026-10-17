@@ -118,7 +118,7 @@ pub trait KeyInjector {
 mod macos;
 
 #[cfg(target_os = "macos")]
-pub use macos::{MacOSInjector, is_injectable};
+pub use macos::{MacOsInjector, is_injectable};
 
 #[cfg(target_os = "linux")]
 mod linux;

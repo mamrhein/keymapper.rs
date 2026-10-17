@@ -29,7 +29,8 @@
 //! Auth is the endpoint itself, so it is the transport's responsibility: the
 //! unix socket is created owner-only (`0600`, under a tightened umask) and its
 //! parent directory validated, and every accepted peer is checked against the
-//! kernel-reported uid (`SO_PEERCRED` on Linux, `getpeereid` on macOS); the
+//! kernel-reported uid (`SO_PEERCRED` on Linux, the audit token via
+//! `LOCAL_PEERTOKEN` on macOS); the
 //! Windows named pipe carries an owner-only DACL. Reaching the endpoint is
 //! already proof of ownership.
 

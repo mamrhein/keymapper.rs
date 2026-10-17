@@ -384,3 +384,11 @@ sudo usermod -aG input $USER
 | Linux    | `evdev` device grab + `uinput` virtual keyboard                                                                                                |
 | macOS    | `CGEventTap` for input capture (keymapperd), Karabiner DriverKit virtual HID driver for event emission (virtkbdd)                              |
 | Windows  | Low-level keyboard hook (`WH_KEYBOARD_LL`) for capture, `SendInput` for emission (see [windows-architecture.md](docs/windows-architecture.md)) |
+
+## Security
+
+**Control endpoint:** the daemon's runtime control socket (unix: `0600` under a tightened umask in an owner-validated directory; Windows: per-run CSPRNG name with an owner-only DACL) is the authentication boundary. Kernel-reported peer credentials (`SO_PEERCRED` on Linux, the audit token via `LOCAL_PEERTOKEN` on macOS) are checked on every connection and cannot be forged.
+
+**macOS virtkbdd IPC:** the root-owned `virtkbdd` daemon emits mapped keys through the Karabiner DriverKit virtual HID keyboard, which the OS treats as physical input. It accepts IPC connections only from the current console user (verified via the audit token, not `getpeereid(2)`, so a `setuid`-root squatter cannot pass an euid-only gate). Per-uid connection rate limiting and per-connection frame-rate limiting prevent flooding of the emit path. The connecting process's PID and executable path are logged for operational visibility.
+
+>**Residual risk (macOS, no code signing):** without code-signing enforcement, the virtkbdd IPC server cannot cryptographically verify that a connecting process is genuinely `keymapperd` versus any other same-uid binary. Rate limiting and PID/path logging raise the cost of abuse but do not eliminate the gap — any process running as the console user can still open a connection and emit hardware-level keystrokes.

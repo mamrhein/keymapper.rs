@@ -17,15 +17,15 @@
 //! The stable public surface that the code above may depend on is, per
 //! platform:
 //!
-//! - every platform: `list_keyboards`, `start_mapping`, `config_dir` (the
+//! - Every platform: `list_keyboards`, `start_mapping`, `config_dir` (the
 //!   per-user configuration base directory, consumed by
 //!   `common::config_path`), and `keycode_to_hid_usage` (the native-keycode to
 //!   `HidUsage` translation used by the `keys probe` CLI command)
-//! - linux: additionally `keycode` (the canonical `HidUsage` and evdev-keycode
+//! - Linux: additionally `keycode` (the canonical `HidUsage` and evdev-keycode
 //!   tables) and `VIRTUAL_KEYBOARD_NAME`
-//! - macos: additionally `start_virtkbd` (the root virtkbdd daemon entry
+//! - macOS: additionally `start_virtkbd` (the root virtkbdd daemon entry
 //!   point)
-//! - windows: (no platform-specific production export beyond the common set)
+//! - Windows: (no platform-specific production export beyond the common set)
 //!
 //! Test-harness-only exports are gated behind the crate's `test-util` feature
 //! (enabled by the `test-util` dev-dependency crate and, transitively, by the

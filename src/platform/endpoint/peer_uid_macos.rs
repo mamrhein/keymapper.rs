@@ -7,7 +7,7 @@
 // $Source$
 // $Revision$
 
-//! Peer-credential lookup for the macOs control socket and the virtkbdd IPC
+//! Peer-credential lookup for the macOS control socket and the virtkbdd IPC
 //! client.
 
 use std::{
@@ -15,13 +15,13 @@ use std::{
     os::unix::{io::AsRawFd, net::UnixStream},
 };
 
-/// The audit token macOs attaches to every unix-socket peer.
+/// The audit token macOS attaches to every unix-socket peer.
 ///
 /// Retrieved with `getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN)`; its field layout
 /// is the stable kernel ABI documented by `audit_token_to_au32(3)` (the public
-/// libbsm helpers are not exported from any linkable dylib on macOs 27, so the
+/// libbsm helpers are not exported from any linkable dylib on macOS 27, so the
 /// layout is read directly here). Field order, confirmed against a live
-/// `socketpair` on macOs 27:
+/// `socketpair` on macOS 27:
 ///
 /// ```text
 /// [0] auid   (audit / real login uid — immutable across setuid)
@@ -29,7 +29,7 @@ use std::{
 /// [2] egid
 /// [3] ruid
 /// [4] rgid
-/// [5] pid
+/// [5] pid   (peer process id at connection time)
 /// [6] asid  (audit session id)
 /// [7] tid   (terminal/process-id version)
 /// ```
@@ -48,30 +48,40 @@ impl AuditToken {
     fn effective_uid(&self) -> libc::uid_t {
         self.0[1] as libc::uid_t
     }
+    /// The peer's process ID at connection time.
+    fn pid(&self) -> libc::pid_t {
+        self.0[5] as libc::pid_t
+    }
 }
 
 /// Kernel-reported credentials of a connected unix peer.
 ///
-/// On macOs both fields come from the peer's audit token (via
+/// On macOS both fields come from the peer's audit token (via
 /// `LOCAL_PEERTOKEN`), which is authoritative and cannot be forged by the
 /// peer. `real_uid` is the audit user ID: for a normal process it equals the
 /// real uid, and because it is frozen at login it stays non-zero for a process
 /// that merely escalated to root via `setuid` — so the `real_uid == 0 &&
-/// effective_uid == 0` policy correctly rejects such peers (R3-14).
+/// effective_uid == 0` policy correctly rejects such peers.
+///
+/// `peer_pid` is the process ID of the connecting peer at connection time,
+/// extracted from the audit token. It is informational only (used for logging
+/// and `proc_pidpath` resolution in the virtkbdd IPC server) — it is not a
+/// trust anchor, since PIDs are recycled.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PeerCreds {
     pub real_uid: libc::uid_t,
     pub effective_uid: libc::uid_t,
+    pub peer_pid: Option<libc::pid_t>,
 }
 
 /// Fetch the peer's credentials from its audit token.
 ///
-/// `getpeereid(2)` on macOs 27+ returns only the *effective* uid (written to
+/// `getpeereid(2)` on macOS 27+ returns only the *effective* uid (written to
 /// offset 0), so a setuid-root peer — effective uid 0 but a non-zero
 /// real/audit identity — would be admitted through the old `peer == 0` branch.
 /// The audit token exposes both identities, which
-/// `authorize_peer`/`verify_server_uid` require to be consistent (R3-14). A
-/// lookup failure is propagated so the caller fails closed: a peer whose
+/// `authorize_peer`/`verify_server_uid` require to be consistent. A lookup
+/// failure is propagated so the caller fails closed: a peer whose
 /// credentials cannot be established is never admitted.
 pub(crate) fn peer_creds(stream: &UnixStream) -> Result<PeerCreds, String> {
     let mut token = AuditToken([0; 8]);
@@ -101,7 +111,33 @@ pub(crate) fn peer_creds(stream: &UnixStream) -> Result<PeerCreds, String> {
     Ok(PeerCreds {
         real_uid: token.real_uid(),
         effective_uid: token.effective_uid(),
+        peer_pid: Some(token.pid()),
     })
+}
+
+/// Resolve the executable path of the process identified by *pid*.
+///
+/// Uses `proc_pidpath(2)` to translate a kernel-reported peer PID into its
+/// executable path. This is informational only — it is used by the virtkbdd
+/// IPC server to log which binary connected, providing operators visibility
+/// into connection attempts without relying on code signing (R3-1).
+///
+/// Returns `None` when the PID no longer exists or `proc_pidpath` fails.
+/// The path is not a trust anchor: PIDs are recycled, so a stale PID could
+/// resolve to an unrelated binary.
+pub(crate) fn peer_proc_path(pid: libc::pid_t) -> Option<String> {
+    let mut buf = [0u8; 4096];
+    let len = unsafe {
+        libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32)
+    };
+    if len <= 0 {
+        return None;
+    }
+    // `proc_pidpath` returns the byte count excluding the null terminator; the
+    // buffer contains a NUL-terminated C string starting at offset 0.
+    std::str::from_utf8(&buf[..len as usize])
+        .ok()
+        .map(String::from)
 }
 
 #[cfg(test)]
@@ -110,9 +146,9 @@ mod tests {
 
     /// The audit-token reader must yield this process's own identity when
     /// queried over a `socketpair` (the peer is the same process). This is the
-    /// macOs-specific half of `authorize_peer_checks_peer_credentials`: it
+    /// macOS-specific half of `authorize_peer_checks_peer_credentials`: it
     /// pins the FFI field layout to the real kernel value so a future
-    /// macOs release that shifts the layout would surface as a failing
+    /// macOS release that shifts the layout would surface as a failing
     /// assertion here rather than a silent security regression.
     #[test]
     fn peer_creds_reports_self_over_socketpair() {
@@ -128,5 +164,22 @@ mod tests {
             creds.effective_uid, uid,
             "effective uid should match getuid"
         );
+        // The PID field is populated from the audit token and should match
+        // this process's own pid.
+        assert_eq!(
+            creds.peer_pid,
+            Some(unsafe { libc::getpid() }),
+            "peer pid should match getpid"
+        );
+    }
+
+    /// `peer_proc_path` resolves this process's own executable path.
+    #[test]
+    fn peer_proc_path_resolves_self() {
+        let pid = unsafe { libc::getpid() };
+        let path = peer_proc_path(pid);
+        assert!(path.is_some(), "proc_pidpath should succeed for self");
+        let path = path.unwrap();
+        assert!(path.starts_with('/'), "path should be absolute: {path}");
     }
 }

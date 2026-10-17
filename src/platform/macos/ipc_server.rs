@@ -10,13 +10,18 @@
 //! The virtkbdd side of the keymapperd IPC: a root-owned socket server.
 //!
 //! virtkbdd runs as root and owns the DriverKit virtual keyboard.  It listens
-//! on a UNIX stream socket, verifies each peer with `getpeereid(2)` (rejecting
-//! any uid that is not the console user), and emits each decoded batch through
-//! the virtual keyboard.  The console-user check is re-applied for the life of
-//! each connection, so a connection that outlives a fast user switch cannot
-//! inject keystrokes into the new console user's session.  One connection at a
-//! time: one console user maps to one keymapperd, so a second connection
-//! waits.
+//! on a UNIX stream socket, verifies each peer with the audit token (via
+//! `LOCAL_PEERTOKEN`, which exposes both the real/audit uid and the effective
+//! uid so a `setuid`-root squatter cannot pass an euid-only gate), and
+//! emits each decoded batch through the virtual keyboard.  The console-user
+//! check is re-applied for the life of each connection, so a connection that
+//! outlives a fast user switch cannot inject keystrokes into the new console
+//! user's session.  One connection at a time: one console user maps to one
+//! keymapperd, so a second connection waits.
+//!
+//! Peer identity is uid-based (audit token), not code-signing based — the
+//! connecting process's PID and executable path are logged for operational
+//! visibility but do not by themselves prevent same-uid squatting.
 
 use std::{
     io::{BufReader, ErrorKind},
@@ -29,7 +34,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use log::{error, info, warn};
@@ -38,13 +43,33 @@ use super::{
     config_dir::console_uid, emit::emit_native_key, ipc_frame,
     karabiner_client::KarabinerClient,
 };
-use crate::{common::frame, keymap_core::mapping_cache::NativeKey};
+use crate::{
+    common::frame,
+    keymap_core::mapping_cache::NativeKey,
+    platform::endpoint::{RateLimiter, unix::peer_uid},
+};
 
 /// Directory holding the virtkbdd IPC socket.
 const SOCKET_DIR: &str = "/var/run/virtkbdd";
 
 /// Name of the IPC socket within [`SOCKET_DIR`].
 const SOCKET_NAME: &str = "keymapperd.sock";
+
+/// Sliding-window size for per-uid connection rate limiting at accept time.
+const ACCEPT_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Maximum accepted connections per uid within [`ACCEPT_RATE_WINDOW`].
+const ACCEPT_RATE_THRESHOLD: usize = 10;
+
+/// Sliding-window size for per-connection frame rate limiting in the emit
+/// path.
+const FRAME_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Maximum frames accepted per connection within [`FRAME_RATE_WINDOW`].
+///
+/// Bounds how fast a single peer can flood the emit loop; at 1000 frames/s a
+/// squatter cannot saturate the CPU or the virtual keyboard any faster.
+const FRAME_RATE_THRESHOLD: usize = 1000;
 
 /// Poll timeout for the listener, so shutdown signals are observed promptly.
 const POLL_TIMEOUT_MS: i32 = 500;
@@ -63,9 +88,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Creates the socket and keeps it owned by the current console user, then
 /// loops: poll the listener (so signals are observed), accept, verify the
-/// peer, and emit each decoded batch while re-verifying that the peer is
-/// still the console user.  On a connection close it returns to accept
-/// (keymapperd reconnects on its own).
+/// peer via its audit token, and emit each decoded batch while re-verifying
+/// that the peer is still the console user.  On a connection close it returns
+/// to accept (keymapperd reconnects on its own).
 ///
 /// virtkbdd starts at boot, before any user logs in, so the console user —
 /// and thus the socket's owner — changes over the daemon's lifetime.  The
@@ -90,7 +115,7 @@ pub fn run_server(
     set_mode(&socket_path, 0o600);
 
     // Defense in depth: the socket is owned by the console user, so only that
-    // user can connect.  The `getpeereid` check on accept is authoritative
+    // user can connect.  The audit-token check on accept is authoritative
     // (file permissions can be raced).  `socket_owner` tracks the uid the
     // socket was last chowned to so the accept loop can re-apply ownership
     // when the console user changes (login, logout, fast user switching).
@@ -98,6 +123,11 @@ pub fn run_server(
     apply_socket_ownership(&socket_path, &mut socket_owner);
 
     info!("Service virtkbdd listening on {:?}", socket_path);
+
+    // Per-uid connection rate limiter: a single process cannot flood the
+    // accept loop with connections.
+    let mut accept_rate_limiter =
+        RateLimiter::new(ACCEPT_RATE_WINDOW, ACCEPT_RATE_THRESHOLD);
 
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -117,40 +147,77 @@ pub fn run_server(
             continue;
         };
 
-        // Verify the peer is the console user; reject (and drop) otherwise.
-        match (peer_uid(&stream), console_uid()) {
-            (Some(peer), Some(console)) if peer == console => {
-                info!("Service keymapperd connected (uid {peer})");
-                // Bound every read so a stalled peer cannot wedge the
-                // accept loop, and so `handle_connection` wakes
-                // periodically to re-check the console user even while
-                // idle.
-                if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
-                    warn!(
-                        "Failed to set the IPC read timeout on {}: {}; \
-                         rejecting connection",
-                        socket_path.display(),
-                        std::io::Error::last_os_error()
-                    );
-                    continue;
-                }
-                handle_connection(stream, peer, &|keys| {
-                    for key in keys {
-                        emit_native_key(conn, key);
-                    }
-                });
-            }
-            (Some(peer), Some(console)) => {
+        // Fetch the peer's credentials via the audit token (LOCAL_PEERTOKEN),
+        // not `getpeereid(2)`, so a setuid-root squatter cannot pass an
+        // euid-only gate. The audit token also yields the peer PID for
+        // logging.
+        let creds = match peer_uid::peer_creds(&stream) {
+            Ok(creds) => creds,
+            Err(e) => {
                 warn!(
-                    "Rejecting connection from uid {peer} (console uid is \
-                     {console})"
+                    "Rejecting connection: peer credential lookup failed \
+                     ({e})"
                 );
+                continue;
             }
-            _ => {
+        };
+        let peer_uid = creds.real_uid;
+        let console = match console_uid() {
+            Some(c) => c,
+            None => {
                 // No console user (headless): reject to be safe.
                 warn!("Rejecting connection: no console user");
+                continue;
             }
+        };
+
+        // Per-uid connection rate limit: reject excess connections from the
+        // same uid so a squatter cannot wedge the single-connection accept
+        // loop.
+        if !accept_rate_limiter.check_and_record(peer_uid as u32) {
+            warn!("Connection rate limit exceeded for uid {peer_uid}");
+            continue;
         }
+
+        if peer_uid != console {
+            warn!(
+                "Rejecting connection from uid {peer_uid} (console uid is \
+                 {console})"
+            );
+            continue;
+        }
+
+        // Log the connecting process's PID and executable path for operational
+        // visibility. This does not prevent same-uid squatting, but makes
+        // connection attempts auditable.
+        let pid_str = match creds.peer_pid.and_then(peer_uid::peer_proc_path) {
+            Some(path) => {
+                format!("pid {}, path \"{}\"", creds.peer_pid.unwrap(), path)
+            }
+            None => match creds.peer_pid {
+                Some(pid) => format!("pid {pid}"),
+                None => "no pid available".to_string(),
+            },
+        };
+        info!("Service keymapperd connected (uid {peer_uid}, {pid_str})");
+
+        // Bound every read so a stalled peer cannot wedge the accept loop,
+        // and so `handle_connection` wakes periodically to re-check the
+        // console user even while idle.
+        if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
+            warn!(
+                "Failed to set the IPC read timeout on {}: {}; rejecting \
+                 connection",
+                socket_path.display(),
+                std::io::Error::last_os_error()
+            );
+            continue;
+        }
+        handle_connection(stream, peer_uid, &|keys| {
+            for key in keys {
+                emit_native_key(conn, key);
+            }
+        });
     }
 
     Ok(())
@@ -169,41 +236,6 @@ fn wait_for_peer(listener: &UnixListener) -> bool {
     result > 0
 }
 
-/// The macOS `struct xid` exchanged with `getpeereid(2)`.
-///
-/// macOS 27 changed the prototype from `(int, struct xid *)` to
-/// `(int, uid_t *, gid_t *)`.  Passing the first and third fields of this
-/// struct as the two out-pointers is correct under both ABIs: the classic
-/// form writes all three fields through the first pointer, while the new
-/// form writes the euid and the gid to offsets 0 and 8.  Only offset 0 is
-/// read back, so the call stays within the struct on every release.
-#[repr(C)]
-struct Xid {
-    xi_uid: libc::uid_t,
-    xi_euid: libc::uid_t,
-    xi_gid: libc::gid_t,
-}
-
-/// Return the uid of the connected peer, via `getpeereid(2)`.
-///
-/// Offset 0 of [`Xid`] holds the effective uid on macOS 27+ and the real
-/// uid on earlier releases.  For a normal user process such as keymapperd
-/// the two are equal, and it is the identity that matters here.
-fn peer_uid(stream: &UnixStream) -> Option<libc::uid_t> {
-    let mut xid = Xid {
-        xi_uid: 0,
-        xi_euid: 0,
-        xi_gid: 0,
-    };
-    let status = unsafe {
-        libc::getpeereid(stream.as_raw_fd(), &mut xid.xi_uid, &mut xid.xi_gid)
-    };
-    if status != 0 {
-        return None;
-    }
-    Some(xid.xi_uid)
-}
-
 /// Read frames from a keymapperd connection and emit each batch in order.
 ///
 /// The peer's uid was verified at accept; a fast user switch can change
@@ -214,6 +246,10 @@ fn peer_uid(stream: &UnixStream) -> Option<libc::uid_t> {
 /// dropped, so root never emits the previous user's keystrokes into the
 /// new user's session; keymapperd reconnects on its own and is
 /// re-verified at accept.
+///
+/// A per-connection frame-rate limiter bounds how fast a squatting peer can
+/// flood the emit path. A connection that exceeds the budget is dropped so
+/// keymapperd must reconnect (and re-pass the uid + rate limit at accept).
 fn handle_connection(
     stream: UnixStream,
     peer_uid: libc::uid_t,
@@ -226,6 +262,10 @@ fn handle_connection(
     // resumes on it.
     let mut frame_reader =
         frame::FrameReader::new(&mut reader, ipc_frame::MAX_PAYLOAD_LEN);
+    // Per-connection frame rate limiter: bounds how fast this peer can emit
+    // frames, preventing a squatter from flooding the virtual keyboard.
+    let mut frame_limiter =
+        FrameRateLimiter::new(FRAME_RATE_WINDOW, FRAME_RATE_THRESHOLD);
     loop {
         match ipc_frame::decode_stream(&mut frame_reader) {
             Ok(keys) => {
@@ -233,6 +273,16 @@ fn handle_connection(
                     info!(
                         "Console user changed while uid {peer_uid} was \
                          connected; dropping the connection"
+                    );
+                    break;
+                }
+                // Reject connections that exceed the frame-rate budget. A
+                // malicious peer could otherwise flood the emit loop and
+                // saturate the CPU or the virtual keyboard.
+                if !frame_limiter.check_and_record() {
+                    warn!(
+                        "Frame rate limit exceeded for uid {peer_uid}; \
+                         dropping connection"
                     );
                     break;
                 }
@@ -268,7 +318,7 @@ fn handle_connection(
 /// `last_owner` tracks the uid the socket was last chowned to, so the
 /// (best-effort) `chown`/`chmod` syscalls only run when the console user
 /// actually changes.  A `None` console user (headless) leaves the socket as
-/// is; the `getpeereid` check rejects peers in that case anyway.
+/// is; the audit-token check rejects peers in that case anyway.
 fn apply_socket_ownership(path: &Path, last_owner: &mut Option<libc::uid_t>) {
     let Some(uid) = console_uid() else {
         return;
@@ -282,7 +332,7 @@ fn apply_socket_ownership(path: &Path, last_owner: &mut Option<libc::uid_t>) {
 }
 
 /// `chown` the socket to the console user (group wheel).  Best-effort: a
-/// failure is logged but not fatal, because the `getpeereid` check is the
+/// failure is logged but not fatal, because the audit-token check is the
 /// authoritative gate.
 fn chown_socket(path: &Path, uid: libc::uid_t) {
     let Ok(c_path) =
@@ -316,6 +366,53 @@ fn set_mode(path: &Path, mode: libc::mode_t) {
 }
 
 // ---------------------------------------------------------------------------
+// Frame rate limiter (per-connection)
+// ---------------------------------------------------------------------------
+
+/// A lightweight sliding-window frame-rate limiter for the virtkbdd IPC
+/// server.
+///
+/// Unlike [`RateLimiter`] (which is keyed by uid and tracks multiple peers),
+/// this limiter is per-connection: it bounds how fast a single peer can push
+/// frames through the emit loop.  The connection is single-threaded, so no
+/// synchronization is needed — the limiter is created fresh per accepted
+/// connection and lives on that thread's stack.
+///
+/// Old entries outside the window are pruned on every call, so the `Vec` stays
+/// bounded by the threshold.
+struct FrameRateLimiter {
+    window: Duration,
+    threshold: usize,
+    // Timestamps of frames seen within the current window.  At most
+    // `threshold` entries are ever retained; excess frames are rejected
+    // before being recorded.
+    frames: Vec<Instant>,
+}
+
+impl FrameRateLimiter {
+    fn new(window: Duration, threshold: usize) -> Self {
+        Self {
+            window,
+            threshold,
+            frames: Vec::with_capacity(threshold),
+        }
+    }
+
+    /// Returns `true` if the frame is allowed, `false` if the rate limit has
+    /// been exceeded.
+    fn check_and_record(&mut self) -> bool {
+        let now = Instant::now();
+        let cutoff = now - self.window;
+        self.frames.retain(|&ts| ts >= cutoff);
+        if self.frames.len() >= self.threshold {
+            return false;
+        }
+        self.frames.push(now);
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -325,6 +422,7 @@ mod tests {
         io::{Read as _, Write as _},
         os::unix::net::UnixStream,
         sync::{Arc, Mutex, mpsc},
+        time::Duration,
     };
 
     use super::*;
@@ -416,5 +514,38 @@ mod tests {
         read_until_eof(&mut client);
         done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(*emitted.lock().unwrap(), 0);
+    }
+
+    /// The frame-rate limiter allows frames up to the threshold, then rejects.
+    #[test]
+    fn frame_rate_limiter_allows_then_rejects() {
+        let mut limiter = FrameRateLimiter::new(Duration::from_secs(1), 5);
+        for _ in 0..5 {
+            assert!(
+                limiter.check_and_record(),
+                "frame should be allowed within budget"
+            );
+        }
+        assert!(
+            !limiter.check_and_record(),
+            "frame should be rejected after budget exhausted"
+        );
+    }
+
+    /// Old entries are pruned so the limiter recovers after the window
+    /// elapses.
+    #[test]
+    fn frame_rate_limiter_recovers_after_window() {
+        let mut limiter = FrameRateLimiter::new(Duration::from_millis(50), 3);
+        for _ in 0..3 {
+            assert!(limiter.check_and_record());
+        }
+        assert!(!limiter.check_and_record());
+        // Wait for the window to elapse; the limiter should recover.
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            limiter.check_and_record(),
+            "limiter should recover after window"
+        );
     }
 }

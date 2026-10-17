@@ -61,7 +61,7 @@ const DRAIN_INTERVAL: Duration = Duration::from_millis(50);
 ///
 /// virtkbdd always runs as true root, so both its real (audit) and effective
 /// uid must be 0. This is the client-side mirror of the control-socket check in
-/// [`crate::platform::endpoint::unix`]: on macOs 27 `getpeereid(2)` reports only
+/// [`crate::platform::endpoint::unix`]: `getpeereid(2)` on macOS 27 reports only
 /// the effective uid, so a setuid-root squatter placed at the socket path would
 /// pass an euid-only gate. The audit token exposes both identities, so the root
 /// branch requires `real_uid == 0 && effective_uid == 0` (R3-14). If the path is

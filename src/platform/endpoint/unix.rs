@@ -42,11 +42,11 @@ use log::{debug, info, warn};
 
 use super::{ConnectionHandler, Endpoint, IoStream, RateLimiter};
 
-/// Peer-credential lookup, per OS: `SO_PEERCRED` on Linux, the macOs audit
+/// Peer-credential lookup, per OS: `SO_PEERCRED` on Linux, the macOS audit
 /// token (`LOCAL_PEERTOKEN`) on macOS. Kept in separate files because the
 /// socket option and its struct differ per OS; both yield a `PeerCreds` so the
 /// admit policy in [`authorize_peer`] is identical across unix. Exposed
-/// `pub(crate)` because the macOs virtkbdd IPC client
+/// `pub(crate)` because the macOS virtkbdd IPC client
 /// (`platform::macos::ipc_client`) shares the same lookup for its server-side
 /// root check.
 #[cfg(target_os = "macos")]
@@ -220,7 +220,7 @@ fn serve_with_timeout(
         let Ok(mut stream) = stream else {
             continue;
         };
-        // Authoritative peer check, mirroring the `getpeereid` gate in the
+        // Authoritative peer check, mirroring the audit-token gate in the
         // virtkbdd IPC server: the file mode is the first gate, but kernel
         // credentials are the source of truth, so a permission race (or a
         // mode weakened by an external actor) still cannot admit a foreign
@@ -262,12 +262,12 @@ fn serve_with_timeout(
 /// A peer is admitted only in one of two cases, both of which require the real
 /// and effective uid to *agree* — never across a `setuid` boundary:
 ///
-/// - true root: `real_uid == 0 && effective_uid == 0`. On macOs the real uid
+/// - true root: `real_uid == 0 && effective_uid == 0`. On macOS the real uid
 ///   is the audit user id (`auid`), which is frozen at login and cannot be
 ///   cleared by a `setuid` transition, so a setuid-root attacker (effective
-///   uid 0 but a non-zero audit/real identity) is rejected here (R3-14). On
-///   Linux both fields are equal (`SO_PEERCRED`), so this collapses to the
-///   previous `peer == 0`.
+///   uid 0 but a non-zero audit/real identity) is rejected here. On Linux both
+///   fields are equal (`SO_PEERCRED`), so this collapses to the previous `peer
+///   == 0`.
 /// - same identity: `real_uid == current_uid && effective_uid == current_uid`,
 ///   i.e. an un-privileged process that is neither root nor escalated.
 ///
@@ -277,10 +277,8 @@ fn admit_peer(
     creds: peer_uid::PeerCreds,
     current_uid: libc::uid_t,
 ) -> Option<u32> {
-    if creds.real_uid == 0 && creds.effective_uid == 0 {
-        Some(creds.effective_uid)
-    } else if creds.real_uid == current_uid
-        && creds.effective_uid == current_uid
+    if creds.real_uid == 0 && creds.effective_uid == 0
+        || creds.real_uid == current_uid && creds.effective_uid == current_uid
     {
         Some(creds.effective_uid)
     } else {
@@ -300,7 +298,7 @@ fn admit_peer(
 /// Root is admitted as well: it bypasses file-permission checks anyway, so
 /// refusing it would not confine root but would break `sudo keymapper ...`
 /// against a user-run daemon. A setuid-root peer, however, is *not* root for
-/// these purposes: on macOs `getpeereid(2)` returns only the effective uid, so
+/// these purposes: on macOS `getpeereid(2)` returns only the effective uid, so
 /// the audit token is consulted to require both the real and effective uid to
 /// be 0 (R3-14).
 fn authorize_peer(
@@ -329,7 +327,7 @@ fn connect_at(path: &Path) -> std::io::Result<UnixStream> {
 /// The daemon runs as root (uid 0) or as the current user; both are accepted.
 /// Any other uid means an attacker has squatted the socket path in a writable
 /// directory, so the connection is dropped before any command is exchanged.
-/// The macOs mirror of [`authorize_peer`] applies the same real+effective uid
+/// The macOS mirror of [`authorize_peer`] applies the same real+effective uid
 /// policy (R3-14): a setuid-root squatter reports effective uid 0 but a
 /// non-zero real/audit identity and is refused. *current_uid* is passed
 /// explicitly to keep the check testable without real uid switching.
@@ -584,15 +582,15 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Admit policy — R3-14 (macOs euid-only getpeereid / audit-token real uid)
+    // Admit policy (macOS euid-only getpeereid / audit-token real uid)
     //
     // The kernel-side credential query is exercised above over a live
     // `socketpair`; the *policy* itself cannot be driven by a real setuid-root
     // peer inside the sandbox, so it is unit-tested directly against fixture
     // `PeerCreds` values that stand in for the different credential layouts a
-    // macOs release hands back (the "Xversion fixtures"). These encode the
-    // R3-14 scenario: an attacker whose effective uid is 0 but whose
-    // real/audit identity is not.
+    // macOS release hands back (the "Xversion fixtures"). These encode the
+    // scenario: an attacker whose effective uid is 0 but whose real/audit
+    // identity is not.
     // -----------------------------------------------------------------------
 
     /// The uid the daemon currently runs as; every fixture is interpreted
@@ -606,6 +604,7 @@ mod tests {
         let root = peer_uid::PeerCreds {
             real_uid: 0,
             effective_uid: 0,
+            peer_pid: None,
         };
         assert_eq!(admit_peer(root, DAEMON_UID), Some(0));
     }
@@ -617,6 +616,7 @@ mod tests {
         let peer = peer_uid::PeerCreds {
             real_uid: DAEMON_UID,
             effective_uid: DAEMON_UID,
+            peer_pid: None,
         };
         assert_eq!(admit_peer(peer, DAEMON_UID), Some(DAEMON_UID));
     }
@@ -630,6 +630,7 @@ mod tests {
         let setuid_root = peer_uid::PeerCreds {
             real_uid: DAEMON_UID,
             effective_uid: 0,
+            peer_pid: None,
         };
         assert_eq!(admit_peer(setuid_root, DAEMON_UID), None);
     }
@@ -643,6 +644,7 @@ mod tests {
         let escalated = peer_uid::PeerCreds {
             real_uid: 1000,
             effective_uid: DAEMON_UID,
+            peer_pid: None,
         };
         assert_eq!(admit_peer(escalated, DAEMON_UID), None);
     }
@@ -653,6 +655,7 @@ mod tests {
         let foreign = peer_uid::PeerCreds {
             real_uid: 1000,
             effective_uid: 1000,
+            peer_pid: None,
         };
         assert_eq!(admit_peer(foreign, DAEMON_UID), None);
     }
@@ -665,6 +668,7 @@ mod tests {
         let root = peer_uid::PeerCreds {
             real_uid: 0,
             effective_uid: 0,
+            peer_pid: None,
         };
         assert_eq!(admit_peer(root, 0), Some(0));
     }

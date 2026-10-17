@@ -51,7 +51,7 @@ pub fn is_injectable(usage: HidUsage) -> bool {
 /// keyboard.  Held keys are tracked so that every report is a complete
 /// snapshot of the keyboard state: HID keyboard reports are not deltas, so
 /// a report must carry every key that is currently down.
-pub struct MacOSInjector {
+pub struct MacOsInjector {
     /// The client that owns the injection keyboard.  `None` until
     /// `setup()` succeeds and after `teardown()`.
     client: Option<Arc<KarabinerClient>>,
@@ -60,7 +60,7 @@ pub struct MacOSInjector {
     held: Mutex<HashSet<HidUsage>>,
 }
 
-impl MacOSInjector {
+impl MacOsInjector {
     /// Build the report state for a set of held keys: the modifier byte and
     /// the sorted non-modifier usage ids.
     ///
@@ -120,7 +120,7 @@ impl MacOSInjector {
     }
 }
 
-impl KeyInjector for MacOSInjector {
+impl KeyInjector for MacOsInjector {
     fn new() -> Result<Option<Self>, InjectorError> {
         // The prerequisite is root access to the Karabiner service socket,
         // not Accessibility: the injection keyboard is a DriverKit device,
@@ -170,7 +170,7 @@ impl KeyInjector for MacOSInjector {
     }
 }
 
-impl Drop for MacOSInjector {
+impl Drop for MacOsInjector {
     fn drop(&mut self) {
         self.teardown();
     }
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn injector_new_returns_some_or_permission_error() {
-        let result = MacOSInjector::new();
+        let result = MacOsInjector::new();
         assert!(
             result.is_ok()
                 || matches!(
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn report_for_empty() {
         let held: HashSet<HidUsage> = HashSet::new();
-        let (modifiers, usages) = MacOSInjector::report_for(&held);
+        let (modifiers, usages) = MacOsInjector::report_for(&held);
         assert_eq!(modifiers, 0);
         assert!(usages.is_empty());
     }
@@ -212,7 +212,7 @@ mod tests {
         held.insert(HidUsage::LeftShift);
         held.insert(HidUsage::B);
 
-        let (modifiers, usages) = MacOSInjector::report_for(&held);
+        let (modifiers, usages) = MacOsInjector::report_for(&held);
         // LeftShift is modifier bit 1; B is usage 0x05.
         assert_eq!(modifiers, 1 << 1);
         assert_eq!(usages, vec![0x05]);
@@ -224,7 +224,7 @@ mod tests {
         held.insert(HidUsage::Z); // 0x1D
         held.insert(HidUsage::A); // 0x04
 
-        let (modifiers, usages) = MacOSInjector::report_for(&held);
+        let (modifiers, usages) = MacOsInjector::report_for(&held);
         assert_eq!(modifiers, 0);
         assert_eq!(usages, vec![0x04, 0x1D]);
     }

@@ -57,7 +57,7 @@ CGEvents expose no originating device or source (unlike Windows's `dwExtraInfo` 
 
 keymapperd and virtkbdd communicate over a UNIX stream socket at `/var/run/virtkbdd/keymapperd.sock`. The directory is created with mode 0755; the socket itself is chowned to the console user's UID and has mode 0600.
 
-virtkbdd verifies the peer of every connection with `getpeereid(2)` and accepts only the current console user (re-resolved on each accept, so fast user switching works). It serves one connection at a time; keymapperd reconnects itself if the connection drops.
+virtkbdd verifies the peer of every connection via the audit token (`LOCAL_PEERTOKEN`, which exposes both the real/audit uid and effective uid so a `setuid`-root squatter cannot pass an euid-only gate) and accepts only the current console user (re-resolved on each accept, so fast user switching works). It serves one connection at a time; keymapperd reconnects itself if the connection drops. Per-uid connection rate limiting and per-connection frame-rate limiting are applied to prevent flooding.
 
 Framing: `[u8 version = 1][u32 LE payload length][payload]`, where the payload is `[u32 LE key count][key count × (u8 modifiers, u32 LE HID code)]` with `HID code = (usage page << 16) | usage ID`. A frame carries at most 64 keys, and payloads larger than 4096 bytes are rejected.
 

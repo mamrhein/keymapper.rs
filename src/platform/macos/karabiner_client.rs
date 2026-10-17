@@ -156,7 +156,7 @@ const CONSUMER_REPORT_ID: u8 = 2;
 
 /// The macOS `struct xid` exchanged with `getpeereid(2)`.
 ///
-/// macos 27 changed the prototype from `(int, struct xid *)` to
+/// macOS 27 changed the prototype from `(int, struct xid *)` to
 /// `(int, uid_t *, gid_t *)`.  Passing the first and third fields of this
 /// struct as the two out-pointers is correct under both ABIs: the classic
 /// form writes all three fields through the first pointer, while the new

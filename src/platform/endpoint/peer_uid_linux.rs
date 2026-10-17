@@ -18,14 +18,19 @@ use std::{
 ///
 /// On Linux `SO_PEERCRED` exposes a single uid (the effective uid); the real
 /// and effective identities are therefore equal, so both `PeerCreds` fields
-/// are set to `cred.uid`. This keeps the macOs-style
+/// are set to `cred.uid`. This keeps the macOS-style
 /// `real_uid == 0 && effective_uid == 0` root policy identical to the previous
 /// `peer == 0` check on Linux (no behavior change), while unifying the type
 /// consumed by `authorize_peer`/`verify_server_uid` across the two unix OSes.
+///
+/// `peer_pid` is the process ID of the connecting peer at connection time,
+/// extracted from `SO_PEERCRED`. Like the macOS counterpart it is
+/// informational only and not a trust anchor.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PeerCreds {
     pub real_uid: libc::uid_t,
     pub effective_uid: libc::uid_t,
+    pub peer_pid: Option<libc::pid_t>,
 }
 
 /// Fetch the peer's credentials via `SO_PEERCRED`.
@@ -67,6 +72,7 @@ pub(crate) fn peer_creds(stream: &UnixStream) -> Result<PeerCreds, String> {
     Ok(PeerCreds {
         real_uid: cred.uid,
         effective_uid: cred.uid,
+        peer_pid: Some(cred.pid),
     })
 }
 
@@ -84,5 +90,7 @@ mod tests {
         let uid = unsafe { libc::getuid() };
         assert_eq!(creds.real_uid, uid);
         assert_eq!(creds.effective_uid, uid);
+        // `SO_PEERCRED` reports the peer pid; it should match this process.
+        assert_eq!(creds.peer_pid, Some(unsafe { libc::getpid() }));
     }
 }
