@@ -197,3 +197,24 @@ pub(crate) use windows::console_user_config_dir;
 pub use windows::{
     config_dir, keycode_to_hid_usage, list_keyboards, start_mapping,
 };
+
+/// Request a graceful shutdown of the running daemon.
+///
+/// On Unix this sends `SIGTERM` to ourselves, triggering the existing
+/// signal-hook handlers in [`start_mapping`] so keyboards are ungrabbed and
+/// resources released cleanly.  On Windows it posts a shutdown message to the
+/// main message loop, which breaks out of `GetMessageW` and proceeds through
+/// the normal unhook path.
+///
+/// Called from the control-socket handler thread after a `SHUTDOWN` command
+/// is served, replacing the hard-kill path (R3-21) with a graceful exit.
+pub(crate) fn request_shutdown() {
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+    }
+    #[cfg(windows)]
+    {
+        windows::request_shutdown();
+    }
+}

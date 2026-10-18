@@ -58,7 +58,9 @@ use std::sync::{
 use log::{debug, error, info, trace};
 use parking_lot::RwLock;
 // The drain wake post is only compiled into non-test builds (see
-// `queue_emission`); unit tests never queue an emission.
+// `queue_emission`); unit tests never queue an emission.  The shutdown request post
+// is likewise gated: in test builds the function is a no-op so unit tests that link
+// the daemon crate can compile without pulling the full Windows bindings.
 #[cfg(not(test))]
 use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
 use windows::Win32::{
@@ -87,6 +89,12 @@ use windows::Win32::{
         },
     },
 };
+
+// Shutdown message: posted to the main thread's queue by `request_shutdown`
+// (reachable from the control-socket handler running on a background thread).
+// Uses `WM_APP + 1` to stay clear of the drain-wake `WM_APP` and below the
+// `0xC000`-range private-message window.
+const WM_REQUEST_SHUTDOWN: u32 = WM_APP + 1;
 
 use super::{
     INJECTED_TAG,
@@ -586,6 +594,26 @@ pub(super) fn queue_emission(outputs: Vec<NativeKey>) {
     }
 }
 
+/// Request graceful shutdown of the main message loop.
+///
+/// Posts `WM_REQUEST_SHUTDOWN` to the thread recorded in `MAIN_THREAD_ID`; the
+/// message-loop in [`start_mapping`] intercepts it and breaks, so the daemon
+/// exits cleanly (unhooking the keyboard hook) instead of being hard-killed by
+/// `TerminateProcess`.  Called from the control-socket handler thread, which is
+/// why the post targets a thread (not a window) via `PostThreadMessageW`.
+///
+/// In test builds the post is a no-op — unit tests never run the message loop,
+/// so there is nothing to wake.
+pub(crate) fn request_shutdown() {
+    let tid = MAIN_THREAD_ID.load(Ordering::Relaxed);
+    if tid != 0 {
+        #[cfg(not(test))]
+        unsafe {
+            let _ = PostThreadMessageW(tid, WM_REQUEST_SHUTDOWN, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 /// Emit all queued outputs via `SendInput`.  The main message loop calls
 /// this from the loop body, after the hook chain has completed, so the
 /// `SendInput` is issued with the input queue idle.  Consumer outputs
@@ -849,6 +877,10 @@ pub fn start_mapping(
             if msg.message == WM_APP {
                 drain_and_emit_emissions();
                 continue;
+            }
+            if msg.message == WM_REQUEST_SHUTDOWN {
+                info!("Shutdown request received; exiting message loop.");
+                break;
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);

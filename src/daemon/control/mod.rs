@@ -10,12 +10,13 @@
 //! Control socket: a local endpoint a running daemon opens so the CLI can
 //! change its configuration at runtime without a restart.
 //!
-//! Today the only command is `SET-LOG-LEVEL`; the message space is left open
-//! so `STATUS` / `VERSION` / `RELOAD` can be added later without a second
-//! endpoint. The daemon binds the endpoint in [`start`] and serves one framed
-//! request per connection from a small background thread. Reading logs stays
-//! standard (journal / Event Viewer / the stderr fallback) — the socket only
-//! changes the _level_, it never redirects output.
+//! Today the commands are `SET-LOG-LEVEL` and `SHUTDOWN`; the message space
+//! is left open so `STATUS` / `VERSION` / `RELOAD` can be added later without
+//! a second endpoint. The daemon binds the endpoint in [`start`] and serves
+//! one framed request per connection from a small background thread. Reading
+//! logs stays standard (journal / Event Viewer / the stderr fallback) — the
+//! socket only changes the _level_ or triggers a graceful shutdown, it never
+//! redirects output.
 //!
 //! **Auth is the endpoint itself.** The daemon binds it owner-only (unix
 //! `0600`, a Windows pipe DACL scoped to the current user), so reaching the
@@ -213,8 +214,23 @@ pub fn set_log_level(level: LevelFilter) -> Result<String, ControlError> {
     exchange(&mut conn, &format!("SET-LOG-LEVEL {}", level_name(level)))
 }
 
+/// Connect to the running daemon's control endpoint and request a graceful
+/// shutdown.
+///
+/// The daemon replies with `OK shutting down` once the request is accepted,
+/// then triggers a graceful exit (SIGTERM on Unix, message-loop break on
+/// Windows) via [`crate::platform::request_shutdown`].  A
+/// [`ControlError::Connect`] means no daemon is reachable — either it is not
+/// running or it predates the control socket; the CLI should fall back to the
+/// platform-specific service stop.
+pub fn shutdown() -> Result<String, ControlError> {
+    let mut conn =
+        connect().map_err(|e| ControlError::Connect(connect_error(&e)))?;
+    exchange(&mut conn, "SHUTDOWN")
+}
+
 /// Send *command* over an already-connected stream and return the reply.
-fn exchange<R: Read + Write>(
+pub(crate) fn exchange<R: Read + Write>(
     io: &mut R,
     command: &str,
 ) -> Result<String, ControlError> {
@@ -238,7 +254,16 @@ fn handle_connection<R: Read + Write + ?Sized>(
 ) -> Result<(), ControlError> {
     let command = read_frame(io)?;
     let reply = dispatch(&command, peer_uid);
-    write_frame(io, &reply.to_string())
+    write_frame(io, &reply.to_string())?;
+    // After the reply is on the wire, act on side-effecting verbs.  SHUTDOWN
+    // triggers graceful process exit: the reply has already been written so
+    // the CLI sees confirmation, and `request_shutdown` reuses the
+    // existing signal handlers (Unix) or posts to the message loop
+    // (Windows).
+    if command.split_whitespace().next() == Some("SHUTDOWN") {
+        crate::platform::request_shutdown();
+    }
+    Ok(())
 }
 
 /// Parse a command payload and run it, returning the reply to send back.
@@ -300,6 +325,19 @@ pub(crate) fn dispatch(command: &str, peer_uid: u32) -> Response {
             }
             logging::set_level(level);
             Response::Ok(level_name(level).to_string())
+        }
+        // Graceful shutdown: the daemon has already authenticated the peer via
+        // socket ownership, so no uid check is needed.  The reply is written
+        // to the peer before [`handle_connection`] triggers
+        // [`crate::platform::request_shutdown`], so the caller sees
+        // confirmation.
+        "SHUTDOWN" => {
+            if let Some(extra) = parts.next() {
+                return Response::Error(format!(
+                    "unexpected argument '{extra}'"
+                ));
+            }
+            Response::Ok("shutting down".to_string())
         }
         // Reserved command slots, kept out of the unknown path on purpose.
         "STATUS" | "VERSION" | "RELOAD" => {
@@ -532,6 +570,22 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_shutdown_replies_ok() {
+        assert_eq!(
+            dispatch("SHUTDOWN", TEST_UID).to_string(),
+            "OK shutting down"
+        );
+    }
+
+    #[test]
+    fn dispatch_shutdown_rejects_trailing_arguments() {
+        assert_eq!(
+            dispatch("SHUTDOWN now", TEST_UID).to_string(),
+            "ERROR unexpected argument 'now'",
+        );
+    }
+
+    #[test]
     fn dispatch_rejects_unknown_verbs() {
         assert_eq!(
             dispatch("FLY", TEST_UID).to_string(),
@@ -589,6 +643,7 @@ mod tests {
     #[test]
     fn all_replies_are_single_line() {
         for (verb, uid) in [
+            ("SHUTDOWN", TEST_UID),
             ("STATUS", TEST_UID),
             ("VERSION", TEST_UID),
             ("RELOAD", TEST_UID),

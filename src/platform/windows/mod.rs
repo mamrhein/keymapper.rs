@@ -42,3 +42,4 @@ pub(crate) use config_dir::{console_user_config_dir, local_app_data_dir};
 #[cfg(feature = "test-util")]
 pub use keycode::Key;
 pub use keycode::keycode_to_hid_usage;
+pub(crate) use mapping::request_shutdown;

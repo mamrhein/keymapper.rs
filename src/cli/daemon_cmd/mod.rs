@@ -37,6 +37,7 @@ use linux::{
     secondary_restart, secondary_start, secondary_stop,
     start as start_service, stop as stop_service,
 };
+use log::debug;
 #[cfg(target_os = "macos")]
 pub use macos::is_running;
 #[cfg(target_os = "macos")]
@@ -94,11 +95,34 @@ pub fn start() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Stop keymapperd if it is running.
+///
+/// Tries a graceful shutdown through the control socket first (R3-21): the
+/// socket authenticates by ownership, so it avoids the PID-reuse TOCTOU and
+/// case-sensitive image-name matching that `TerminateProcess` (Windows) or
+/// the service manager involves.  If the socket is unavailable — either no
+/// daemon is reachable or it predates this feature — we fall back to the
+/// platform-specific `stop_service`, which is graceful on Linux/macOS (SIGTERM
+/// via the service manager) and a hard `TerminateProcess` on Windows.
 pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
     if !is_running() {
         println!("keymapperd is not running");
     } else {
-        stop_service()?;
+        let stopped_gracefully = match control::shutdown() {
+            Ok(reply) => {
+                debug!("graceful shutdown via control socket: {reply}");
+                wait_for_exit(std::time::Duration::from_secs(5))
+            }
+            Err(e) => {
+                debug!(
+                    "control socket shutdown unavailable ({e:?}); falling \
+                     back to service stop"
+                );
+                false
+            }
+        };
+        if !stopped_gracefully {
+            stop_service()?;
+        }
         println!("keymapperd stopped");
     }
 
@@ -112,6 +136,22 @@ pub fn stop() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Poll [`is_running`] until the daemon is gone or *timeout* elapses.
+///
+/// Returns `true` when the daemon exited within the window.  The poll is
+/// intentionally coarse: a successful graceful shutdown should exit in well
+/// under a second, and the 5-second budget leaves ample headroom for cleanup.
+fn wait_for_exit(timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !is_running() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
 }
 
 /// Restart keymapperd (stop then start).
