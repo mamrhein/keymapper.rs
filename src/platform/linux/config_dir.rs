@@ -45,7 +45,7 @@ mod tests {
     /// resolution into the CWD (R3-9).
     #[test]
     fn config_dir_rejects_relative_xdg_config_home() {
-        std::env::set_var("XDG_CONFIG_HOME", "relative/dir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "relative/dir") };
         let dir = config_dir();
         assert!(dir.is_some());
         assert!(dir.unwrap().is_absolute());
@@ -54,7 +54,7 @@ mod tests {
     /// An empty `XDG_CONFIG_HOME` is rejected (R3-9).
     #[test]
     fn config_dir_rejects_empty_xdg_config_home() {
-        std::env::set_var("XDG_CONFIG_HOME", "");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "") };
         let dir = config_dir();
         assert!(dir.is_some());
         assert!(dir.unwrap().is_absolute());
@@ -63,7 +63,7 @@ mod tests {
     /// An absolute `XDG_CONFIG_HOME` is used directly (R3-9 happy path).
     #[test]
     fn config_dir_uses_absolute_xdg_config_home() {
-        std::env::set_var("XDG_CONFIG_HOME", "/etc/config-home");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "/etc/config-home") };
         let dir = config_dir();
         assert_eq!(dir, Some(PathBuf::from("/etc/config-home")));
     }
