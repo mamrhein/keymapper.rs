@@ -124,35 +124,9 @@ fn find_wayland_socket(dir: &Path) -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn query_kde() -> String {
-    use zbus::blocking::Connection;
+    use kdotool::get_active_window_info;
 
-    let conn = match Connection::session() {
-        Ok(c) => c,
-        Err(_) => return String::new(),
-    };
-
-    // KWin's Workspace3 interface exposes activeWindow() which returns
-    // the PID of the active window.
-    let pid: i32 = match conn.call_method(
-        Some("org.kde.KWin"),
-        "/KWin",
-        Some("org.kde.kwin.Workspace3"),
-        "activeWindow",
-        &(),
-    ) {
-        Ok(reply) => match reply.body().deserialize() {
-            Ok(v) => v,
-            Err(_) => return String::new(),
-        },
-        Err(_) => return String::new(),
-    };
-
-    if pid > 0 {
-        return super::apps::resolve_process_app_id(pid as u32)
-            .unwrap_or_default();
-    }
-
-    String::new()
+    get_active_window_info().map_or(String::new(), |info| info.class_name)
 }
 
 // ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ cosmic-protocols = {
   ]
 }  # COSMIC active-window query
 evdev = "0.13"
+kdotool = { version = "0.3", default-features = false }
 nix = { version = "0.31.3", features = ["event"] }
 sysinfo = "0.39"  # process enumeration for `keymapper appnames`
 udev = "0.9"
