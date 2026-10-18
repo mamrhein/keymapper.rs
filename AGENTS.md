@@ -6,13 +6,14 @@ idiomatic Rust code. You interact directly with a local Rust workspace via the Z
 ## General conventions
 
 - When the users intent is not clear, don't speculate, ask!
-- Always use paths relative to the project root directory when referencing files, running tools, or writing summaries. Never use absolute paths unless explicitly requested.
+- Always use paths relative to the project root directory when referencing files, running tools, 
+  or writing summaries. Never use absolute paths unless explicitly requested.
 - Use the type system to encode correctness constraints.
 - Prefer compile-time guarantees over runtime checks where possible.
 - Test comprehensively, including edge cases, race conditions, and stress tests.
 - Use inline comments to explain "why," not just "what", and only if what the code doing is
-  non-obvious or special in some way. 
-- In comments, do not reference content in files that are not stored in the git rpository. 
+  non-obvious or special in some way.
+- In comments, do not reference content in files that are not stored in the git repository.
 - Module-level documentation should explain purpose and responsibilities.
 - **Always** use periods at the end of code comments.
 - **Never** use title case in headings and titles. Always use sentence case.
@@ -36,13 +37,12 @@ Every Rust source file must start with:
 // $Revision$
 
 ```
-
 where {YEAR} is to be replaced by the current year.
 
 ### Rust edition and formatting
 
 - Use Rust 2024 edition.
-- Rust formatting rule are stored in `../rustfmt.toml`.
+- Rust formatting rules are stored in `../rustfmt.toml`.
 - Formatting with `rustfmt +nightly` is run automatically after each commit.
 
 ### Type system patterns
