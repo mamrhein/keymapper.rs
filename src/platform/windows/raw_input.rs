@@ -326,7 +326,7 @@ unsafe fn handle_wm_input(_hwnd: HWND, l_param: LPARAM) {
                 if data_len == 0
                     || offset
                         .checked_add(data_len)
-                        .map_or(true, |end| end > bytes_read as usize)
+                        .is_none_or(|end| end > bytes_read as usize)
                 {
                     return;
                 }

@@ -128,8 +128,7 @@ fn contains_control_chars(s: &str) -> bool {
 /// they cannot redirect the client to a pipe outside the daemon's namespace
 /// without also guessing the per-run nonce.
 fn is_valid_pipe_name(name: &str) -> bool {
-    if name.starts_with(PIPE_PREFIX) {
-        let nonce = &name[PIPE_PREFIX.len()..];
+    if let Some(nonce) = name.strip_prefix(PIPE_PREFIX) {
         return !contains_control_chars(nonce)
             && nonce.len() == NONCE_HEX_LEN
             && nonce.chars().all(|c| c.is_ascii_hexdigit());
@@ -627,10 +626,10 @@ fn is_reparse_point(path: &Path) -> bool {
 /// handled at startup by the delete-then-`CREATE_NEW` pattern in
 /// [`publish_name`].
 extern "system" fn cleanup_publish_file(ctrl_type: u32) -> BOOL {
-    if ctrl_type == CTRL_CLOSE_EVENT {
-        if let Some(path) = PUBLISH_PATH_FOR_CLEANUP.get() {
-            let _ = fs_err::remove_file(path);
-        }
+    if ctrl_type == CTRL_CLOSE_EVENT
+        && let Some(path) = PUBLISH_PATH_FOR_CLEANUP.get()
+    {
+        let _ = fs_err::remove_file(path);
     }
     BOOL::from(false)
 }

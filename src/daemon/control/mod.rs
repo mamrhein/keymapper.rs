@@ -279,6 +279,7 @@ fn handle_connection<R: Read + Write + ?Sized>(
 /// anything else is an unknown command. Trailing arguments are never
 /// silently ignored: a command with unexpected arguments is answered with
 /// an error so CLI misuse stays visible.
+#[allow(unused_variables)]
 pub(crate) fn dispatch(command: &str, peer_uid: u32) -> Response {
     let mut parts = command.split_whitespace();
     let Some(verb) = parts.next() else {
