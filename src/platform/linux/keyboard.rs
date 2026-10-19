@@ -9,10 +9,47 @@
 
 //! Linux keyboard enumeration via udev.
 
+use std::sync::LazyLock;
+
 use evdev::{Device, EventType};
+use parking_lot::Mutex;
 use udev::Enumerator;
 
 use crate::common::keyboard::KeyboardInfo;
+
+/// The devnode path (e.g. `/dev/input/event3`) of the daemon's own uinput
+/// output device, set after the `VirtualDevice` is created in
+/// `start_mapping`.
+///
+/// Used by [`is_own_output_device`] so that echo suppression keys on the
+/// kernel-assigned device path rather than a spoofable name string (R3-11).
+static OWN_DEVICE_PATH: LazyLock<Mutex<Option<String>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Record the devnode of the daemon's own uinput output device.
+///
+/// Called once, after `VirtualDevice::build()` in `start_mapping`.
+pub(super) fn set_own_device_path(path: String) {
+    *OWN_DEVICE_PATH.lock() = Some(path);
+}
+
+/// Whether `devnode` refers to the daemon's own uinput output device.
+///
+/// Returns `false` when the own-device path has not been recorded yet (e.g.
+/// during the startup enumeration that runs *before* the `VirtualDevice` is
+/// created), so the check is a safe no-op on that path.
+pub(super) fn is_own_output_device(devnode: &str) -> bool {
+    OWN_DEVICE_PATH
+        .lock()
+        .as_deref()
+        .is_some_and(|p| p == devnode)
+}
+
+/// Clear the own-device path.  Intended for tests only.
+#[cfg(test)]
+pub(super) fn clear_own_device_path_for_testing() {
+    *OWN_DEVICE_PATH.lock() = None;
+}
 
 /// Enumerate all keyboard input devices on the system.
 ///
@@ -187,5 +224,24 @@ mod tests {
                 "an empty enumeration must not be an error, got: {e}"
             );
         }
+    }
+
+    /// The own-device path is keyed on the devnode string, not on the
+    /// device name (R3-11).  A spoofed device at a different devnode is
+    /// never mistaken for the daemon's own output device.
+    #[test]
+    fn is_own_output_device_matches_by_devnode() {
+        clear_own_device_path_for_testing();
+        // Unset: nothing matches.
+        assert!(!is_own_output_device("/dev/input/event42"));
+
+        set_own_device_path("/dev/input/event42".to_string());
+        assert!(is_own_output_device("/dev/input/event42"));
+        assert!(!is_own_output_device("/dev/input/event7"));
+        assert!(!is_own_output_device("/dev/input/event99"));
+
+        clear_own_device_path_for_testing();
+        // After clearing, nothing matches again.
+        assert!(!is_own_output_device("/dev/input/event42"));
     }
 }

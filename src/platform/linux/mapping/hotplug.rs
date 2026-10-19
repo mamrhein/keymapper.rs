@@ -336,8 +336,11 @@ fn handle_device_add(
     // a keyboard.  Grabbing it would feed the daemon's emitted events back
     // into its input loop, causing them to be re-emitted indefinitely.
     // The predicate is the contract's echo-suppression policy
-    // (`KeySource::is_output_device`).
-    if LinuxBackend.is_output_device(&kb.name) {
+    // (`KeySource::is_output_device`): identity is the kernel-assigned
+    // devnode, not the device name string (R3-11), so a process that
+    // creates a device with the same name cannot force the daemon to skip
+    // it.
+    if LinuxBackend.is_output_device(&kb) {
         return;
     }
 

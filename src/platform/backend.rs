@@ -135,9 +135,13 @@ pub(crate) trait KeySource {
     /// enumeration.
     fn list_keyboards(&self) -> Result<Vec<KeyboardInfo>, Box<dyn Error>>;
 
-    /// Whether a device with this name is the daemon's own emission
-    /// device, which capture must never observe (echo suppression).
-    fn is_output_device(&self, name: &str) -> bool;
+    /// Whether `keyboard` is the daemon's own emission device, which
+    /// capture must never observe (echo suppression).
+    ///
+    /// On Linux the check is the kernel-assigned devnode (R3-11), not a
+    /// spoofable name string; on macOS and Windows the predicate is always
+    /// `false` because the output device is not enumerable.
+    fn is_output_device(&self, keyboard: &KeyboardInfo) -> bool;
 
     /// Open `keyboard` in read-only observe mode (never grabbed) and
     /// pump every decoded key event through `on_key`.

@@ -58,7 +58,7 @@ impl KeySource for WindowsBackend {
     /// ([`INJECTED_TAG`](super::INJECTED_TAG)) inside the hook, not
     /// enumerable: `SendInput` never creates a listed device, so
     /// nothing is ever skipped by name.
-    fn is_output_device(&self, _name: &str) -> bool {
+    fn is_output_device(&self, _keyboard: &KeyboardInfo) -> bool {
         false
     }
 
@@ -106,7 +106,16 @@ mod tests {
     /// enumerated name is ever the output device.
     #[test]
     fn no_enumerated_device_is_the_output_device() {
-        assert!(!WindowsBackend.is_output_device("HID Keyboard Device"));
-        assert!(!WindowsBackend.is_output_device("keymapper virtual"));
+        let kb = |name: &str| {
+            KeyboardInfo::new(
+                name.into(),
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+            )
+        };
+        assert!(!WindowsBackend.is_output_device(&kb("HID Keyboard Device")));
+        assert!(!WindowsBackend.is_output_device(&kb("keymapper virtual")));
     }
 }

@@ -55,7 +55,10 @@ use signal_hook::{
     flag::register,
 };
 
-use super::{capture::KeyScanner, keyboard::discover_and_open_keyboards};
+use super::{
+    capture::KeyScanner,
+    keyboard::{discover_and_open_keyboards, set_own_device_path},
+};
 use crate::{
     common::keyboard::{
         KeyboardInfo, KeyboardSpecifier, filter_keyboards_by_specifiers,
@@ -63,7 +66,10 @@ use crate::{
     keymap_core::{
         emission::ConsumedReleaseFate, engine::MappingEngine, lookup::Lookup,
     },
-    platform::backend::{Emitter, OutputAction},
+    platform::{
+        LinuxBackend,
+        backend::{Emitter, KeySource as _, OutputAction},
+    },
 };
 
 /// Name of the daemon's own uinput output device.
@@ -154,7 +160,16 @@ pub fn start_mapping(
     let infos: Vec<KeyboardInfo> =
         opened.iter().map(|(info, _)| info.clone()).collect();
     let to_grab: Vec<KeyboardInfo> =
-        filter_keyboards_by_specifiers(&infos, keyboard_filter.as_deref());
+        filter_keyboards_by_specifiers(&infos, keyboard_filter.as_deref())
+            // Apply the echo-suppression check on the startup path (R3-11):
+            // skip the daemon's own uinput output device.  At this
+            // point the VirtualDevice has not been created yet, so
+            // the own-device path is not recorded and the check is
+            // a safe no-op — but the guard is here so a future
+            // reordering of the startup sequence cannot regress.
+            .into_iter()
+            .filter(|kb| !LinuxBackend.is_output_device(kb))
+            .collect();
     let grab_paths: std::collections::HashSet<&str> =
         to_grab.iter().map(|kb| kb.device.as_str()).collect();
     let opened_to_grab: Vec<(KeyboardInfo, Device)> = opened
@@ -213,6 +228,19 @@ pub fn start_mapping(
 
     thread::sleep(Duration::from_millis(200));
     info!("Linux virtual keyboard ready.");
+
+    // Record the daemon's own output device path so that echo-suppression
+    // can key on the kernel-assigned devnode instead of a name string
+    // (R3-11).  `enumerate_dev_nodes_blocking` reads the sysfs directory
+    // created by the kernel for this uinput device and yields the
+    // `/dev/input/eventN` node.
+    if let Some(path) = virtual_device
+        .enumerate_dev_nodes_blocking()?
+        .next()
+        .transpose()?
+    {
+        set_own_device_path(path.to_string_lossy().into_owned());
+    }
 
     // Re-emit the key-downs of the modifiers that were held when their
     // devices were grabbed (see capture_held_keys), now that the virtual
