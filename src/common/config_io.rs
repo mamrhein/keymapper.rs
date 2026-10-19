@@ -134,11 +134,13 @@ pub enum ConfigWriteError {
 /// (`O_NOFOLLOW`); the file is a regular file; its size is within
 /// [`MAX_CONFIG_SIZE`]; the platform trust check accepts it (on Unix: it
 /// is owned by the current user unless running as root, and it is not
-/// world-writable).  All checks run on the single open descriptor, so
-/// there is no window in which the file can be swapped between inspection
-/// and read.  Because the chain is re-inspected on every call, a symlink
-/// swapped into a parent directory after startup aborts the next read
-/// instead of being followed silently.
+/// world-writable).  As root, each ancestor directory is additionally
+/// required to be owned by the config file's owner or root, anchoring the
+/// relaxed file-ownership check.  All checks run on the single open
+/// descriptor, so there is no window in which the file can be swapped
+/// between inspection and read.  Because the chain is re-inspected on every
+/// call, a symlink swapped into a parent directory after startup aborts the
+/// next read instead of being followed silently.
 pub fn read_config_content(path: &Path) -> Result<String, ConfigReadError> {
     // Security check: verify the config file itself is not a symlink.
     // This is an extra guard beyond the platform's O_NOFOLLOW (Unix),
