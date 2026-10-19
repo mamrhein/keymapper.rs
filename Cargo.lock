@@ -959,6 +959,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde-saphyr",
+ "serde_json",
  "signal-hook",
  "sysinfo",
  "tempfile",

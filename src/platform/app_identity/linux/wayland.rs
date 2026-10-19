@@ -432,9 +432,21 @@ fn query_wlroots_socket(socket: &str, request: &[u8]) -> String {
         return String::new();
     }
 
-    // The IPC response uses the same length-prefixed binary protocol as the
-    // request: 4-byte "sway" magic, 4-byte version, 4-byte payload length,
-    // then the JSON payload.
+    parse_wlroots_response(&response, "app_id")
+}
+
+/// Parse a length-prefixed sway/wlroots IPC response and extract the first
+/// string value for `key` from the JSON payload.
+///
+/// The IPC response uses the same length-prefixed binary protocol as the
+/// request: 4-byte "sway" magic, 4-byte version, 4-byte payload length, then
+/// the JSON payload.
+///
+/// `checked_add` on `12 + payload_len` prevents a 32-bit overflow when a
+/// forged length from a malicious socket reply would wrap past the bounds
+/// check (then a slice panic, not corruption — the sink is same-uid in normal
+/// deploys, but R3-9 makes this reachable from a relative-path socket).
+fn parse_wlroots_response(response: &[u8], key: &str) -> String {
     if response.len() < 12 {
         return String::new();
     }
@@ -451,15 +463,16 @@ fn query_wlroots_socket(socket: &str, request: &[u8]) -> String {
         response[11],
     ]) as usize;
 
-    if response.len() < 12 + payload_len {
-        return String::new();
-    }
+    let json_end = match 12usize.checked_add(payload_len) {
+        Some(end) if response.len() >= end => end,
+        _ => return String::new(),
+    };
 
-    let json = &response[12..12 + payload_len];
+    let json = &response[12..json_end];
     let Ok(json_str) = std::str::from_utf8(json) else {
         return String::new();
     };
-    extract_json_string(json_str, "app_id")
+    extract_json_field(json_str, key)
 }
 
 // ---------------------------------------------------------------------------
@@ -513,57 +526,58 @@ fn query_hyprland() -> String {
         return String::new();
     };
 
-    extract_json_string(json, "class")
+    extract_json_field(json, "class")
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Simple helper to extract a string value for a given key from a JSON-like
-/// string.  Not a full parser — sufficient for the flat JSON responses from
-/// compositor IPC sockets.
-fn extract_json_string(json: &str, key: &str) -> String {
-    let pattern = format!("\"{key}\"");
-    let start = match json.find(&pattern) {
-        Some(pos) => pos,
-        None => return String::new(),
+/// Extract a string value for `key` from a JSON response by parsing it with
+/// `serde_json` and searching the resulting tree depth-first.
+///
+/// Replaces the former hand-rolled string scan, which mangled non-ASCII bytes
+/// (pushed as `char`, truncating multi-byte UTF-8) and mishandled escapes
+/// (`\n` → literal `n`, no `\uXXXX` support, `\"` off-by-one on the
+/// backslash).  The depth-first search finds the first string-valued
+/// occurrence of `key` at any nesting level, matching the intent of the
+/// original first-match scan while correctly skipping non-string values
+/// (e.g. `null` `app_id` on the sway tree root).
+fn extract_json_field(json: &str, key: &str) -> String {
+    let value: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
     };
+    find_json_string(&value, key).unwrap_or_default()
+}
 
-    let after_key = &json[start + pattern.len()..];
-
-    // Skip whitespace and the colon.
-    let after_colon = match after_key.find(':') {
-        Some(pos) => &after_key[pos + 1..],
-        None => return String::new(),
-    };
-
-    // Find the opening quote of the value.
-    let trimmed = after_colon.trim_start();
-    let value_start = match trimmed.find('"') {
-        Some(pos) => &trimmed[pos + 1..],
-        None => return String::new(),
-    };
-
-    // Find the closing quote, handling escaped quotes.
-    let mut result = String::new();
-    let mut bytes = value_start.bytes();
-
-    while let Some(b) = bytes.next() {
-        if b == b'\\' {
-            // Escaped character — take the next byte literally.
-            if let Some(next) = bytes.next() {
-                result.push(next as char);
+/// Depth-first search for the first string value associated with `key` in a
+/// parsed JSON tree.
+fn find_json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k == key
+                    && let Some(s) = v.as_str()
+                {
+                    return Some(s.to_string());
+                }
+                if let Some(found) = find_json_string(v, key) {
+                    return Some(found);
+                }
             }
-        } else if b == b'"' {
-            // End of string.
-            return result;
-        } else {
-            result.push(b as char);
+            None
         }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                if let Some(found) = find_json_string(v, key) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
     }
-
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +588,10 @@ fn extract_json_string(json: &str, key: &str) -> String {
 mod tests {
     use std::fs;
 
-    use super::{find_wayland_socket, query_cosmic};
+    use super::{
+        extract_json_field, find_wayland_socket, parse_wlroots_response,
+        query_cosmic,
+    };
 
     /// The probe must fail gracefully instead of panicking, whether or
     /// not a Wayland compositor is reachable.
@@ -618,5 +635,127 @@ mod tests {
     fn missing_dir_returns_none() {
         let dir = std::path::Path::new("/nonexistent-keymapper-runtime-dir");
         assert!(find_wayland_socket(dir).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_json_field (R3-27: serde_json replaces hand-rolled scan)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_json_string_simple() {
+        // Flat JSON: a string value for the requested key.
+        let json = r#"{"class": "org.gnome.Terminal", "title": "Terminal"}"#;
+        assert_eq!(extract_json_field(json, "class"), "org.gnome.Terminal");
+    }
+
+    #[test]
+    fn extract_json_string_nested_depth_first() {
+        // The sway `get_tree` reply is deeply nested; the first string-
+        // valued `app_id` at any depth wins, matching the original first-
+        // match scan intent.
+        let json = r#"{"name": "root", "app_id": null, "nodes": [
+            {"name": "a", "app_id": null, "nodes": []},
+            {"name": "b", "app_id": "terminal", "nodes": []}
+        ]}"#;
+        assert_eq!(extract_json_field(json, "app_id"), "terminal");
+    }
+
+    #[test]
+    fn extract_json_string_handles_non_ascii_and_escapes() {
+        // The old hand-rolled scan pushed raw bytes as `char`, truncating
+        // multi-byte UTF-8 and turning `\n` into a literal `n`.  serde_json
+        // decodes escapes and preserves the original Unicode scalar value.
+        let json = r#"{"app_id": "café\u00e9 \"quoted\" tab\t"}"#;
+        assert_eq!(
+            extract_json_field(json, "app_id"),
+            "caféé \"quoted\" tab\t"
+        );
+    }
+
+    #[test]
+    fn extract_json_string_skips_non_string_values() {
+        // A `null` or numeric value for the key is skipped, not returned as
+        // an empty string, so the search continues deeper.
+        let json =
+            r#"{"app_id": null, "nodes": [{"app_id": 42, "name": "x"}]}"#;
+        assert_eq!(extract_json_field(json, "app_id"), "");
+    }
+
+    #[test]
+    fn extract_json_string_missing_key_returns_empty() {
+        let json = r#"{"title": "no app_id here"}"#;
+        assert_eq!(extract_json_field(json, "app_id"), "");
+    }
+
+    #[test]
+    fn extract_json_string_invalid_json_returns_empty() {
+        // Truncated or malformed JSON must not panic.
+        assert_eq!(extract_json_field("not json at all", "app_id"), "");
+        assert_eq!(extract_json_field("{\"app_id\":", "app_id"), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_wlroots_response (R3-27: checked_add bounds check)
+    // -----------------------------------------------------------------------
+
+    /// Build a minimal 12-byte sway envelope with the given payload length in
+    /// the header, optionally followed by payload bytes.
+    fn build_envelope(payload_len: u32, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(12 + payload.len());
+        buf.extend_from_slice(b"sway"); // magic
+        buf.extend_from_slice(&0u32.to_le_bytes()); // version
+        buf.extend_from_slice(&payload_len.to_le_bytes()); // length
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    fn parse_response_extracts_field() {
+        // Valid envelope + JSON payload: field is extracted.
+        let payload = r#"{"app_id": "terminal"}"#;
+        let buf = build_envelope(payload.len() as u32, payload.as_bytes());
+        assert_eq!(parse_wlroots_response(&buf, "app_id"), "terminal");
+    }
+
+    #[test]
+    fn parse_response_too_short() {
+        // Less than 12 bytes: header incomplete, return empty.
+        assert_eq!(parse_wlroots_response(b"sway", "app_id"), "");
+        assert_eq!(parse_wlroots_response(&[0u8; 11], "app_id"), "");
+    }
+
+    #[test]
+    fn parse_response_bad_magic() {
+        // Magic bytes must be "sway".
+        let payload = r#"{"app_id": "terminal"}"#;
+        let mut buf = build_envelope(payload.len() as u32, payload.as_bytes());
+        buf[0..4].copy_from_slice(b"sawx");
+        assert_eq!(parse_wlroots_response(&buf, "app_id"), "");
+    }
+
+    #[test]
+    fn parse_response_length_exceeds_buffer() {
+        // Header claims more bytes than the buffer actually contains.
+        let buf = build_envelope(999, b"short");
+        assert_eq!(parse_wlroots_response(&buf, "app_id"), "");
+    }
+
+    #[test]
+    fn parse_response_overflow_safe_on_32bit() {
+        // On 32-bit `usize`, `12 + payload_len` where `payload_len` is near
+        // `usize::MAX` would wrap past the bounds check without `checked_add`.
+        // We simulate the 32-bit condition: when `usize` is 32-bit wide, a
+        // payload_len of `u32::MAX` makes `12 + len` overflow.
+        let payload_len = if usize::MAX == u32::MAX as usize {
+            // 32-bit: u32::MAX would overflow 12 + len.
+            u32::MAX
+        } else {
+            // 64-bit: use a length that exceeds the buffer without
+            // overflowing.
+            u32::MAX
+        };
+        let buf = build_envelope(payload_len, b"x");
+        // Regardless of overflow, the response is far too short.
+        assert_eq!(parse_wlroots_response(&buf, "app_id"), "");
     }
 }

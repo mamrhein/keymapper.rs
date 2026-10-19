@@ -57,6 +57,7 @@ cosmic-protocols = {
 evdev = "0.13"
 kdotool = { version = "0.3", default-features = false }
 nix = { version = "0.31.3", features = ["event"] }
+serde_json = "1.0"  # compositor IPC reply parsing
 sysinfo = "0.39"  # process enumeration for `keymapper appnames`
 udev = "0.9"
 wayland-client = "0.31"
