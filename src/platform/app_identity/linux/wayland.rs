@@ -9,9 +9,10 @@
 
 //! Wayland active window query via compositor-specific mechanisms.
 //!
-//! Probes compositors in order: KDE (KWin), GNOME, COSMIC, then
-//! wlroots-based compositors and Hyprland.  Each probe is a synchronous,
-//! blocking operation that connects, queries, and disconnects immediately.
+//! Probes compositors in order: KDE (KWin), GNOME (behind the
+//! `gnome-eval` feature), COSMIC, then wlroots-based compositors and
+//! Hyprland.  Each probe is a synchronous, blocking operation that
+//! connects, queries, and disconnects immediately.
 //!
 //! Wherever a compositor reports the active window's owning process (KDE,
 //! GNOME), the PID is resolved to the `.desktop` application id via
@@ -40,14 +41,20 @@ use wayland_client::{
 /// Tries each compositor backend in order and returns the first successful
 /// result.  Returns `"unknown"` if no backend succeeds.
 pub fn get_active_app_name() -> String {
-    // Probe each compositor in priority order.
-    let candidates: [fn() -> String; 5] = [
+    // Probe each compositor in priority order.  The GNOME backend is gated
+    // behind the `gnome-eval` feature because it runs JavaScript in the shell
+    // context via D-Bus `org.gnome.Shell.Eval`.
+    #[cfg(feature = "gnome-eval")]
+    let candidates: &[fn() -> String] = &[
         query_kde,
         query_gnome,
         query_cosmic,
         query_wlroots,
         query_hyprland,
     ];
+    #[cfg(not(feature = "gnome-eval"))]
+    let candidates: &[fn() -> String] =
+        &[query_kde, query_cosmic, query_wlroots, query_hyprland];
 
     for query in candidates {
         let result = query();
@@ -133,6 +140,12 @@ fn query_kde() -> String {
 // GNOME — D-Bus Shell.Eval introspection
 // ---------------------------------------------------------------------------
 
+/// Query the active window on GNOME via the `org.gnome.Shell.Eval` D-Bus
+/// interface.
+///
+/// This backend is gated behind the `gnome-eval` feature because it executes
+/// JavaScript in the GNOME Shell process context.
+#[cfg(feature = "gnome-eval")]
 fn query_gnome() -> String {
     use zbus::blocking::Connection;
 
@@ -164,6 +177,12 @@ fn query_gnome() -> String {
     };
 
     if pid > 0 {
+        // Verify that /proc/<pid> is owned by the current uid before
+        // trusting the PID returned from the shell — a compromised shell or
+        // a spoofed reply could otherwise point at another user's process.
+        if !super::apps::proc_owner_is_self(pid as u32) {
+            return String::new();
+        }
         return super::apps::resolve_process_app_id(pid as u32)
             .unwrap_or_default();
     }
@@ -369,12 +388,13 @@ impl Dispatch<zcosmic_toplevel_handle_v1::ZcosmicToplevelHandleV1, ()>
 
 fn query_wlroots() -> String {
     // Sway and other wlroots-based compositors expose a JSON IPC protocol
-    // over a Unix domain socket.
-    let socket = std::env::var("SWAYSOCK").unwrap_or_else(|_| {
-        std::env::var("XDG_RUNTIME_DIR")
-            .map(|rd| format!("{rd}/sway-ipc.sock"))
-            .unwrap_or_else(|_| "/run/user/1000/sway-ipc.sock".to_string())
-    });
+    // over a Unix domain socket.  We require `SWAYSOCK` to be set — falling
+    // back to a hardcoded `/run/user/1000` would trust the wrong user's
+    // socket when the daemon runs under a different uid.
+    let socket = match std::env::var("SWAYSOCK") {
+        Ok(s) if !s.is_empty() => s,
+        _ => return String::new(),
+    };
 
     if !std::path::Path::new(&socket).exists() {
         return String::new();
@@ -448,13 +468,21 @@ fn query_wlroots_socket(socket: &str, request: &[u8]) -> String {
 
 fn query_hyprland() -> String {
     // Hyprland exposes its IPC via a socket at:
-    // /tmp/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock
+    // $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock
+    // Using `XDG_RUNTIME_DIR` (a per-user, mode-0700 directory) instead of
+    // `/tmp` prevents an attacker from pre-creating a spoofed socket path
+    // in a world-writable location.
     let signature = match std::env::var("HYPRLAND_INSTANCE_SIGNATURE") {
         Ok(s) => s,
         Err(_) => return String::new(),
     };
 
-    let socket = format!("/tmp/hypr/{signature}/.socket2.sock");
+    let runtime_dir = match std::env::var("XDG_RUNTIME_DIR") {
+        Ok(d) if !d.is_empty() && std::path::Path::new(&d).is_absolute() => d,
+        _ => return String::new(),
+    };
+
+    let socket = format!("{runtime_dir}/hypr/{signature}/.socket2.sock");
     if !std::path::Path::new(&socket).exists() {
         return String::new();
     }

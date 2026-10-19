@@ -61,7 +61,7 @@ sysinfo = "0.39"  # process enumeration for `keymapper appnames`
 udev = "0.9"
 wayland-client = "0.31"
 x11rb = "0.14"
-zbus = { version = "5", features = ["blocking"] }
+zbus = { version = "5", features = ["blocking"], optional = true }  # only for --features gnome-eval
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -125,6 +125,7 @@ libc = "0.2"
 signal-hook = "0.4"
 
 [features]
+gnome-eval = ["zbus"]
 # Exposes the test-harness-only public surface — `platform::KarabinerClient`
 # and `platform::INJECTION_KEYBOARD_IDENTITY` (macOS), `platform::Key`
 # (Windows), and `keymap_core::logfmt::fmt_key_event` — that the `test-util`
