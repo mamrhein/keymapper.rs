@@ -58,9 +58,10 @@ use std::sync::{
 use log::{debug, error, info, trace};
 use parking_lot::RwLock;
 // The drain wake post is only compiled into non-test builds (see
-// `queue_emission`); unit tests never queue an emission.  The shutdown request post
-// is likewise gated: in test builds the function is a no-op so unit tests that link
-// the daemon crate can compile without pulling the full Windows bindings.
+// `queue_emission`); unit tests never queue an emission.  The shutdown
+// request post is likewise gated: in test builds the function is a no-op
+// so unit tests that link the daemon crate can compile without pulling
+// the full Windows bindings.
 #[cfg(not(test))]
 use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
 use windows::Win32::{
@@ -95,6 +96,12 @@ use windows::Win32::{
 // Uses `WM_APP + 1` to stay clear of the drain-wake `WM_APP` and below the
 // `0xC000`-range private-message window.
 const WM_REQUEST_SHUTDOWN: u32 = WM_APP + 1;
+
+/// How long a `SendInput` emission stays in the pending-output ledger, during
+/// which a matching tagged event is recognized as our own injection.  Generous
+/// enough for hook-chain delivery, short enough to reject delayed replays.
+const TAG_MATCH_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(50);
 
 use super::{
     INJECTED_TAG,
@@ -170,7 +177,69 @@ fn engine() -> Option<&'static parking_lot::Mutex<MappingEngine<EngineKey>>> {
 }
 
 // ---------------------------------------------------------------------------
-// Foreground-window elevation check
+// Pending-output ledger (R3-22: forgeable dwExtraInfo tag → remap bypass)
+// ---------------------------------------------------------------------------
+
+/// A pending-output ledger recording the virtual-key codes the daemon has
+/// recently emitted via `SendInput`.
+///
+/// The hook proc consults the ledger when it sees a tagged event: if the event
+/// matches a recent emission, it is our own output passing through the hook
+/// chain and is let on un-remapped.  If no match is found, the tag is treated
+/// as a hint at most — the event falls through to the normal remapping
+/// decision, so a forged `dwExtraInfo` can no longer bypass a mapping.
+struct PendingOutputLedger {
+    /// `(vk, is_down, timestamp)` for each recent emission.
+    entries: Vec<(VIRTUAL_KEY, bool, std::time::Instant)>,
+}
+
+impl PendingOutputLedger {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Record that *vk* was emitted as a key-down or key-up at the current
+    /// instant, expiring stale entries first.
+    fn record(&mut self, vk: VIRTUAL_KEY, is_down: bool) {
+        let now = std::time::Instant::now();
+        self.entries
+            .retain(|(_, _, ts)| now.duration_since(*ts) < TAG_MATCH_WINDOW);
+        self.entries.push((vk, is_down, now));
+    }
+
+    /// Check whether *vk* was emitted as *is_down* within the match window.
+    /// On a match the entry is consumed so a single injection only matches
+    /// once.
+    fn check_and_consume(&mut self, vk: VIRTUAL_KEY, is_down: bool) -> bool {
+        let now = std::time::Instant::now();
+        self.entries
+            .retain(|(_, _, ts)| now.duration_since(*ts) < TAG_MATCH_WINDOW);
+        if let Some(pos) = self
+            .entries
+            .iter()
+            .position(|(v, d, _)| *v == vk && *d == is_down)
+        {
+            self.entries.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Process-wide ledger of recently emitted `SendInput` events, consulted by
+/// the hook proc to distinguish our own tagged injections from forged ones.
+static PENDING_OUTPUTS: parking_lot::Mutex<PendingOutputLedger> =
+    parking_lot::Mutex::new(PendingOutputLedger::new());
+
+// ---------------------------------------------------------------------------
+// Foreground-window elevation check</arg_value></tool_call></tool_call> File
+// path: keymapper.rs/src/platform/windows/mapping.rs</arg_value></
+// tool_call><tool_call>edit_file<arg_key>path</arg_key><arg_value>keymapper.
+// rs/src/platform/windows/mapping.rs</arg_value><arg_key>edits</
+// arg_key><arg_value>[{
 // ---------------------------------------------------------------------------
 
 /// Cached PID and elevation status of the foreground window's process.
@@ -389,6 +458,11 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
         flags |= KEYEVENTF_EXTENDEDKEY.0;
     }
 
+    // Record this emission in the pending-output ledger so the hook proc can
+    // recognize the tagged event that `SendInput` injects as our own output
+    // (and distinguish it from a forged tag — R3-22).
+    PENDING_OUTPUTS.lock().record(vk, !is_key_up);
+
     // Stamp the daemon tag so the hook proc recognizes the event as our own
     // injection and passes it through without re-mapping.
     let input = INPUT {
@@ -599,8 +673,8 @@ pub(super) fn queue_emission(outputs: Vec<NativeKey>) {
 /// Posts `WM_REQUEST_SHUTDOWN` to the thread recorded in `MAIN_THREAD_ID`; the
 /// message-loop in [`start_mapping`] intercepts it and breaks, so the daemon
 /// exits cleanly (unhooking the keyboard hook) instead of being hard-killed by
-/// `TerminateProcess`.  Called from the control-socket handler thread, which is
-/// why the post targets a thread (not a window) via `PostThreadMessageW`.
+/// `TerminateProcess`.  Called from the control-socket handler thread, which
+/// is why the post targets a thread (not a window) via `PostThreadMessageW`.
 ///
 /// In test builds the post is a no-op — unit tests never run the message loop,
 /// so there is nothing to wake.
@@ -609,7 +683,12 @@ pub(crate) fn request_shutdown() {
     if tid != 0 {
         #[cfg(not(test))]
         unsafe {
-            let _ = PostThreadMessageW(tid, WM_REQUEST_SHUTDOWN, WPARAM(0), LPARAM(0));
+            let _ = PostThreadMessageW(
+                tid,
+                WM_REQUEST_SHUTDOWN,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     }
 }
@@ -646,19 +725,23 @@ extern "system" fn low_level_keyboard_proc(
 
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
+    let is_key_down = matches!(w_param.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
 
     // Every key the daemon injects through `SendInput` is stamped with
-    // [`INJECTED_TAG`].  Let those flow on without re-mapping them, so the
-    // target window (or the e2e monitor's hook) receives them.  Matching on
-    // the tag is exact, so a physical press of the same key can never be
-    // swallowed as one of our own injections.
-    if kbd_struct.dwExtraInfo == INJECTED_TAG {
+    // [`INJECTED_TAG`].  A matching entry in the pending-output ledger
+    // confirms the event is our own injection; let it flow on un-remapped.
+    // A tagged event without a ledger match is treated as a hint at most —
+    // the event falls through to the normal remapping decision, so a forged
+    // tag can no longer bypass a mapping (R3-22).
+    if kbd_struct.dwExtraInfo == INJECTED_TAG
+        && PENDING_OUTPUTS
+            .lock()
+            .check_and_consume(vk_code, is_key_down)
+    {
         return unsafe {
             CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
         };
     }
-
-    let is_key_down = matches!(w_param.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
 
     // Decode through the shared scanner (which also feeds the read-only
     // observe mode), so the VK-to-usage decode and the direction
@@ -946,5 +1029,56 @@ mod tests {
                 assert_eq!(resolved.unwrap().0, vk.as_native());
             }
         }
+    }
+
+    // -- PendingOutputLedger (R3-22) --
+
+    #[test]
+    fn ledger_records_and_consumes_match() {
+        let mut ledger = PendingOutputLedger::new();
+        ledger.record(VIRTUAL_KEY(0x41), true);
+        assert!(ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
+        // Consumed: a second check must fail.
+        assert!(!ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
+    }
+
+    #[test]
+    fn ledger_rejects_unrecorded_key() {
+        let mut ledger = PendingOutputLedger::new();
+        ledger.record(VIRTUAL_KEY(0x41), true);
+        assert!(!ledger.check_and_consume(VIRTUAL_KEY(0x42), true));
+        // Original entry still present.
+        assert!(ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
+    }
+
+    #[test]
+    fn ledger_rejects_wrong_direction() {
+        let mut ledger = PendingOutputLedger::new();
+        ledger.record(VIRTUAL_KEY(0x41), true);
+        // Recorded as key-down; a key-up query must not match.
+        assert!(!ledger.check_and_consume(VIRTUAL_KEY(0x41), false));
+        // Key-down entry still present.
+        assert!(ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
+    }
+
+    #[test]
+    fn ledger_distinguishes_multiple_keys() {
+        let mut ledger = PendingOutputLedger::new();
+        ledger.record(VIRTUAL_KEY(0x41), true);
+        ledger.record(VIRTUAL_KEY(0x42), true);
+        assert!(ledger.check_and_consume(VIRTUAL_KEY(0x42), true));
+        assert!(ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
+        assert!(!ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
+    }
+
+    #[test]
+    fn ledger_expires_stale_entries() {
+        let mut ledger = PendingOutputLedger::new();
+        ledger.record(VIRTUAL_KEY(0x41), true);
+        // Wait past the match window so the entry expires.
+        std::thread::sleep(
+            TAG_MATCH_WINDOW + std::time::Duration::from_millis(10),
+        );
+        assert!(!ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
     }
 }
