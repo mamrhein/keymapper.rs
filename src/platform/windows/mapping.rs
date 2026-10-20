@@ -52,10 +52,10 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use parking_lot::RwLock;
 // The drain wake post is only compiled into non-test builds (see
 // `queue_emission`); unit tests never queue an emission.  The shutdown
@@ -85,8 +85,9 @@ use windows::Win32::{
         WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetForegroundWindow,
             GetMessageW, GetWindowThreadProcessId, HHOOK, KBDLLHOOKSTRUCT,
-            MSG, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-            WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
+            MSG, PeekMessageW, PM_REMOVE, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN,
+            WM_SYSKEYDOWN,
         },
     },
 };
@@ -97,11 +98,109 @@ use windows::Win32::{
 // `0xC000`-range private-message window.
 const WM_REQUEST_SHUTDOWN: u32 = WM_APP + 1;
 
+/// Maximum total time a single hook-callback invocation may spend sleeping.
+/// Windows silently unhooks the `WH_KEYBOARD_LL` callback if it runs longer
+/// than `LowLevelHooksTimeout` (default 200 ms in the registry); we stay well
+/// under that so a burst of chord emissions never approaches the deadline.
+const HOOK_SLEEP_BUDGET: std::time::Duration =
+    std::time::Duration::from_millis(100);
+
+/// Sentinel virtual-key code used only for hook self-tests. 0xFE is
+/// `VK_OEM_CLEAR`, which is rarely mapped to a physical key and produces no
+/// output, so injecting it is harmless even if it reaches a window.
+const HOOK_SELFTEST_VK: VIRTUAL_KEY = VIRTUAL_KEY(0xFE);
+
+/// Minimum interval between hook self-tests.
+const HOOK_SELFTEST_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5);
+
 /// How long a `SendInput` emission stays in the pending-output ledger, during
 /// which a matching tagged event is recognized as our own injection.  Generous
 /// enough for hook-chain delivery, short enough to reject delayed replays.
 const TAG_MATCH_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(50);
+
+// ---------------------------------------------------------------------------
+// Hook-callback sleep budget
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Set at the start of `low_level_keyboard_proc` and cleared on exit.
+    /// When present, `hook_sleep` enforces a total sleep budget so the
+    /// callback never approaches Windows' `LowLevelHooksTimeout`.
+    static HOOK_CALLBACK_START: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+
+    /// Last time the hook self-test ran, used to throttle self-tests to
+    /// `HOOK_SELFTEST_INTERVAL`.
+    static LAST_SELFTEST: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Atomic counter incremented by the hook proc each time it processes a
+/// tagged self-test event.  The periodic self-test compares this before and
+/// after a tagged injection to detect a silently-removed hook.
+static HOOK_SELFTEST_SEEN: AtomicU64 = AtomicU64::new(0);
+
+/// Guard that records the hook-callback start time on construction and clears
+/// it on drop.  Re-entrant calls (from `SendInput` re-entering the hook for
+/// tagged events) share the outer call's start time — only the outermost
+/// guard sets and clears the thread-local.
+struct HookCallbackGuard {
+    was_set: bool,
+}
+
+impl HookCallbackGuard {
+    fn new() -> Self {
+        let was_set = HOOK_CALLBACK_START.with(|s| {
+            let already = s.get().is_some();
+            if !already {
+                s.set(Some(std::time::Instant::now()));
+            }
+            already
+        });
+        Self { was_set }
+    }
+}
+
+impl Drop for HookCallbackGuard {
+    fn drop(&mut self) {
+        if !self.was_set {
+            HOOK_CALLBACK_START.with(|s| s.set(None));
+        }
+    }
+}
+
+/// Compute the effective sleep duration given the hook-callback budget.
+/// Returns `None` when the budget is exhausted.
+///
+/// When called outside a hook callback (i.e. from `drain_and_emit_emissions`
+/// in the message loop), there is no cap and the full *duration* is returned.
+fn bounded_sleep(duration: std::time::Duration) -> Option<std::time::Duration> {
+    HOOK_CALLBACK_START.with(|start| {
+        let Some(start) = start.get() else {
+            return Some(duration);
+        };
+        let elapsed = start.elapsed();
+        if elapsed >= HOOK_SLEEP_BUDGET {
+            return None;
+        }
+        let remaining = HOOK_SLEEP_BUDGET - elapsed;
+        Some(duration.min(remaining))
+    })
+}
+
+/// Sleep for *duration*, but never exceed the hook-callback sleep budget.
+///
+/// When called outside a hook callback, this behaves like `std::thread::sleep`.
+/// When called inside one, it tracks elapsed time from the callback's start
+/// and refuses to sleep once the budget is exhausted, so the callback cannot
+/// approach Windows' `LowLevelHooksTimeout` and risk silent unhook.
+fn hook_sleep(duration: std::time::Duration) {
+    if let Some(sleep_for) = bounded_sleep(duration) {
+        std::thread::sleep(sleep_for);
+    }
+}
 
 use super::{
     INJECTED_TAG,
@@ -177,7 +276,7 @@ fn engine() -> Option<&'static parking_lot::Mutex<MappingEngine<EngineKey>>> {
 }
 
 // ---------------------------------------------------------------------------
-// Pending-output ledger (R3-22: forgeable dwExtraInfo tag → remap bypass)
+// Pending-output ledger (forgeable dwExtraInfo tag → remap bypass)
 // ---------------------------------------------------------------------------
 
 /// A pending-output ledger recording the virtual-key codes the daemon has
@@ -241,7 +340,7 @@ static PENDING_OUTPUTS: parking_lot::Mutex<PendingOutputLedger> =
 // rs/src/platform/windows/mapping.rs</arg_value><arg_key>edits</
 // arg_key><arg_value>[{
 // ---------------------------------------------------------------------------
-// Foreground-window elevation check (R3-23: PID-only cache freezes fail-open)
+// Foreground-window elevation check (PID-only cache freezes fail-open)
 // ---------------------------------------------------------------------------
 
 /// Cached elevation verdict for the foreground process, keyed on
@@ -579,7 +678,7 @@ fn simulate_key_event(vk: VIRTUAL_KEY, is_key_up: bool) {
 
     // Record this emission in the pending-output ledger so the hook proc can
     // recognize the tagged event that `SendInput` injects as our own output
-    // (and distinguish it from a forged tag — R3-22).
+    // (and distinguish it from a forged tag).
     PENDING_OUTPUTS.lock().record(vk, !is_key_up);
 
     // Stamp the daemon tag so the hook proc recognizes the event as our own
@@ -621,7 +720,7 @@ pub(super) fn emit_key_event(native_key: &NativeKey) {
         {
             simulate_key_event(vk, false);
             pressed_modifiers.push(vk);
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            hook_sleep(std::time::Duration::from_millis(1));
         }
     }
 
@@ -638,20 +737,20 @@ pub(super) fn emit_key_event(native_key: &NativeKey) {
         // stuck-modifier state.
         for vk in pressed_modifiers.into_iter().rev() {
             simulate_key_event(vk, true);
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            hook_sleep(std::time::Duration::from_millis(1));
         }
         return;
     };
 
     simulate_key_event(VIRTUAL_KEY(base_vk), false);
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    hook_sleep(std::time::Duration::from_millis(1));
 
     simulate_key_event(VIRTUAL_KEY(base_vk), true);
-    std::thread::sleep(std::time::Duration::from_millis(1));
+    hook_sleep(std::time::Duration::from_millis(1));
 
     for vk in pressed_modifiers.into_iter().rev() {
         simulate_key_event(vk, true);
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        hook_sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -668,7 +767,7 @@ fn release_modifiers(mask: u8) {
             && let Some(vk) = modifier_bit_to_vk(bit)
         {
             simulate_key_event(vk, true);
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            hook_sleep(std::time::Duration::from_millis(1));
         }
     }
 }
@@ -690,7 +789,7 @@ fn hold_modifier_output(native_key: &NativeKey) {
             && let Some(vk) = modifier_bit_to_vk(bit)
         {
             simulate_key_event(vk, false);
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            hook_sleep(std::time::Duration::from_millis(1));
         }
     }
 
@@ -698,7 +797,7 @@ fn hold_modifier_output(native_key: &NativeKey) {
         && let Some(vk) = modifier_bit_to_vk(bit)
     {
         simulate_key_event(vk, false);
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        hook_sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -760,6 +859,98 @@ static PENDING_EMISSIONS: parking_lot::Mutex<Vec<Vec<NativeKey>>> =
 /// The main message loop's thread id, recorded in `start_mapping` so the
 /// raw input thread can post the drain wake message.
 static MAIN_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+/// Reinstall the low-level keyboard hook after a self-test detected that
+/// the OS silently removed it (e.g. by a timeout).  Unhooking the old handle
+/// is best-effort — it may already be invalid — and a fresh handle is installed
+/// in its place.
+fn reinstall_hook() -> Result<(), Box<dyn std::error::Error>> {
+    let h_instance: HINSTANCE = unsafe { GetModuleHandleW(None)?.into() };
+
+    // Unhook the old handle (best-effort — it may already be invalid if the
+    // OS removed it).
+    let old = hook_handle();
+    if !old.is_invalid() {
+        let _ = unsafe { UnhookWindowsHookEx(old) };
+    }
+
+    let handle = unsafe {
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(low_level_keyboard_proc),
+            Some(h_instance),
+            0,
+        )?
+    };
+
+    if handle.is_invalid() {
+        return Err("Failed to reinstall global keyboard hook".into());
+    }
+
+    set_hook_handle(handle);
+    info!("Windows low-level hook reinstalled after self-test failure.");
+    Ok(())
+}
+
+/// Check that the low-level keyboard hook is still installed by injecting a
+/// tagged sentinel event and verifying it round-trips through the hook.
+/// If the hook has been silently removed, reinstall it.
+///
+/// Called periodically from the message loop.
+fn hook_self_test() {
+    let before = HOOK_SELFTEST_SEEN.load(Ordering::Relaxed);
+
+    // Inject a tagged sentinel event (key-down + key-up).
+    let inputs = [
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: HOOK_SELFTEST_VK,
+                    wScan: 0,
+                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(0),
+                    time: 0,
+                    dwExtraInfo: INJECTED_TAG,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: HOOK_SELFTEST_VK,
+                    wScan: 0,
+                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYBD_EVENT_FLAGS(KEYEVENTF_KEYUP.0),
+                    time: 0,
+                    dwExtraInfo: INJECTED_TAG,
+                },
+            },
+        },
+    ];
+
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != 2 {
+        return;
+    }
+
+    // Pump messages briefly so the system processes the raw input and calls
+    // the hook callback (if the hook is still installed).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(10);
+    let mut msg = MSG::default();
+    while std::time::Instant::now() < deadline {
+        while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).into() } {
+            // Discard messages from the sentinel injection.
+        }
+        if HOOK_SELFTEST_SEEN.load(Ordering::Relaxed) > before {
+            return; // Hook is alive.
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    // Hook did not see the sentinel → silently removed; reinstall.
+    warn!("Hook self-test failed; reinstalling.");
+    let _ = reinstall_hook();
+}
 
 /// Records the main loop's thread id for the drain wake post.
 fn set_main_thread_id(tid: u32) {
@@ -842,16 +1033,30 @@ extern "system" fn low_level_keyboard_proc(
         return unsafe { CallNextHookEx(None, code, w_param, l_param) };
     }
 
+    // Track the callback start time so `hook_sleep` can cap total in-callback
+    // sleep and keep the callback well inside Windows' `LowLevelHooksTimeout`.
+    let _guard = HookCallbackGuard::new();
+
     let kbd_struct = unsafe { &*(l_param.0 as *const KBDLLHOOKSTRUCT) };
     let vk_code = VIRTUAL_KEY(kbd_struct.vkCode as u16);
     let is_key_down = matches!(w_param.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+
+    // Self-test sentinel: if we see our own tagged test event, increment the
+    // counter and pass through.  This is checked before the ledger so the
+    // sentinel is never recorded there.
+    if kbd_struct.dwExtraInfo == INJECTED_TAG && vk_code == HOOK_SELFTEST_VK {
+        HOOK_SELFTEST_SEEN.fetch_add(1, Ordering::Relaxed);
+        return unsafe {
+            CallNextHookEx(Some(hook_handle()), code, w_param, l_param)
+        };
+    }
 
     // Every key the daemon injects through `SendInput` is stamped with
     // [`INJECTED_TAG`].  A matching entry in the pending-output ledger
     // confirms the event is our own injection; let it flow on un-remapped.
     // A tagged event without a ledger match is treated as a hint at most —
     // the event falls through to the normal remapping decision, so a forged
-    // tag can no longer bypass a mapping (R3-22).
+    // tag can no longer bypass a mapping.
     if kbd_struct.dwExtraInfo == INJECTED_TAG
         && PENDING_OUTPUTS
             .lock()
@@ -997,7 +1202,7 @@ fn match_usage_with_retry(usage: HidUsage) -> Option<usize> {
         if std::time::Instant::now() >= deadline {
             return None;
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        hook_sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -1068,9 +1273,30 @@ pub fn start_mapping(
     // consumer outputs.  All other messages — including the raw input
     // window's `WM_INPUT`, which is owned by this thread — are translated and
     // dispatched normally.
+    //
+    // A periodic self-test checks that the hook is still alive by
+    // injecting a tagged sentinel event and verifying it round-trips through
+    // the hook.  If the OS silently removed the hook (e.g. by a timeout that
+    // slipped past the sleep budget), the self-test reinstalls it.
     unsafe {
         let mut msg = MSG::default();
         loop {
+            // Run the self-test at the start of each iteration.  When no
+            // messages are pending `GetMessageW` blocks, so the self-test only
+            // fires when input is being processed — which is exactly when the
+            // hook is at risk of a timeout.
+            LAST_SELFTEST.with(|last| {
+                let now = std::time::Instant::now();
+                let do_test = match last.get() {
+                    None => true,
+                    Some(prev) => now.duration_since(prev) >= HOOK_SELFTEST_INTERVAL,
+                };
+                if do_test {
+                    last.set(Some(now));
+                    hook_self_test();
+                }
+            });
+
             let got_message = GetMessageW(&mut msg, None, 0, 0);
             // `GetMessageW` returns FALSE on WM_QUIT (and on error).
             if !got_message.as_bool() {
@@ -1150,7 +1376,7 @@ mod tests {
         }
     }
 
-    // -- PendingOutputLedger (R3-22) --
+    // -- PendingOutputLedger --
 
     #[test]
     fn ledger_records_and_consumes_match() {
@@ -1201,7 +1427,7 @@ mod tests {
         assert!(!ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
     }
 
-    // -- FgElevationCache (R3-23) --
+    // -- FgElevationCache --
 
     #[test]
     fn elevation_cache_returns_verdict_on_match() {
@@ -1255,5 +1481,36 @@ mod tests {
         cache.update(1000, hwnd, false, 0x01D8_0000_0000_0000, false);
         assert_eq!(cache.creation_time, 0x01D8_0000_0000_0000);
         assert!(!cache.elevated);
+    }
+
+    // -- Hook-callback sleep budget --
+
+    #[test]
+    fn bounded_sleep_no_cap_outside_callback() {
+        // Without a callback start time, there is no cap.
+        let result = bounded_sleep(std::time::Duration::from_secs(1));
+        assert_eq!(result, Some(std::time::Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn bounded_sleep_caps_at_budget() {
+        HOOK_CALLBACK_START.with(|s| s.set(Some(std::time::Instant::now())));
+        // A duration exceeding the budget should be capped.
+        let result = bounded_sleep(std::time::Duration::from_secs(1));
+        assert!(result.is_some());
+        assert!(result.unwrap() <= HOOK_SLEEP_BUDGET);
+        // Clean up so other tests are not affected.
+        HOOK_CALLBACK_START.with(|s| s.set(None));
+    }
+
+    #[test]
+    fn bounded_sleep_none_when_budget_exhausted() {
+        // Set the start time far enough in the past that the budget is
+        // already exhausted, then verify that sleep is refused.
+        HOOK_CALLBACK_START.with(|s| {
+            s.set(Some(std::time::Instant::now() - HOOK_SLEEP_BUDGET * 2));
+        });
+        assert_eq!(bounded_sleep(std::time::Duration::from_millis(1)), None);
+        HOOK_CALLBACK_START.with(|s| s.set(None));
     }
 }
