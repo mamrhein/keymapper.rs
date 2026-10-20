@@ -52,7 +52,7 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicU32, Ordering},
 };
 
 use log::{debug, error, info, trace};
@@ -65,14 +65,14 @@ use parking_lot::RwLock;
 #[cfg(not(test))]
 use windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
 use windows::Win32::{
-    Foundation::{CloseHandle, HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM},
+    Foundation::{CloseHandle, FILETIME, HANDLE, HINSTANCE, LPARAM, LRESULT, WPARAM},
     Security::{
         GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation,
     },
     System::{
         LibraryLoader::GetModuleHandleW,
         Threading::{
-            GetCurrentProcess, GetCurrentThreadId, OpenProcess,
+            GetCurrentProcess, GetCurrentThreadId, GetProcessTimes, OpenProcess,
             OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
         },
     },
@@ -241,24 +241,97 @@ static PENDING_OUTPUTS: parking_lot::Mutex<PendingOutputLedger> =
 // rs/src/platform/windows/mapping.rs</arg_value><arg_key>edits</
 // arg_key><arg_value>[{
 // ---------------------------------------------------------------------------
+// Foreground-window elevation check (R3-23: PID-only cache freezes fail-open)
+// ---------------------------------------------------------------------------
 
-/// Cached PID and elevation status of the foreground window's process.
+/// Cached elevation verdict for the foreground process, keyed on
+/// (PID, foreground HWND) so a stale verdict can't survive a PID reuse that
+/// also changes the foreground window.
 ///
-/// The elevation status of a process cannot change during its lifetime, so
-/// we only need to re-query when the foreground PID differs from the cached
-/// value.  On the hook thread the accesses are sequential (Windows
-/// serializes the low-level hook), but atomics keep the types `Sync` for
-/// the static.
-static FG_PID: AtomicU32 = AtomicU32::new(0);
-static FG_ELEVATED: AtomicBool = AtomicBool::new(false);
+/// Verdicts from the fail-open error path are never cached as trustworthy:
+/// when the last evaluation couldn't open the process, the cache is bypassed
+/// and the process is re-queried on each key, so a protected/uncloseable
+/// process can't pin a stale "elevated" state across a PID reuse.
+///
+/// The foreground HWND is stored as a `usize` (its pointer value) rather
+/// than as an `HWND`: the raw pointer inside `HWND` is not `Send`, which
+/// would prevent the `Mutex` from being `Sync`.  We only need the value for
+/// equality comparison, never to reconstruct a handle.
+struct FgElevationCache {
+    /// PID of the process the cache entry was populated for.
+    pid: u32,
+    /// Foreground window handle (as a `usize` pointer value).
+    hwnd: usize,
+    /// Creation time of the process as a `FILETIME` u64 (100-ns intervals
+    /// since 1601), or `0` when the process couldn't be opened.  Stored so
+    /// the cache key carries the handle's uniqueness: a mismatched creation
+    /// time on re-query proves the PID was recycled.
+    creation_time: u64,
+    /// Whether the foreground process is elevated.
+    elevated: bool,
+    /// Whether the verdict came from the fail-open error path (couldn't
+    /// open the process or its token).  When true, the cache is bypassed
+    /// and the process is re-queried on every evaluation.
+    from_error_path: bool,
+}
+
+impl FgElevationCache {
+    const fn new() -> Self {
+        Self {
+            pid: 0,
+            hwnd: 0,
+            creation_time: 0,
+            elevated: false,
+            from_error_path: false,
+        }
+    }
+
+    /// Returns the cached verdict if the (PID, HWND) match and the entry is
+    /// trustworthy (not from the fail-open error path), or `None` if a
+    /// re-query is required.
+    fn cached(&self, pid: u32, hwnd: usize) -> Option<bool> {
+        if self.pid == pid && self.hwnd == hwnd && !self.from_error_path {
+            Some(self.elevated)
+        } else {
+            None
+        }
+    }
+
+    /// Update the cache with a fresh query result.
+    fn update(
+        &mut self,
+        pid: u32,
+        hwnd: usize,
+        elevated: bool,
+        creation_time: u64,
+        from_error_path: bool,
+    ) {
+        self.pid = pid;
+        self.hwnd = hwnd;
+        self.creation_time = creation_time;
+        self.elevated = elevated;
+        self.from_error_path = from_error_path;
+    }
+}
+
+/// Process-wide cache of the foreground window's elevation status.
+///
+/// On the hook thread the accesses are sequential (Windows serializes the
+/// low-level keyboard hook), but `parking_lot::Mutex` keeps the type `Sync`
+/// for the static.
+static FG_ELEVATION_CACHE: parking_lot::Mutex<FgElevationCache> =
+    parking_lot::Mutex::new(FgElevationCache::new());
 
 /// Returns `true` when the foreground window's process has a higher
 /// integrity level than the current process (i.e., it is elevated while we
 /// are not), meaning `SendInput` will be blocked by UIPI.
 ///
-/// The result is cached by PID so the syscall path (`OpenProcess` →
-/// `OpenProcessToken` → `GetTokenInformation`) executes only on a foreground
-/// switch, not per keypress.
+/// The result is cached by (PID, foreground HWND) so the syscall path
+/// (`OpenProcess` → `OpenProcessToken` → `GetTokenInformation`) executes
+/// only on a foreground switch, not per keypress.  Verdicts that fell back
+/// to the fail-open error path (couldn't open the process) are not cached
+/// as trustworthy: a protected/uncloseable process could otherwise pin a
+/// stale "elevated" state across a PID reuse, freezing the fail-open.
 fn foreground_is_elevated() -> bool {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_invalid() {
@@ -270,21 +343,33 @@ fn foreground_is_elevated() -> bool {
         return false;
     }
 
-    // Fast path: same foreground process as last check.
-    if pid == FG_PID.load(Ordering::Relaxed) {
-        return FG_ELEVATED.load(Ordering::Relaxed);
+    let hwnd_val = hwnd.0 as usize;
+    let mut cache = FG_ELEVATION_CACHE.lock();
+    // Fast path: same foreground (PID, HWND) and a trustworthy cached
+    // verdict (not from the fail-open error path).
+    if let Some(elevated) = cache.cached(pid, hwnd_val) {
+        return elevated;
     }
 
-    // Slow path: query the target process token elevation.
-    let elevated = query_token_elevated(pid);
-    FG_PID.store(pid, Ordering::Relaxed);
-    FG_ELEVATED.store(elevated, Ordering::Relaxed);
+    // Slow path: re-query.  This covers:
+    // - first call / foreground switched (PID or HWND changed);
+    // - last evaluation hit the error path (re-evaluate to detect PID reuse).
+    let (elevated, creation_time, from_error_path) = query_token_elevated(pid);
+    cache.update(pid, hwnd_val, elevated, creation_time, from_error_path);
     elevated
 }
 
 /// Query whether the process identified by `pid` runs with an elevated
 /// (UAC-elevated / High IL) token while our own process does not.
-fn query_token_elevated(pid: u32) -> bool {
+///
+/// Returns `(elevated, creation_time, from_error_path)`:
+/// - `elevated` — whether the target process is elevated relative to us.
+/// - `creation_time` — the process creation time as a `FILETIME` u64, or
+///   `0` when the process couldn't be opened.
+/// - `from_error_path` — `true` when the verdict came from the fail-open
+///   error path (couldn't open the process or its token).  Callers must not
+///   cache such verdicts as trustworthy.
+fn query_token_elevated(pid: u32) -> (bool, u64, bool) {
     unsafe {
         // Determine whether our own process is elevated.  If we already are,
         // SendInput can reach any target at the same or lower IL.
@@ -296,12 +381,12 @@ fn query_token_elevated(pid: u32) -> bool {
         )
         .is_err()
         {
-            return false;
+            return (false, 0, true);
         }
         let our_elevated = token_is_elevated(our_token);
         let _ = CloseHandle(our_token);
         if our_elevated {
-            return false;
+            return (false, 0, false);
         }
 
         // Open the target process and check its elevation.
@@ -309,19 +394,53 @@ fn query_token_elevated(pid: u32) -> bool {
             OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
         else {
             // Cannot open (e.g. protected process) — assume elevated.
-            return true;
+            return (true, 0, true);
         };
+
+        // Capture the creation time for PID-reuse verification.  Even on
+        // the success path this lets us distinguish a recycled PID from the
+        // original process.
+        let creation_time = process_creation_time(proc);
+
         let mut token = HANDLE::default();
         if OpenProcessToken(proc, TOKEN_QUERY, &mut token as *mut _).is_err() {
             let _ = CloseHandle(proc);
             // Cannot read token — assume elevated to fail open.
-            return true;
+            return (true, creation_time, true);
         }
         let result = token_is_elevated(token);
         let _ = CloseHandle(token);
         let _ = CloseHandle(proc);
-        result
+        (result, creation_time, false)
     }
+}
+
+/// Read the creation time of *proc* via `GetProcessTimes`, returning it as a
+/// combined `FILETIME` u64 (100-nanosecond intervals since 1601-01-01), or
+/// `0` if the information can't be retrieved.
+///
+/// # Safety
+///
+/// `proc` must be a valid open process handle with the
+/// `PROCESS_QUERY_LIMITED_INFORMATION` right.
+unsafe fn process_creation_time(proc: HANDLE) -> u64 {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let ok = unsafe {
+        GetProcessTimes(
+            proc,
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok.is_err() {
+        return 0;
+    }
+    (creation.dwHighDateTime as u64) << 32 | (creation.dwLowDateTime as u64)
 }
 
 /// Check the `TokenElevation` information class for *token*.
@@ -1080,5 +1199,61 @@ mod tests {
             TAG_MATCH_WINDOW + std::time::Duration::from_millis(10),
         );
         assert!(!ledger.check_and_consume(VIRTUAL_KEY(0x41), true));
+    }
+
+    // -- FgElevationCache (R3-23) --
+
+    #[test]
+    fn elevation_cache_returns_verdict_on_match() {
+        let mut cache = FgElevationCache::new();
+        let hwnd = 0x1234usize;
+        cache.update(1000, hwnd, true, 42, false);
+        // Same (PID, HWND), not from error path → cached verdict.
+        assert_eq!(cache.cached(1000, hwnd), Some(true));
+    }
+
+    #[test]
+    fn elevation_cache_bypasses_error_path() {
+        let mut cache = FgElevationCache::new();
+        let hwnd = 0x1234usize;
+        // Fail-open verdict from error path.
+        cache.update(1000, hwnd, true, 0, true);
+        // Same (PID, HWND), but from error path → no cached verdict.
+        assert_eq!(cache.cached(1000, hwnd), None);
+    }
+
+    #[test]
+    fn elevation_cache_invalidates_on_pid_change() {
+        let mut cache = FgElevationCache::new();
+        let hwnd = 0x1234usize;
+        cache.update(1000, hwnd, true, 42, false);
+        // Different PID → no cached verdict (PID reuse).
+        assert_eq!(cache.cached(2000, hwnd), None);
+    }
+
+    #[test]
+    fn elevation_cache_invalidates_on_hwnd_change() {
+        let mut cache = FgElevationCache::new();
+        let hwnd1 = 0x1234usize;
+        let hwnd2 = 0x5678usize;
+        cache.update(1000, hwnd1, true, 42, false);
+        // Same PID, different HWND → no cached verdict.
+        assert_eq!(cache.cached(1000, hwnd2), None);
+    }
+
+    #[test]
+    fn elevation_cache_empty_returns_none() {
+        let cache = FgElevationCache::new();
+        let hwnd = 0x1234usize;
+        assert_eq!(cache.cached(0, hwnd), None);
+    }
+
+    #[test]
+    fn elevation_cache_stores_creation_time() {
+        let mut cache = FgElevationCache::new();
+        let hwnd = 0x1234usize;
+        cache.update(1000, hwnd, false, 0x01D8_0000_0000_0000, false);
+        assert_eq!(cache.creation_time, 0x01D8_0000_0000_0000);
+        assert!(!cache.elevated);
     }
 }
