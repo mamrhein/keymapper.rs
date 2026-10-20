@@ -81,12 +81,15 @@ use windows::{
             IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
             Pipes::{
                 ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe,
-                NAMED_PIPE_MODE, PIPE_READMODE_BYTE,
-                PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, WaitNamedPipeW,
+                GetNamedPipeClientProcessId, NAMED_PIPE_MODE,
+                PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+                PIPE_TYPE_BYTE, WaitNamedPipeW,
             },
             Threading::{
-                CreateEventW, GetCurrentProcess, OpenProcessToken, ResetEvent,
-                WaitForSingleObject,
+                CreateEventW, GetCurrentProcess, OpenProcess,
+                OpenProcessToken, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+                ResetEvent, WaitForSingleObject,
             },
         },
     },
@@ -123,10 +126,10 @@ fn contains_control_chars(s: &str) -> bool {
 /// Validate the published name's shape: it must start with [`PIPE_PREFIX`]
 /// and carry a 32-hex-nonce, with no control characters.
 ///
-/// This is the client-side gate that turns a squattable publish file (see
-/// R3-7) into a non-issue: even if an attacker can write the publish file,
-/// they cannot redirect the client to a pipe outside the daemon's namespace
-/// without also guessing the per-run nonce.
+/// This is the client-side gate that turns a squattable publish file into a
+/// non-issue: even if an attacker can write the publish file, they cannot
+/// redirect the client to a pipe outside the daemon's namespace without also
+/// guessing the per-run nonce.
 fn is_valid_pipe_name(name: &str) -> bool {
     if let Some(nonce) = name.strip_prefix(PIPE_PREFIX) {
         return !contains_control_chars(nonce)
@@ -190,8 +193,9 @@ const BUSY_RETRY_WAIT_MS: u32 = 100;
 /// wedge time bounded.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Sliding-window size for connection rate limiting (Finding 6). Windows
-/// has no uid concept, so all connections share one bucket.
+/// Sliding-window size for connection rate limiting. On Unix the peer uid is
+/// the bucket key; on Windows the peer PID is used since there is no uid
+/// concept.
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(1);
 
 /// Maximum accepted connections within [`RATE_LIMIT_WINDOW`].
@@ -237,10 +241,10 @@ struct Pipe {
 ///
 /// Closes its handle on drop. The daemon serves one connection at a time on a
 /// single pipe instance and releases the instance only after the client end
-/// closes (or the daemon's close-wait times out, see
-/// `wait_for_client_close`), so a handle that outlived the
-/// exchange would keep the instance connected and every later `CreateFileW`
-/// would fail with `ERROR_PIPE_BUSY` until the client process exits.
+/// closes (or the daemon's close-wait times out, see `wait_for_client_close`),
+/// so a handle that outlived the exchange would keep the instance connected
+/// and every later `CreateFileW` would fail with `ERROR_PIPE_BUSY` until the
+/// client process exits.
 struct ClientPipe {
     handle: PipeHandle,
 }
@@ -652,7 +656,7 @@ fn register_shutdown_cleanup(path: &Path) {
 /// DACL applied, so a readable publish file always names a genuine
 /// endpoint.
 ///
-/// Security hardening (R3-7):
+/// Security hardening:
 /// - Reject the path if it is a reparse point (symlink/junction), which an
 ///   attacker could plant to redirect the write.
 /// - Delete any stale regular file first, then create exclusively
@@ -859,10 +863,21 @@ fn serve(handle: PipeHandle, handler: ConnectionHandler) {
         if !accept_client(handle, event) {
             continue;
         }
+        // Attribute the connection to the peer process (R3-32): resolve the
+        // client PID, log its image path, and use the PID as the rate-limit
+        // bucket so a single flooding client cannot exhaust the shared quota.
+        let peer_pid = client_pid(handle.0);
+        if let Some(pid) = peer_pid {
+            if let Some(path) = client_image_path(pid) {
+                debug!("control-pipe connection from pid {pid} ({path})");
+            } else {
+                debug!("control-pipe connection from pid {pid}");
+            }
+        }
         // Rate limit: reject excess connections so a peer cannot flood the
-        // single pipe instance (Finding 6). Windows has no uid, so all
-        // connections share one bucket.
-        if !rate_limiter.check_and_record(0) {
+        // single pipe instance (Finding 6). On Windows the peer PID is the
+        // bucket key; a failed lookup falls back to the shared bucket (R3-32).
+        if !rate_limiter.check_and_record(peer_pid.unwrap_or(0)) {
             debug!("control-pipe rate limit exceeded");
             unsafe {
                 let _ = DisconnectNamedPipe(handle.0);
@@ -921,6 +936,54 @@ fn accept_client(handle: PipeHandle, event: HANDLE) -> bool {
             false
         }
     }
+}
+
+/// Get the PID of the client connected to a named-pipe instance.
+///
+/// After `ConnectNamedPipe` succeeds, `GetNamedPipeClientProcessId` returns
+/// the kernel process ID of the connecting peer. Windows has no uid concept,
+/// so the PID is the transport's per-peer identifier: it is used to attribute
+/// each connection in the log and as the rate-limit bucket key (R3-32). A `0`
+/// PID — returned only when the lookup itself fails — falls back to the
+/// shared bucket.
+fn client_pid(handle: HANDLE) -> Option<u32> {
+    let mut pid = 0u32;
+    unsafe { GetNamedPipeClientProcessId(handle, &mut pid).ok() }?;
+    (pid != 0).then_some(pid)
+}
+
+/// Resolve a PID to its full executable path for connection attribution.
+///
+/// Opens the process with limited query rights and asks for the Win32 file
+/// path. Failures (process already exited, protected process) return `None`
+/// so attribution degrades to the bare PID without blocking the serve loop.
+fn client_image_path(pid: u32) -> Option<String> {
+    let handle =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .ok()?;
+    // Image paths rarely exceed 1024 UTF-16 units; retry with a much larger
+    // buffer when the path is longer than that.
+    let result = [1024usize, 32_768].into_iter().find_map(|capacity| {
+        let mut buffer = vec![0u16; capacity];
+        let mut size = capacity as u32;
+        if unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut size,
+            )
+        }
+        .is_err()
+        {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buffer[..size as usize]);
+        (!path.is_empty()).then_some(path)
+    });
+    // `CloseHandle` fails only with an invalid handle, which would be a bug.
+    let _ = unsafe { CloseHandle(handle) };
+    result
 }
 
 /// Block until the client closes its end of the pipe.
