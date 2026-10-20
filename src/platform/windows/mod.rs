@@ -20,9 +20,13 @@ mod raw_worker;
 /// Magic `dwExtraInfo` tag stamped on every key the daemon injects through
 /// `SendInput`.
 ///
-/// The daemon's hook proc matches on this tag to pass its own injections
-/// through without re-mapping them.  A distinctive value keeps it from
-/// colliding with tags other input sources may use.
+/// The tag alone is not an authenticator: any process at or below the
+/// daemon's integrity level can stamp it on its own `SendInput` events.  The
+/// hook proc therefore treats the tag as a hint and additionally requires a
+/// matching entry in the pending-output ledger (`PendingOutputLedger` in
+/// `windows::mapping`), which records each emission with a timestamp and
+/// expires stale entries.  A tagged event without a ledger match falls through
+/// to the normal remapping decision.
 ///
 /// `pub(crate)` because it is a self-echo-suppression detail of the Windows
 /// capture path (read by `windows::mapping`); it was never a supported
