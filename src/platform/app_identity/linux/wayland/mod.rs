@@ -9,10 +9,11 @@
 
 //! Wayland active window query via compositor-specific mechanisms.
 //!
-//! Probes compositors in order: KDE (KWin), GNOME (behind the
-//! `gnome-eval` feature), COSMIC, then wlroots-based compositors and
-//! Hyprland.  Each probe is a synchronous, blocking operation that
-//! connects, queries, and disconnects immediately.
+//! When `$XDG_CURRENT_DESKTOP` names a supported compositor, only that
+//! compositor is queried.  Otherwise all are probed in order: KDE (KWin),
+//! GNOME (behind the `gnome-eval` feature), COSMIC, then wlroots-based
+//! compositors and Hyprland.  Each probe is a synchronous, blocking
+//! operation that connects, queries, and disconnects immediately.
 //!
 //! Wherever a compositor reports the active window's owning process (KDE,
 //! GNOME), the PID is resolved to the `.desktop` application id via
@@ -55,12 +56,24 @@ use wlroots::query_wlroots;
 
 /// Synchronously query the current foreground application name on Wayland.
 ///
-/// Tries each compositor backend in order and returns the first successful
-/// result.  Returns `"unknown"` if no backend succeeds.
+/// When `$XDG_CURRENT_DESKTOP` names a compositor we have a backend for,
+/// only that backend is queried.  Otherwise each compositor backend is
+/// tried in order and the first successful result is returned.  Returns
+/// `"unknown"` if no backend succeeds.
 pub fn get_active_app_name() -> String {
-    // Probe each compositor in priority order.  The GNOME backend is gated
-    // behind the `gnome-eval` feature because it runs JavaScript in the shell
-    // context via D-Bus `org.gnome.Shell.Eval`.
+    // Every session type we support exports `$XDG_CURRENT_DESKTOP`, so
+    // trust it and skip probing compositors that cannot be the active one.
+    if let Some(query) = compositor_from_env() {
+        let result = query();
+        if !result.is_empty() && result != "unknown" {
+            return result;
+        }
+        return "unknown".to_string();
+    }
+
+    // Fallback: probe each compositor in priority order.  The GNOME backend
+    // is gated behind the `gnome-eval` feature because it runs JavaScript in
+    // the shell context via D-Bus `org.gnome.Shell.Eval`.
     #[cfg(feature = "gnome-eval")]
     let candidates: &[fn() -> String] = &[
         query_kde,
@@ -81,6 +94,42 @@ pub fn get_active_app_name() -> String {
     }
 
     "unknown".to_string()
+}
+
+/// Return the compositor backend that `$XDG_CURRENT_DESKTOP` names, if any.
+///
+/// Returns `None` when the variable is unset or empty, which makes
+/// [`get_active_app_name`] fall back to probing every backend.
+fn compositor_from_env() -> Option<fn() -> String> {
+    compositor_for_desktop(&std::env::var("XDG_CURRENT_DESKTOP").ok()?)
+}
+
+/// Map a `$XDG_CURRENT_DESKTOP` value to its compositor backend.
+///
+/// Per the desktop-entry specification the variable may hold a
+/// colon-separated list of names (e.g. `GNOME:ubuntu`); the first known
+/// name wins and names are matched case-insensitively.  Returns `None`
+/// when no name matches a backend (an unknown desktop, or GNOME without
+/// the `gnome-eval` feature), which lets the caller fall back to probing
+/// every backend.
+///
+/// Split out from [`compositor_from_env`] so it can be tested without
+/// mutating the process environment.
+fn compositor_for_desktop(desktop: &str) -> Option<fn() -> String> {
+    desktop.to_ascii_lowercase().split(':').find_map(|name| {
+        let backend: fn() -> String = match name.trim() {
+            "kde" => query_kde,
+            #[cfg(feature = "gnome-eval")]
+            "gnome" => query_gnome,
+            "cosmic" => query_cosmic,
+            // Sway and niri speak the sway-compatible IPC protocol; the
+            // backend additionally requires `SWAYSOCK` to be set.
+            "sway" | "niri" => query_wlroots,
+            "hyprland" => query_hyprland,
+            _ => return None,
+        };
+        Some(backend)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -196,9 +245,14 @@ fn find_json_string(value: &serde_json::Value, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, ptr};
 
-    use super::{extract_json_field, find_wayland_socket};
+    #[cfg(feature = "gnome-eval")]
+    use super::query_gnome;
+    use super::{
+        compositor_for_desktop, extract_json_field, find_wayland_socket,
+        query_cosmic, query_hyprland, query_kde, query_wlroots,
+    };
 
     #[test]
     fn finds_lowest_display_number() {
@@ -231,6 +285,57 @@ mod tests {
     fn missing_dir_returns_none() {
         let dir = std::path::Path::new("/nonexistent-keymapper-runtime-dir");
         assert!(find_wayland_socket(dir).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // compositor_for_desktop (XDG_CURRENT_DESKTOP → backend mapping)
+    // -----------------------------------------------------------------------
+
+    /// Compare backends by address without calling them; a live query would
+    /// hit D-Bus or a compositor socket.
+    fn selects(desktop: &str, expected: fn() -> String) -> bool {
+        compositor_for_desktop(desktop)
+            .is_some_and(|query| ptr::fn_addr_eq(query, expected))
+    }
+
+    #[test]
+    fn desktop_names_select_matching_backend() {
+        // Names are matched case-insensitively; these are the values the
+        // respective sessions export.
+        assert!(selects("KDE", query_kde));
+        assert!(selects("COSMIC", query_cosmic));
+        assert!(selects("sway", query_wlroots));
+        assert!(selects("niri", query_wlroots));
+        assert!(selects("Hyprland", query_hyprland));
+    }
+
+    #[cfg(feature = "gnome-eval")]
+    #[test]
+    fn desktop_names_select_gnome_with_feature() {
+        assert!(selects("GNOME", query_gnome));
+    }
+
+    #[cfg(not(feature = "gnome-eval"))]
+    #[test]
+    fn gnome_without_feature_probes_all() {
+        // Without the gated backend there is nothing to select, so the
+        // caller falls back to probing every compositor.
+        assert!(compositor_for_desktop("GNOME").is_none());
+    }
+
+    #[test]
+    fn colon_separated_list_finds_known_name() {
+        // Fedora/Ubuntu-style values carry a flavor token next to the
+        // desktop name; the first known name in the list wins.
+        assert!(selects("KDE:Plasma", query_kde));
+        assert!(selects("ubuntu:sway", query_wlroots));
+    }
+
+    #[test]
+    fn unknown_or_empty_desktop_probes_all() {
+        assert!(compositor_for_desktop("").is_none());
+        assert!(compositor_for_desktop("XFCE").is_none());
+        assert!(compositor_for_desktop("wayfire").is_none());
     }
 
     // -----------------------------------------------------------------------
