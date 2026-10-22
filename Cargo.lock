@@ -967,6 +967,7 @@ dependencies = [
  "time",
  "udev",
  "wayland-client",
+ "wayland-protocols-wlr",
  "windows",
  "x11rb",
  "zbus",

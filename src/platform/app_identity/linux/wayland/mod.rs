@@ -12,8 +12,9 @@
 //! When `$XDG_CURRENT_DESKTOP` names a supported compositor, only that
 //! compositor is queried.  Otherwise all are probed in order: KDE (KWin),
 //! GNOME (behind the `gnome-eval` feature), COSMIC, then wlroots-based
-//! compositors and Hyprland.  Each probe is a synchronous, blocking
-//! operation that connects, queries, and disconnects immediately.
+//! compositors, Hyprland, and finally the XFCE (labwc) foreign-toplevel
+//! query.  Each probe is a synchronous, blocking operation that connects,
+//! queries, and disconnects immediately.
 //!
 //! Wherever a compositor reports the active window's owning process (KDE,
 //! GNOME), the PID is resolved to the `.desktop` application id via
@@ -30,6 +31,7 @@
 //! - [`cosmic`] — cosmic-toplevel-info Wayland protocol
 //! - [`wlroots`] — sway/wlroots IPC socket query
 //! - [`hyprland`] — Hyprland control socket query
+//! - [`xfce`] — labwc foreign-toplevel Wayland protocol query
 //!
 //! Shared Wayland connection and JSON parsing helpers live in this parent
 //! module.
@@ -46,6 +48,7 @@ mod gnome;
 mod hyprland;
 mod kde;
 mod wlroots;
+mod xfce;
 
 use cosmic::query_cosmic;
 #[cfg(feature = "gnome-eval")]
@@ -53,6 +56,7 @@ use gnome::query_gnome;
 use hyprland::query_hyprland;
 use kde::query_kde;
 use wlroots::query_wlroots;
+use xfce::query_xfce;
 
 /// Synchronously query the current foreground application name on Wayland.
 ///
@@ -81,10 +85,16 @@ pub fn get_active_app_name() -> String {
         query_cosmic,
         query_wlroots,
         query_hyprland,
+        query_xfce,
     ];
     #[cfg(not(feature = "gnome-eval"))]
-    let candidates: &[fn() -> String] =
-        &[query_kde, query_cosmic, query_wlroots, query_hyprland];
+    let candidates: &[fn() -> String] = &[
+        query_kde,
+        query_cosmic,
+        query_wlroots,
+        query_hyprland,
+        query_xfce,
+    ];
 
     for query in candidates {
         let result = query();
@@ -126,6 +136,9 @@ fn compositor_for_desktop(desktop: &str) -> Option<fn() -> String> {
             // backend additionally requires `SWAYSOCK` to be set.
             "sway" | "niri" => query_wlroots,
             "hyprland" => query_hyprland,
+            // The XFCE Wayland session runs labwc; the backend queries
+            // the foreign-toplevel global labwc advertises.
+            "xfce" => query_xfce,
             _ => return None,
         };
         Some(backend)
@@ -251,7 +264,7 @@ mod tests {
     use super::query_gnome;
     use super::{
         compositor_for_desktop, extract_json_field, find_wayland_socket,
-        query_cosmic, query_hyprland, query_kde, query_wlroots,
+        query_cosmic, query_hyprland, query_kde, query_wlroots, query_xfce,
     };
 
     #[test]
@@ -307,6 +320,8 @@ mod tests {
         assert!(selects("sway", query_wlroots));
         assert!(selects("niri", query_wlroots));
         assert!(selects("Hyprland", query_hyprland));
+        assert!(selects("XFCE", query_xfce));
+        assert!(selects("XFCE:labwc", query_xfce));
     }
 
     #[cfg(feature = "gnome-eval")]
@@ -334,7 +349,6 @@ mod tests {
     #[test]
     fn unknown_or_empty_desktop_probes_all() {
         assert!(compositor_for_desktop("").is_none());
-        assert!(compositor_for_desktop("XFCE").is_none());
         assert!(compositor_for_desktop("wayfire").is_none());
     }
 
