@@ -2,6 +2,7 @@
 Version   Changes
 --------  ----------------------------------------------------------------------
    0.?.?  Add short, intuitive aliases to commands, subcommands and arguments.
+          appnames now marks the currently active application in its list.
 
    0.4.1  Security (control socket & access control):
            - Peer UID verification: the macOS virtkbdd IPC client now calls
