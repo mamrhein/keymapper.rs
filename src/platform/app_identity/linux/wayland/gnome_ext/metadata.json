@@ -1,0 +1,8 @@
+{
+  "uuid": "local.keymapper.active-window",
+  "name": "Active Window D-Bus Bridge",
+  "description": "Provides active window metadata via D-Bus.",
+  "shell-version": ["45", "46", "47", "48", "49", "50", "51"],
+  "url": "",
+  "esm": true
+}

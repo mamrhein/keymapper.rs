@@ -11,23 +11,24 @@
 //!
 //! When `$XDG_CURRENT_DESKTOP` names a supported compositor, only that
 //! compositor is queried.  Otherwise all are probed in order: KDE (KWin),
-//! GNOME (behind the `gnome-eval` feature), COSMIC, then wlroots-based
-//! compositors, Hyprland, and finally the XFCE (labwc) foreign-toplevel
-//! query.  Each probe is a synchronous, blocking operation that connects,
-//! queries, and disconnects immediately.
+//! GNOME, COSMIC, then wlroots-based compositors, Hyprland, and finally the
+//! XFCE (labwc) foreign-toplevel query.  Each probe is a synchronous,
+//! blocking operation that connects, queries, and disconnects immediately.
 //!
-//! Wherever a compositor reports the active window's owning process (KDE,
-//! GNOME), the PID is resolved to the `.desktop` application id via
+//! Wherever a compositor reports the active window's owning process, the
+//! PID is resolved to the `.desktop` application id via
 //! [`super::apps::resolve_process_app_id`] — the same namespace
-//! [`super::apps::list_app_names`] produces.  The remaining backends return
-//! the app id / class the compositor itself reports for the active window.
+//! [`super::apps::list_app_names`] produces.  The remaining backends
+//! (including GNOME, whose shell extension resolves the window's owning
+//! application itself) return the app id / class the compositor itself
+//! reports for the active window.
 //! COSMIC has no D-Bus interface for this; it reports the active window
 //! through the `cosmic-toplevel-info` Wayland protocol extension instead
 //! (bound at protocol version 1 — see [`cosmic`]).
 //!
 //! Each compositor backend lives in its own submodule:
 //! - [`kde`] — KWin D-Bus query
-//! - [`gnome`] — GNOME Shell.Eval introspection
+//! - [`gnome`] — GNOME Shell extension D-Bus bridge
 //! - [`cosmic`] — cosmic-toplevel-info Wayland protocol
 //! - [`wlroots`] — sway/wlroots IPC socket query
 //! - [`hyprland`] — Hyprland control socket query
@@ -107,9 +108,8 @@ fn compositor_from_env() -> Option<fn() -> String> {
 /// Per the desktop-entry specification the variable may hold a
 /// colon-separated list of names (e.g. `GNOME:ubuntu`); the first known
 /// name wins and names are matched case-insensitively.  Returns `None`
-/// when no name matches a backend (an unknown desktop, or GNOME without
-/// the `gnome-eval` feature), which lets the caller fall back to probing
-/// every backend.
+/// when no name matches a backend (an unknown desktop), which lets the
+/// caller fall back to probing every backend.
 ///
 /// Split out from [`compositor_from_env`] so it can be tested without
 /// mutating the process environment.
