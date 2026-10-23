@@ -68,7 +68,7 @@ wayland-protocols-wlr = {
   ]
 }  # XFCE/labwc active-window query
 x11rb = "0.14"
-zbus = { version = "5", features = ["blocking"], optional = true }  # only for --features gnome-eval
+zbus = { version = "5", features = ["blocking"] }
 
 # macOS framework bindings
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -132,7 +132,6 @@ libc = "0.2"
 signal-hook = "0.4"
 
 [features]
-gnome-eval = ["zbus"]
 # Exposes the test-harness-only public surface — `platform::KarabinerClient`
 # and `platform::INJECTION_KEYBOARD_IDENTITY` (macOS), `platform::Key`
 # (Windows), and `keymap_core::logfmt::fmt_key_event` — that the `test-util`

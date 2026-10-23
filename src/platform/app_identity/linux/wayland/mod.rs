@@ -51,7 +51,6 @@ mod wlroots;
 mod xfce;
 
 use cosmic::query_cosmic;
-#[cfg(feature = "gnome-eval")]
 use gnome::query_gnome;
 use hyprland::query_hyprland;
 use kde::query_kde;
@@ -75,21 +74,10 @@ pub fn get_active_app_name() -> String {
         return "unknown".to_string();
     }
 
-    // Fallback: probe each compositor in priority order.  The GNOME backend
-    // is gated behind the `gnome-eval` feature because it runs JavaScript in
-    // the shell context via D-Bus `org.gnome.Shell.Eval`.
-    #[cfg(feature = "gnome-eval")]
+    // Fallback: probe each compositor in priority order.
     let candidates: &[fn() -> String] = &[
         query_kde,
         query_gnome,
-        query_cosmic,
-        query_wlroots,
-        query_hyprland,
-        query_xfce,
-    ];
-    #[cfg(not(feature = "gnome-eval"))]
-    let candidates: &[fn() -> String] = &[
-        query_kde,
         query_cosmic,
         query_wlroots,
         query_hyprland,
@@ -129,7 +117,6 @@ fn compositor_for_desktop(desktop: &str) -> Option<fn() -> String> {
     desktop.to_ascii_lowercase().split(':').find_map(|name| {
         let backend: fn() -> String = match name.trim() {
             "kde" => query_kde,
-            #[cfg(feature = "gnome-eval")]
             "gnome" => query_gnome,
             "cosmic" => query_cosmic,
             // Sway and niri speak the sway-compatible IPC protocol; the
@@ -260,11 +247,10 @@ fn find_json_string(value: &serde_json::Value, key: &str) -> Option<String> {
 mod tests {
     use std::{fs, ptr};
 
-    #[cfg(feature = "gnome-eval")]
-    use super::query_gnome;
     use super::{
         compositor_for_desktop, extract_json_field, find_wayland_socket,
-        query_cosmic, query_hyprland, query_kde, query_wlroots, query_xfce,
+        query_cosmic, query_gnome, query_hyprland, query_kde, query_wlroots,
+        query_xfce,
     };
 
     #[test]
@@ -316,26 +302,13 @@ mod tests {
         // Names are matched case-insensitively; these are the values the
         // respective sessions export.
         assert!(selects("KDE", query_kde));
+        assert!(selects("GNOME", query_gnome));
         assert!(selects("COSMIC", query_cosmic));
         assert!(selects("sway", query_wlroots));
         assert!(selects("niri", query_wlroots));
         assert!(selects("Hyprland", query_hyprland));
         assert!(selects("XFCE", query_xfce));
         assert!(selects("XFCE:labwc", query_xfce));
-    }
-
-    #[cfg(feature = "gnome-eval")]
-    #[test]
-    fn desktop_names_select_gnome_with_feature() {
-        assert!(selects("GNOME", query_gnome));
-    }
-
-    #[cfg(not(feature = "gnome-eval"))]
-    #[test]
-    fn gnome_without_feature_probes_all() {
-        // Without the gated backend there is nothing to select, so the
-        // caller falls back to probing every compositor.
-        assert!(compositor_for_desktop("GNOME").is_none());
     }
 
     #[test]

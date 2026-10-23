@@ -14,7 +14,6 @@
 //! PID and resolve it against the `.desktop` files.  The `wm_class` alone is
 //! not used because it is not reliably a `.desktop` application id.
 
-#[cfg(feature = "gnome-eval")]
 use super::super::apps;
 
 /// Query the active window on GNOME via the `org.gnome.Shell.Eval` D-Bus
@@ -22,7 +21,6 @@ use super::super::apps;
 ///
 /// This backend is gated behind the `gnome-eval` feature because it executes
 /// JavaScript in the GNOME Shell process context.
-#[cfg(feature = "gnome-eval")]
 pub(super) fn query_gnome() -> String {
     use zbus::blocking::Connection;
 
