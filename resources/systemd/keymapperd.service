@@ -23,6 +23,10 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 RuntimeDirectory=keymapperd
+# The control socket lives in this directory. systemd creates it 0755, which
+# would let other local users traverse toward the (0600) socket; 0700 matches
+# the mode the daemon itself applies when the directory is missing.
+RuntimeDirectoryMode=0700
 ReadWritePaths=%h/.cache/keymapperd %t/keymapperd
 DeviceAllow=/dev/uinput rw
 DeviceAllow=/dev/input/event* r
