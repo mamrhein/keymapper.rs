@@ -22,6 +22,7 @@ RestartSec=3
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
+RuntimeDirectory=keymapperd
 ReadWritePaths=%h/.cache/keymapperd %t/keymapperd
 DeviceAllow=/dev/uinput rw
 DeviceAllow=/dev/input/event* r
