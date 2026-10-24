@@ -9,14 +9,15 @@
 
 //! The unix (Linux + macOS) control endpoint: a per-user stream socket.
 //!
-//! The daemon binds `$XDG_RUNTIME_DIR/keymapperd.sock` (or a per-user cache
-//! directory when the runtime dir is unset) and serves one command per
-//! connection. The socket is the auth mechanism, so it is created `0600`
-//! and owned by the daemon's uid — the current user — meaning only that user
-//! can connect. The bind runs under a temporarily tightened `umask` so the
-//! socket is born owner-only, with no `bind`-to-`chmod` window; as defense
-//! in depth every accepted connection is additionally checked against the
-//! peer's kernel-reported credentials (see [`authorize_peer`]).
+//! The daemon binds `keymapperd.sock` below a `keymapperd` directory inside
+//! `$XDG_RUNTIME_DIR` (or below a per-user cache directory when the runtime
+//! dir is unset) and serves one command per connection. The socket is the auth
+//! mechanism, so it is created `0600` and owned by the daemon's uid — the
+//! current user — meaning only that user can connect. The bind runs under a
+//! temporarily tightened `umask` so the socket is born owner-only, with no
+//! `bind`-to-`chmod` window; as defense in depth every accepted connection is
+//! additionally checked against the peer's kernel-reported credentials (see
+//! [`authorize_peer`]).
 //!
 //! The cache-directory fallback may live below a world-writable base such
 //! as `/tmp`, where a local attacker could plant the endpoint directory and
@@ -90,10 +91,16 @@ pub(crate) struct UnixEndpoint;
 
 /// The control endpoint path.
 ///
-/// `$XDG_RUNTIME_DIR/keymapperd.sock` when the runtime dir is set and
-/// absolute (the normal case under a per-user systemd session); otherwise a
-/// per-user cache directory. Both the daemon and the CLI resolve this the same
-/// way from the same environment, so they always agree.
+/// `$XDG_RUNTIME_DIR/keymapperd/keymapperd.sock` when the runtime dir is set
+/// and absolute (the normal case under a per-user systemd session); otherwise
+/// `<cache-dir>/keymapperd/keymapperd.sock`. Both the daemon and the CLI
+/// resolve this the same way from the same environment, so they always agree.
+///
+/// The socket never sits directly in one of those bases: under the shipped
+/// unit `ProtectSystem=strict` renders `$XDG_RUNTIME_DIR` itself read-only and
+/// makes only the `RuntimeDirectory=keymapperd` subdirectory writable, so a
+/// bind one level up would fail with `EROFS`. Nesting in the app directory
+/// also keeps both branches shaped the same way.
 ///
 /// A relative or empty `XDG_RUNTIME_DIR` is rejected — it would silently
 /// re-root the socket into the CWD, where an attacker could plant a listening
@@ -102,7 +109,7 @@ fn socket_path() -> PathBuf {
     if let Some(rd) = std::env::var_os("XDG_RUNTIME_DIR") {
         let rd = PathBuf::from(rd);
         if !rd.as_os_str().is_empty() && rd.is_absolute() {
-            return rd.join(SOCKET_NAME);
+            return rd.join(APP_NAME).join(SOCKET_NAME);
         }
     }
     let base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
@@ -123,7 +130,7 @@ fn socket_path() -> PathBuf {
 ///
 /// A directory that does not exist yet is created with mode `0700`
 /// (`create_dir_all` would apply the process umask); a pre-existing one —
-/// e.g. a systemd `XDG_RUNTIME_DIR` — is left as it is.
+/// e.g. the unit's `RuntimeDirectory=` — is left as it is.
 fn prepare_socket_dir(parent: &Path, current_uid: u32) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
 
@@ -728,7 +735,7 @@ mod tests {
         assert_eq!(mode, 0o700);
     }
 
-    /// An existing directory we own (e.g. a systemd `XDG_RUNTIME_DIR`) is
+    /// An existing directory we own (e.g. the unit's `RuntimeDirectory=`) is
     /// used as-is; its mode must not be rewritten.
     #[test]
     fn socket_dir_keeps_mode_of_existing_dir() {
@@ -782,7 +789,8 @@ mod tests {
         assert!(path.is_absolute());
     }
 
-    /// An absolute `XDG_RUNTIME_DIR` is used directly (R3-9 happy path).
+    /// An absolute `XDG_RUNTIME_DIR` is used as the base, with the socket
+    /// nested in the app directory (R3-9 happy path).
     #[test]
     fn socket_path_uses_absolute_xdg_runtime_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -790,7 +798,36 @@ mod tests {
             std::env::set_var("XDG_RUNTIME_DIR", dir.path().to_str().unwrap());
         }
         let path = socket_path();
-        assert_eq!(path, dir.path().join(SOCKET_NAME));
+        assert_eq!(path, dir.path().join(APP_NAME).join(SOCKET_NAME));
+    }
+
+    /// The socket must not sit directly in the runtime dir. The shipped unit
+    /// sandboxes the daemon with `ProtectSystem=strict`, which mounts
+    /// `$XDG_RUNTIME_DIR` read-only and makes only the `RuntimeDirectory=`
+    /// subdirectory writable, so a socket one level up fails to bind with
+    /// `EROFS` and the control endpoint is silently lost. Simulate the sandbox
+    /// by stripping the write bit from the (otherwise valid) runtime dir: the
+    /// bind must still succeed inside the nested app directory.
+    #[test]
+    fn socket_binds_in_nested_dir_of_read_only_runtime_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = dir.path();
+        // systemd creates the runtime directory up front; the daemon must not
+        // need to create anything in its parent to reach it.
+        let nested = runtime.join(APP_NAME);
+        fs_err::create_dir(&nested).unwrap();
+        fs_err::set_permissions(runtime, Permissions::from_mode(0o500))
+            .unwrap();
+        unsafe {
+            std::env::set_var("XDG_RUNTIME_DIR", runtime.to_str().unwrap());
+        }
+        let path = socket_path();
+        assert_eq!(path, nested.join(SOCKET_NAME));
+        let bound = bind_at(&path);
+        // Restore the write bit so the fixture can clean the tree up again.
+        fs_err::set_permissions(runtime, Permissions::from_mode(0o700))
+            .unwrap();
+        bound.unwrap();
     }
 
     // -----------------------------------------------------------------------
