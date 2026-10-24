@@ -47,3 +47,18 @@ else
     echo "If the GNOME extension was installed, remove it with:" >&2
     echo "  gnome-extensions uninstall local.keymapper.active-window" >&2
 fi
+
+# Remove the KWin active-window script. Deliberately not guarded on the
+# current desktop session: leftovers should go away no matter where this
+# runs, and the script is idempotent and quiet when the file is absent.
+if [ -f "$SCRIPT_DIR/uninstall-kwin-script.sh" ]; then
+    if ! "$SCRIPT_DIR/uninstall-kwin-script.sh"; then
+        echo "Warning: KWin script removal failed." >&2
+        echo "Remove it manually with:" >&2
+        echo '  rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/keymapperd/kwin/active-window.js"' >&2
+    fi
+else
+    echo "Note: uninstall-kwin-script.sh not found near the script." >&2
+    echo "If the KWin script was installed, remove it manually with:" >&2
+    echo '  rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/keymapperd/kwin"' >&2
+fi

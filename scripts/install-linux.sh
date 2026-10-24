@@ -67,14 +67,26 @@ else
     echo "Check with: systemctl --user status keymapperd.service" >&2
 fi
 
-# On GNOME, install the Shell extension that exposes the focused window's
-# application id to the daemon. The daemon degrades gracefully without it,
-# so a failure here is only a warning.
+# Desktop-specific active-window detection helpers. Both are optional: the
+# daemon degrades gracefully without them, so a failure here is only a
+# warning.
 case "$(printf '%s' "${XDG_CURRENT_DESKTOP:-}" | tr '[:lower:]' '[:upper:]')" in
     *GNOME*)
+        # Install the GNOME Shell extension that exposes the focused
+        # window's application id to the daemon.
         if ! "$SCRIPT_DIR/install-gnome-ext.sh"; then
             echo "Warning: GNOME extension installation failed." >&2
             echo "Active-window detection on GNOME will be unavailable." >&2
+        fi
+        ;;
+    *KDE*)
+        # Install the KWin active-window script template. It lives outside
+        # the daemon sandbox so KWin can read it; detection falls back to
+        # the template embedded in the binary.
+        if ! "$SCRIPT_DIR/install-kwin-script.sh"; then
+            echo "Warning: KWin script installation failed." >&2
+            echo "Active-window detection on KDE will use the embedded" >&2
+            echo "script template instead." >&2
         fi
         ;;
 esac
