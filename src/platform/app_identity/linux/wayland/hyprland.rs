@@ -10,7 +10,7 @@
 //! Hyprland — control socket query.
 //!
 //! Hyprland exposes its IPC via a socket at:
-//! `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock`
+//! `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`
 //! Using `XDG_RUNTIME_DIR` (a per-user, mode-0700 directory) instead of
 //! `/tmp` prevents an attacker from pre-creating a spoofed socket path
 //! in a world-writable location.
@@ -37,13 +37,17 @@ pub(super) fn query_hyprland() -> String {
         _ => return String::new(),
     };
 
-    let socket = format!("{runtime_dir}/hypr/{signature}/.socket2.sock");
+    // `.socket.sock` is the command socket; `.socket2.sock` only streams
+    // events and never replies to requests.
+    let socket = format!("{runtime_dir}/hypr/{signature}/.socket.sock");
     if !std::path::Path::new(&socket).exists() {
         return String::new();
     }
 
     // Send the "j/activewindow" command to get JSON output about the
-    // active window.
+    // active window.  The command must not be newline-terminated: the
+    // compositor includes the trailing byte in the command name and
+    // replies "unknown request".
     let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
         Ok(s) => {
             s.set_read_timeout(Some(Duration::from_millis(50))).ok();
@@ -52,7 +56,7 @@ pub(super) fn query_hyprland() -> String {
         Err(_) => return String::new(),
     };
 
-    if stream.write_all(b"j/activewindow\n").is_err() {
+    if stream.write_all(b"j/activewindow").is_err() {
         return String::new();
     }
 
