@@ -1,4 +1,4 @@
-import Extension from "resource:///org/gnome/shell/extensions/extension.js";
+import { Extension } from "resource:///org/gnome/shell/extensions/extension.js";
 import Gio from "gi://Gio";
 import Shell from "gi://Shell";
 
