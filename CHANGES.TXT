@@ -1,8 +1,18 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
-   0.?.?  Add short, intuitive aliases to commands, subcommands and arguments.
-          appnames now marks the currently active application in its list.
+   0.5.0  Command line interface:
+           - Added short, intuitive aliases to commands, subcommands and
+             arguments.
+           - 'keymapper appnames' now marks the currently active application in
+             its list.
+          Wayland support (query active app):
+           - Replaced deprecated GNOME eval interface.
+           - Fixed KWin and hyprland support.
+           - Added support for XFCE/labwc.
+          Security:
+           - IPC peer verification unified across platforms.
+           - Several OS-specific hardening measures.
 
    0.4.1  Security (control socket & access control):
            - Peer UID verification: the macOS virtkbdd IPC client now calls
