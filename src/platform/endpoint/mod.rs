@@ -30,9 +30,8 @@
 //! unix socket is created owner-only (`0600`, under a tightened umask) and its
 //! parent directory validated, and every accepted peer is checked against the
 //! kernel-reported uid (`SO_PEERCRED` on Linux, the audit token via
-//! `LOCAL_PEERTOKEN` on macOS); the
-//! Windows named pipe carries an owner-only DACL. Reaching the endpoint is
-//! already proof of ownership.
+//! `LOCAL_PEERTOKEN` on macOS); the Windows named pipe carries an owner-only
+//! DACL. Reaching the endpoint is already proof of ownership.
 
 use std::io::{Read, Write};
 
@@ -57,11 +56,11 @@ pub(crate) type ConnectionHandler = fn(&mut dyn IoStream, u32) -> bool;
 
 /// Sliding-window rate limiter for control-socket connections.
 ///
-/// Tracks connection attempts per peer uid over a sliding window and
-/// rejects excess connections to prevent a single uid from flooding the
+/// Tracks connection attempts per peer identifier over a sliding window and
+/// rejects excess connections to prevent a single peer from flooding the
 /// single-threaded accept loop and denying service to legitimate CLI
-/// invocations (Finding 6). On Windows there is no uid concept, so all
-/// connections share the same bucket.
+/// invocations. On Unix the identifier is the peer uid; on Windows it is the
+/// peer PID, since there is no uid concept.
 pub(crate) struct RateLimiter {
     window: std::time::Duration,
     threshold: usize,
@@ -70,7 +69,7 @@ pub(crate) struct RateLimiter {
 
 impl RateLimiter {
     /// Create a limiter that allows at most *threshold* connections per
-    /// *window* per uid.
+    /// *window* per peer.
     pub(crate) fn new(window: std::time::Duration, threshold: usize) -> Self {
         Self {
             window,
@@ -80,7 +79,7 @@ impl RateLimiter {
     }
 
     /// Returns `true` if the connection is allowed, `false` if the
-    /// per-uid rate limit has been exceeded.  Old entries outside the
+    /// per-peer rate limit has been exceeded.  Old entries outside the
     /// window are pruned on every call, so the `Vec` stays bounded.
     pub(crate) fn check_and_record(&mut self, uid: u32) -> bool {
         let now = std::time::Instant::now();

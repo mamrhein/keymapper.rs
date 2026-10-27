@@ -36,7 +36,7 @@ enum Commands {
     ///
     /// Prints the canonical app name — the exact value to use in the `apps`
     /// field of your config.yaml — followed by a human-readable display name
-    /// where it differs.
+    /// where it differs. The active application is marked with a leading `*`.
     #[command(visible_alias = "apps")]
     Appnames,
 

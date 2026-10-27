@@ -1,6 +1,6 @@
 [package]
 name = "keymapper"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Cross-platform key-remapping daemon and cli utility for macOS, Linux, and Windows"
@@ -55,11 +55,17 @@ cosmic-protocols = {
   ]
 }  # COSMIC active-window query
 evdev = "0.13"
-kdotool = { version = "0.3", default-features = false }
-nix = { version = "0.31.3", features = ["event"] }
+serde_json = "1.0"  # compositor IPC reply parsing
 sysinfo = "0.39"  # process enumeration for `keymapper appnames`
 udev = "0.9"
 wayland-client = "0.31"
+wayland-protocols-wlr = {
+  version = "0.3.12",
+  default-features = false,
+  features = [
+    "client",
+  ]
+}  # XFCE/labwc active-window query
 x11rb = "0.14"
 zbus = { version = "5", features = ["blocking"] }
 

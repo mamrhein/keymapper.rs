@@ -187,14 +187,14 @@ The daemon exits with an error if no configuration file is found in any search l
 
 The document is a YAML sequence of rule groups. Each group has:
 
-| Field       | Required | Description                                                                                                             |
-| ----------- | -------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `name`      | No       | Human-readable label (ignored at runtime)                                                                               |
-| `apps`      | No       | List of application names (as printed by `keymapper appnames`) to scope the group. Omit or leave empty for global rules |
+| Field  | Required | Description                                                                                                             |
+| ------ | -------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `name` | No       | Human-readable label (ignored at runtime)                                                                               |
+| `apps` | No       | List of application names (as printed by `keymapper appnames`) to scope the group. Omit or leave empty for global rules |
 
->**Note:** `apps` scoping is a convenience, not a security boundary. Application names are resolved from the active window's title or process identity, which any same-session process can spoof. Do not use `apps` rules to enforce security policy (e.g. suppressing keys in password fields).
-| `keyboards` | No       | List of keyboard filters to scope the group. Omit or leave empty for all keyboards                                      |
-| `mappings`  | Yes      | Key-value pairs mapping triggers to outputs                                                                             |
+> **Note:** `apps` scoping is a convenience, not a security boundary. Application names are resolved from the active window's title or process identity, which any same-session process can spoof. Do not use `apps` rules to enforce security policy (e.g. suppressing keys in password fields).
+> | `keyboards` | No | List of keyboard filters to scope the group. Omit or leave empty for all keyboards |
+> | `mappings` | Yes | Key-value pairs mapping triggers to outputs |
 
 Groups are evaluated in definition order. Within each group, mappings are evaluated top-to-bottom; the first matching trigger wins.
 
@@ -202,7 +202,7 @@ Groups are evaluated in definition order. Within each group, mappings are evalua
 
 Groups can be scoped to specific keyboards with the `keyboards` field. Each filter is a mapping of one or more of `name`, `vendor`, `model`, and `port`; a keyboard matches when all provided fields match (case-insensitive), and multiple filters form an OR set. Omit `keyboards` or leave it empty to apply to all keyboards.
 
->**Note:** keyboard filtering relies on the platform's ability to identify the source device of each key event. On macOS this is not possible (CGEvents carry no source device), so the filter is a no-op and all groups apply to all keyboards.
+> **Note:** keyboard filtering relies on the platform's ability to identify the source device of each key event. On macOS this is not possible (CGEvents carry no source device), so the filter is a no-op and all groups apply to all keyboards.
 
 ```yaml
 # Only apply this group when the event comes from the specified keyboard(s)
@@ -300,13 +300,13 @@ The following aliases resolve to the same platform key:
 
 ### `keymapper appnames`
 
-List every application that owns a visible window along with the canonical name keymapperd uses for matching. Where a human-readable display name differs, it is printed in a second column. Use the first-column value in the `apps` field of your config.
+List every application that owns a visible window along with the canonical name keymapperd uses for matching. Where a human-readable display name differs, it is printed in a second column. Use the first-column value in the `apps` field of your config. The application currently in the foreground is marked with a leading `*` in a separate marker column, so the first column stays exactly copy-pasteable.
 
 ```
-Arc
-iTerm2
-Keyboard Maestro Engine
-Activity Monitor
+* Arc
+  iTerm2
+  Keyboard Maestro Engine
+  Activity Monitor
 ```
 
 Matching is case-insensitive. On Windows, the names are the main executable file names of the window-owning processes (e.g. `WindowsTerminalHost.exe`), with the executable's `FileDescription` printed as a display alias where it differs. On Linux, the names are `.desktop` application ids (e.g. `org.mozilla.firefox`), resolved uniformly across X11 and Wayland.
@@ -341,12 +341,12 @@ Daemon process management.
 
 All subcommands manage keymapperd through the platform service manager: `launchctl` on macOS, `systemctl --user` on Linux, or a direct spawn on Windows.
 
-| Subcommand | Description                                   |
-| ---------- | --------------------------------------------- |
-| `status`   | Check whether keymapperd is running           |
-| `start`    | Start keymapperd if it is not already running |
-| `stop`     | Stop keymapperd if it is running              |
-| `restart`  | Restart keymapperd (stop then start)          |
+| Subcommand          | Description                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------- |
+| `status`            | Check whether keymapperd is running                                                                  |
+| `start`             | Start keymapperd if it is not already running                                                        |
+| `stop`              | Stop keymapperd if it is running                                                                     |
+| `restart`           | Restart keymapperd (stop then start)                                                                 |
 | `log --level LEVEL` | Change the log level of a running daemon without restart (at `debug`/`trace`, keystrokes are logged) |
 
 ## Hot-reload
@@ -357,7 +357,7 @@ Edit and save your `config.yaml` while the daemon is running. Changes take effec
 
 **macOS — daemon not capturing keys:** keymapperd needs the Input Monitoring and Accessibility privacy permissions (System Settings > Privacy & Security). Verify both processes are running: `keymapper daemon status`. If keymapperd is not loaded, reinstall it: `sudo ./install-macos.sh`.
 
->**Note:** secure-input password fields disable the CGEvent tap, which silently lifts key remapping for that field. This is an operating-system behavior, not a configuration option; mapped keys will pass through unremapped during password entry.
+> **Note:** secure-input password fields disable the CGEvent tap, which silently lifts key remapping for that field. This is an operating-system behavior, not a configuration option; mapped keys will pass through unremapped during password entry.
 
 **macOS — driver not loaded:** check that the Karabiner DriverKit extension is enabled in System Settings > General > Login Items & Extensions > Driver Extensions. No reboot is required. See [macos-architecture.md](docs/macos-architecture.md) for full troubleshooting.
 
@@ -391,4 +391,4 @@ sudo usermod -aG input $USER
 
 **macOS virtkbdd IPC:** the root-owned `virtkbdd` daemon emits mapped keys through the Karabiner DriverKit virtual HID keyboard, which the OS treats as physical input. It accepts IPC connections only from the current console user (verified via the audit token, not `getpeereid(2)`, so a `setuid`-root squatter cannot pass an euid-only gate). Per-uid connection rate limiting and per-connection frame-rate limiting prevent flooding of the emit path. The connecting process's PID and executable path are logged for operational visibility.
 
->**Residual risk (macOS, no code signing):** without code-signing enforcement, the virtkbdd IPC server cannot cryptographically verify that a connecting process is genuinely `keymapperd` versus any other same-uid binary. Rate limiting and PID/path logging raise the cost of abuse but do not eliminate the gap — any process running as the console user can still open a connection and emit hardware-level keystrokes.
+> **Residual risk (macOS, no code signing):** without code-signing enforcement, the virtkbdd IPC server cannot cryptographically verify that a connecting process is genuinely `keymapperd` versus any other same-uid binary. Rate limiting and PID/path logging raise the cost of abuse but do not eliminate the gap — any process running as the console user can still open a connection and emit hardware-level keystrokes.

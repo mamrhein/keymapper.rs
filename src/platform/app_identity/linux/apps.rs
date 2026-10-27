@@ -78,6 +78,24 @@ fn resolve_exe_name(pid: u32) -> Option<String> {
     None
 }
 
+/// Check whether the process at `pid` is owned by the same uid as the
+/// current process, by inspecting the owner of `/proc/<pid>`.
+///
+/// This guards against forged PIDs (e.g., a malicious X11 client setting
+/// `_NET_WM_PID` to a victim process) before resolving them to an
+/// application id.
+///
+/// Returns `false` when `/proc/<pid>` cannot be read (e.g., the process has
+/// exited) or is owned by a different uid.
+pub(crate) fn proc_owner_is_self(pid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match std::fs::metadata(format!("/proc/{pid}")) {
+        Ok(metadata) => metadata.uid() == unsafe { libc::getuid() },
+        Err(_) => false,
+    }
+}
+
 /// Resolve the `.desktop` application id for a process by matching its
 /// executable name against `.desktop` entries, falling back to matching its
 /// command line against the `Exec` paths.
@@ -129,4 +147,22 @@ pub fn list_app_names() -> Vec<String> {
     app_ids.sort();
     app_ids.dedup();
     app_ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proc_owner_is_self;
+
+    #[test]
+    fn proc_owner_is_self_for_current_process() {
+        // The current process's /proc/<pid> is owned by our own uid.
+        let pid = std::process::id();
+        assert!(proc_owner_is_self(pid));
+    }
+
+    #[test]
+    fn proc_owner_is_self_for_nonexistent_pid() {
+        // A pid that cannot exist should not be trusted.
+        assert!(!proc_owner_is_self(u32::MAX));
+    }
 }

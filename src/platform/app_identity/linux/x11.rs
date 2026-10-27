@@ -64,7 +64,14 @@ pub fn get_active_app_name() -> String {
         return "unknown".to_string();
     };
 
-    // Step 4: Resolve the process to the same .desktop application id
+    // Step 4: Verify that /proc/<pid> is owned by the current uid before
+    // trusting the PID — a malicious X11 client can set _NET_WM_PID to any
+    // arbitrary value, so we must reject PIDs belonging to other users.
+    if !super::apps::proc_owner_is_self(pid) {
+        return "unknown".to_string();
+    }
+
+    // Step 5: Resolve the process to the same .desktop application id
     // namespace as list_app_names.
     super::apps::resolve_process_app_id(pid)
         .unwrap_or_else(|| "unknown".to_string())

@@ -3,8 +3,9 @@
 # Installs the keymapperd systemd user service on Linux.
 #
 # Copies the unit template to ~/.config/systemd/user/, resolves the binary
-# path, enables and starts the service. Idempotent — safe to run multiple
-# times.
+# path, enables and starts the service. On GNOME, additionally installs the
+# Shell extension via scripts/install-gnome-ext.sh. Idempotent — safe to run
+# multiple times.
 #
 # Usage: scripts/install-linux.sh [binary_path]
 #   binary_path — absolute path to keymapperd (default: found via `which`).
@@ -65,3 +66,27 @@ else
     echo "Warning: service was installed but does not appear to be running." >&2
     echo "Check with: systemctl --user status keymapperd.service" >&2
 fi
+
+# Desktop-specific active-window detection helpers. Both are optional: the
+# daemon degrades gracefully without them, so a failure here is only a
+# warning.
+case "$(printf '%s' "${XDG_CURRENT_DESKTOP:-}" | tr '[:lower:]' '[:upper:]')" in
+    *GNOME*)
+        # Install the GNOME Shell extension that exposes the focused
+        # window's application id to the daemon.
+        if ! "$SCRIPT_DIR/install-gnome-ext.sh"; then
+            echo "Warning: GNOME extension installation failed." >&2
+            echo "Active-window detection on GNOME will be unavailable." >&2
+        fi
+        ;;
+    *KDE*)
+        # Install the KWin active-window script template. It lives outside
+        # the daemon sandbox so KWin can read it; detection falls back to
+        # the template embedded in the binary.
+        if ! "$SCRIPT_DIR/install-kwin-script.sh"; then
+            echo "Warning: KWin script installation failed." >&2
+            echo "Active-window detection on KDE will use the embedded" >&2
+            echo "script template instead." >&2
+        fi
+        ;;
+esac

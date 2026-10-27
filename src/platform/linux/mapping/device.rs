@@ -31,7 +31,7 @@ use std::{
 };
 
 use evdev::{Device, EventType, InputEvent, uinput::VirtualDevice};
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 
 use super::{LinuxEmitter, emit_actions};
 use crate::{
@@ -627,13 +627,14 @@ pub(super) fn native_release_window(
         );
         return;
     }
-    debug!(
+    info!(
         "Linux: ungrabbed {} for {timeout:?} so grab-time releases flow \
          natively",
         managed.path
     );
 
-    let deadline = Instant::now() + timeout;
+    let window_start = Instant::now();
+    let deadline = window_start + timeout;
     loop {
         // A held set that became empty is a full native release: a short
         // grace so the compositor's read loop picks the release up before
@@ -679,6 +680,12 @@ pub(super) fn native_release_window(
             }
         }
     }
+
+    let elapsed = window_start.elapsed();
+    info!(
+        "Linux: native release window on {} completed after {elapsed:?}",
+        managed.path
+    );
 
     drain_pending_events(&mut managed.device, &managed.path);
     if let Err(e) = managed.device.grab() {
