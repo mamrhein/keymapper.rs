@@ -1,6 +1,8 @@
 --------  ----------------------------------------------------------------------
 Version   Changes
 --------  ----------------------------------------------------------------------
+   0.5.1  Fixed launchctl path and real uid extraction on macOS
+
    0.5.0  Command line interface:
            - Added short, intuitive aliases to commands, subcommands and
              arguments.
