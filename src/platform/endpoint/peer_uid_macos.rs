@@ -37,14 +37,20 @@ use std::{
 struct AuditToken([u32; 8]);
 
 impl AuditToken {
-    /// The audit user ID — the immutable real identity of the peer's login
-    /// session. It is fixed at login and cannot be cleared by a `setuid`
-    /// transition, which is exactly what distinguishes a genuine root daemon
-    /// from a setuid-root attacker (R3-14).
+    /// The real user ID of the peer (audit-token slot `[3]`).
+    ///
+    /// A `setuid` transition does not change the real uid: a setuid-root
+    /// attacker keeps its invoking uid here while only the effective uid
+    /// becomes 0, so the `real_uid == 0 && effective_uid == 0` policy still
+    /// rejects it (R3-14). We read the real uid rather than the audit uid
+    /// (slot `[0]`) on purpose: a launchd-spawned LaunchDaemon has no login
+    /// session, so its audit uid is `AU_AUDITUID_NONE` (`0xFFFFFFFF`), and
+    /// gating on the audit uid would reject a genuine root daemon such as
+    /// virtkbdd.
     fn real_uid(&self) -> libc::uid_t {
-        self.0[0] as libc::uid_t
+        self.0[3] as libc::uid_t
     }
-    /// The effective user ID of the peer.
+    /// The effective user ID of the peer (audit-token slot `[1]`).
     fn effective_uid(&self) -> libc::uid_t {
         self.0[1] as libc::uid_t
     }
@@ -58,10 +64,10 @@ impl AuditToken {
 ///
 /// On macOS both fields come from the peer's audit token (via
 /// `LOCAL_PEERTOKEN`), which is authoritative and cannot be forged by the
-/// peer. `real_uid` is the audit user ID: for a normal process it equals the
-/// real uid, and because it is frozen at login it stays non-zero for a process
-/// that merely escalated to root via `setuid` — so the `real_uid == 0 &&
-/// effective_uid == 0` policy correctly rejects such peers.
+/// peer. `real_uid` is the real uid (audit-token slot `[3]`): a process that
+/// merely escalated to root via `setuid` keeps its invoking real uid, so the
+/// `real_uid == 0 && effective_uid == 0` policy correctly rejects it, while a
+/// genuine root daemon (real and effective uid both 0) is admitted.
 ///
 /// `peer_pid` is the process ID of the connecting peer at connection time,
 /// extracted from the audit token. It is informational only (used for logging
@@ -77,8 +83,8 @@ pub(crate) struct PeerCreds {
 /// Fetch the peer's credentials from its audit token.
 ///
 /// `getpeereid(2)` on macOS 27+ returns only the *effective* uid (written to
-/// offset 0), so a setuid-root peer — effective uid 0 but a non-zero
-/// real/audit identity — would be admitted through the old `peer == 0` branch.
+/// offset 0), so a setuid-root peer — effective uid 0 but a non-zero real uid
+/// — would be admitted through the old `peer == 0` branch.
 /// The audit token exposes both identities, which
 /// `authorize_peer`/`verify_server_uid` require to be consistent. A lookup
 /// failure is propagated so the caller fails closed: a peer whose
@@ -171,6 +177,25 @@ mod tests {
             Some(unsafe { libc::getpid() }),
             "peer pid should match getpid"
         );
+    }
+
+    /// The audit-token field slots are pinned against the real `libbsm`
+    /// accessors (`audit_token_to_{auid,euid,ruid,pid}`), which place `auid`
+    /// at `[0]`, `euid` at `[1]`, `ruid` at `[3]` and `pid` at `[5]`. A
+    /// `socketpair` cannot distinguish these slots (a self-peer has
+    /// `auid == euid == ruid`), so this synthetic token is what actually pins
+    /// `real_uid` to the real-uid slot and guards against the `auid`/`ruid`
+    /// mix-up that rejected launchd-spawned root daemons.
+    #[test]
+    fn audit_token_field_slots_match_libbsm() {
+        let token = AuditToken([100, 101, 102, 103, 104, 105, 106, 107]);
+        assert_eq!(
+            token.real_uid(),
+            103,
+            "real uid must read the ruid slot [3], not the auid slot [0]"
+        );
+        assert_eq!(token.effective_uid(), 101, "effective uid must read [1]");
+        assert_eq!(token.pid(), 105, "pid must read [5]");
     }
 
     /// `peer_proc_path` resolves this process's own executable path.

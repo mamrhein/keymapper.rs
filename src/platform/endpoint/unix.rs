@@ -270,11 +270,11 @@ fn serve_with_timeout(
 /// and effective uid to *agree* — never across a `setuid` boundary:
 ///
 /// - true root: `real_uid == 0 && effective_uid == 0`. On macOS the real uid
-///   is the audit user id (`auid`), which is frozen at login and cannot be
-///   cleared by a `setuid` transition, so a setuid-root attacker (effective
-///   uid 0 but a non-zero audit/real identity) is rejected here. On Linux both
-///   fields are equal (`SO_PEERCRED`), so this collapses to the previous `peer
-///   == 0`.
+///   is the audit token's real-uid slot, which a `setuid` transition does not
+///   change, so a setuid-root attacker (effective uid 0 but a non-zero real
+///   uid) is rejected here, while a launchd-spawned root daemon (real and
+///   effective uid both 0) is admitted. On Linux both fields are equal
+///   (`SO_PEERCRED`), so this collapses to the previous `peer == 0`.
 /// - same identity: `real_uid == current_uid && effective_uid == current_uid`,
 ///   i.e. an un-privileged process that is neither root nor escalated.
 ///
