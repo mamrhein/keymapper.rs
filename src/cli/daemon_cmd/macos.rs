@@ -54,8 +54,13 @@ fn plist_path() -> String {
 /// Absolute paths for every shell-out, so an attacker-influenced `PATH`
 /// cannot substitute a trojan `sudo`/`launchctl`/`pgrep` that runs with the
 /// invoking privileges — up to root via `sudo`.
+///
+/// Note the split directories: `launchctl` ships in `/bin` (it is part of the
+/// launchd project, which lives alongside `launchd` itself), while `sudo` and
+/// `pgrep` ship in `/usr/bin`. Pinning `launchctl` to `/usr/bin` would fail
+/// with ENOENT on every macOS release.
 const SUDO_PATH: &str = "/usr/bin/sudo";
-const LAUNCHCTL_PATH: &str = "/usr/bin/launchctl";
+const LAUNCHCTL_PATH: &str = "/bin/launchctl";
 const PGREP_PATH: &str = "/usr/bin/pgrep";
 
 /// The path to the virtkbdd plist in the system LaunchDaemons directory.
