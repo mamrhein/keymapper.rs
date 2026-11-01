@@ -1,6 +1,6 @@
 # keymapper
 
-Cross-platform key-remapping daemon and CLI utility for macOS, Linux, and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, hot-reload, and macros.
+Cross-platform key-remapping daemon and CLI utility for Linux, macOS and Windows. Intercepts keyboard events and remaps them based on a YAML configuration file, with per-application scoping, chord (modifier + key) triggers and outputs, hot-reload, and macros.
 
 The project ships three binaries:
 
